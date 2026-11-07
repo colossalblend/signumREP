@@ -623,6 +623,24 @@ fn ingest_cookies(session: &mut StoreSession, headers: &HeaderMap) {
     }
 }
 
+/// Recover the DSID when the authenticate reply omits `dsPersonId` from its
+/// body. Apple's current sign-in returns the DSID only in the account cookie
+/// names it sets — `mz_at0-<dsid>`, `mz_at_ssl-<dsid>` — so the id trails the
+/// last dash. Any all-digit suffix of a `mz_at…` cookie is the DSID.
+fn dsid_from_cookies(cookies: &HashMap<String, String>) -> Option<String> {
+    cookies.keys().find_map(|k| {
+        if !k.starts_with("mz_at") {
+            return None;
+        }
+        let suffix = k.rsplit('-').next()?;
+        if suffix.len() >= 6 && suffix.chars().all(|c| c.is_ascii_digit()) {
+            Some(suffix.to_string())
+        } else {
+            None
+        }
+    })
+}
+
 fn resolve_url(base: &str, loc: &str) -> String {
     let loc = loc.trim();
     if loc.starts_with("http://") || loc.starts_with("https://") {
@@ -788,11 +806,25 @@ async fn post_plist(
     // Purchase requests are SAP-signed once; the body never changes across
     // pod redirects (Apple expects the original plist bytes, signature incl.).
     // Metadata requests skip the signature: sapsigner costs ~6 s per run.
-    let action_signature = if with_token && sap_sign {
+    // The sign-in request is signed too (with_token is false there): since the
+    // Configurator flow changed, Apple rejects an unsigned authenticate with a
+    // 204/404/301, exactly as the working ipatool fork notes. For the login
+    // request signing is best-effort — if the SAP helper is unavailable we fall
+    // back to sending it unsigned so the user still sees Apple's real error
+    // instead of a "signer missing" failure.
+    let action_signature = if sap_sign {
         let body_for_sign = body.clone();
-        Some(tokio::task::spawn_blocking(move || sap_sign_body(&body_for_sign))
+        let signed = tokio::task::spawn_blocking(move || sap_sign_body(&body_for_sign))
             .await
-            .map_err(|e| e.to_string())??)
+            .map_err(|e| e.to_string())?;
+        match signed {
+            Ok(sig) => Some(sig),
+            Err(e) if !with_token => {
+                store_debug(&format!("auth sap-sign skipped: {e}"));
+                None
+            }
+            Err(e) => return Err(e),
+        }
     } else {
         None
     };
@@ -976,7 +1008,7 @@ async fn authenticate_locked(
                 &ani,
                 false,
                 "application/x-www-form-urlencoded",
-                false,
+                true,
             )
             .await;
             let plist = match result {
@@ -999,10 +1031,23 @@ async fn authenticate_locked(
             if let Some(token) = dict_str(dict, "passwordToken") {
                 session.password_token = token;
             }
+            // The current sign-in reply carries passwordToken but often no
+            // dsPersonId in the body; Apple sends the DSID in X-Dsid and in the
+            // mz_at… cookie names instead. Without it is_ready() stays false and
+            // a valid login was reported as rejected.
             session.ds_person_id = dict_str(dict, "dsPersonId")
                 .or_else(|| {
                     nested_dict(dict, "accountInfo").and_then(|a| dict_str(a, "dsPersonId"))
                 })
+                .or_else(|| {
+                    plist
+                        .headers
+                        .get("x-dsid")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                })
+                .or_else(|| dsid_from_cookies(&session.cookies))
                 .unwrap_or_default();
             if session.is_ready() {
                 clear_auth_failure(&email);
@@ -2403,6 +2448,24 @@ pub async fn version_min_ios_batch(
 #[cfg(test)]
 mod min_ios_tests {
     use super::*;
+
+    #[test]
+    fn dsid_recovered_from_account_cookie_names() {
+        let mut cookies = HashMap::new();
+        cookies.insert("itspod".to_string(), "25".to_string());
+        assert_eq!(dsid_from_cookies(&cookies), None);
+        cookies.insert("mz_at_ssl-12345678901".to_string(), "x".to_string());
+        assert_eq!(dsid_from_cookies(&cookies), Some("12345678901".into()));
+
+        let mut other = HashMap::new();
+        other.insert("mz_at0-98765432".to_string(), "x".to_string());
+        assert_eq!(dsid_from_cookies(&other), Some("98765432".into()));
+
+        let mut junk = HashMap::new();
+        junk.insert("mz_at0-abc".to_string(), "x".to_string());
+        junk.insert("mz_at0-123".to_string(), "x".to_string());
+        assert_eq!(dsid_from_cookies(&junk), None);
+    }
 
     #[test]
     fn hardware_identity_rejects_placeholder_and_multicast_addresses() {
