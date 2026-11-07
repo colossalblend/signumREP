@@ -78,8 +78,8 @@ jobs:
           hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
           trap 'hdiutil detach "$mount"' EXIT
           app="$mount/Signum.app"
-          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")" = 1.2.0
-          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$app/Contents/Info.plist")" = 40
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")" = 1.2.1
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$app/Contents/Info.plist")" = 41
           lipo "$app/Contents/MacOS/signum" -verify_arch x86_64 arm64
           test -x "$app/Contents/Resources/resources/apple-tools/macos-arm64/v5/ipatool"
           test -x "$app/Contents/Resources/resources/apple-tools/macos-x64/v5/ipatool"
@@ -97,9 +97,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          gh release view macos-b40 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create macos-b40 --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" --title "Signum 1.2.0 build 40 macOS" \
+          gh release view macos-b41 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create macos-b41 --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "Signum 1.2.1 build 41 macOS" \
             --notes "Universal Intel and Apple Silicon DMG; verified in CI." --draft
-          gh release upload macos-b40 --clobber \
+          gh release upload macos-b41 --clobber \
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg \
             macos-sha256.txt
