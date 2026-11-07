@@ -1,0 +1,742 @@
+{
+  "regions": [
+    {
+      "code": "AUS",
+      "name": "Австралия",
+      "addresses": [
+        {
+          "street": "1 Macquarie Place",
+          "city": "Sydney",
+          "postal": "2000",
+          "state": "NSW",
+          "phoneArea": "2",
+          "phoneNumber": "92507000"
+        }
+      ]
+    },
+    {
+      "code": "AZE",
+      "name": "Азербайджан",
+      "addresses": [
+        {
+          "street": "Nizami Street 203",
+          "city": "Baku",
+          "postal": "AZ1000",
+          "phoneArea": "12",
+          "phoneNumber": "4930000"
+        },
+        {
+          "street": "Neftchilar Avenue 26A",
+          "city": "Baku",
+          "postal": "AZ1000",
+          "phoneArea": "12",
+          "phoneNumber": "4040000"
+        }
+      ]
+    },
+    {
+      "code": "ALB",
+      "name": "Албания",
+      "addresses": [
+        {
+          "street": "Bulevardi Deshmoret e Kombit 1",
+          "city": "Tirana",
+          "postal": "1001",
+          "phoneArea": "4",
+          "phoneNumber": "2230000"
+        }
+      ]
+    },
+    {
+      "code": "ARG",
+      "name": "Аргентина",
+      "addresses": [
+        {
+          "street": "Avenida 9 de Julio 1925",
+          "city": "Buenos Aires",
+          "postal": "C1073",
+          "phoneArea": "11",
+          "phoneNumber": "43790000"
+        }
+      ]
+    },
+    {
+      "code": "ARM",
+      "name": "Армения",
+      "addresses": [
+        {
+          "street": "Northern Avenue 1",
+          "city": "Yerevan",
+          "postal": "0001",
+          "phoneArea": "10",
+          "phoneNumber": "539000"
+        },
+        {
+          "street": "Mashtots Avenue 15",
+          "city": "Yerevan",
+          "postal": "0002",
+          "phoneArea": "10",
+          "phoneNumber": "500500"
+        }
+      ]
+    },
+    {
+      "code": "BLR",
+      "name": "Беларусь",
+      "addresses": [
+        {
+          "street": "Nezavisimosti Avenue 15",
+          "city": "Minsk",
+          "postal": "220030",
+          "phoneArea": "17",
+          "phoneNumber": "2290001"
+        }
+      ]
+    },
+    {
+      "code": "BRA",
+      "name": "Бразилия",
+      "addresses": [
+        {
+          "street": "Avenida Paulista 1000",
+          "city": "Sao Paulo",
+          "postal": "01310-100",
+          "state": "SP",
+          "phoneArea": "11",
+          "phoneNumber": "32510001"
+        }
+      ]
+    },
+    {
+      "code": "GBR",
+      "name": "Великобритания",
+      "addresses": [
+        {
+          "street": "221B Baker Street",
+          "city": "London",
+          "postal": "NW1 6XE",
+          "county": "Greater London",
+          "phoneArea": "20",
+          "phoneNumber": "79460001"
+        }
+      ],
+      "cardOnly": true
+    },
+    {
+      "code": "VNM",
+      "name": "Вьетнам",
+      "addresses": [
+        {
+          "street": "Le Duan 2",
+          "city": "Ho Chi Minh City",
+          "postal": "700000",
+          "phoneArea": "28",
+          "phoneNumber": "38220000"
+        }
+      ]
+    },
+    {
+      "code": "HKG",
+      "name": "Гонконг",
+      "addresses": [
+        {
+          "street": "Queensway 1",
+          "city": "Hong Kong",
+          "postal": "00000",
+          "phoneArea": "852",
+          "phoneNumber": "25228888"
+        }
+      ]
+    },
+    {
+      "code": "GEO",
+      "name": "Грузия",
+      "addresses": [
+        {
+          "street": "Rustaveli Avenue 12",
+          "city": "Tbilisi",
+          "postal": "0108",
+          "phoneArea": "32",
+          "phoneNumber": "2990000"
+        },
+        {
+          "street": "Chavchavadze Avenue 37",
+          "city": "Tbilisi",
+          "postal": "0179",
+          "phoneArea": "32",
+          "phoneNumber": "2250000"
+        }
+      ]
+    },
+    {
+      "code": "EGY",
+      "name": "Египет",
+      "addresses": [
+        {
+          "street": "Tahrir Square 1",
+          "city": "Cairo",
+          "postal": "11511",
+          "phoneArea": "2",
+          "phoneNumber": "25780000"
+        }
+      ]
+    },
+    {
+      "code": "IND",
+      "name": "Индия",
+      "addresses": [
+        {
+          "street": "MG Road 1",
+          "city": "Bengaluru",
+          "postal": "560001",
+          "state": "KA",
+          "phoneArea": "80",
+          "phoneNumber": "25580000"
+        }
+      ]
+    },
+    {
+      "code": "IDN",
+      "name": "Индонезия",
+      "addresses": [
+        {
+          "street": "Jalan Jenderal Sudirman 52-53",
+          "city": "Jakarta",
+          "postal": "12190",
+          "phoneArea": "21",
+          "phoneNumber": "25540000"
+        }
+      ]
+    },
+    {
+      "code": "KAZ",
+      "name": "Казахстан",
+      "addresses": [
+        {
+          "street": "Dostyk Avenue 38",
+          "city": "Almaty",
+          "postal": "050010",
+          "phoneArea": "727",
+          "phoneNumber": "2588888"
+        },
+        {
+          "street": "Kabanbay Batyr 53",
+          "city": "Astana",
+          "postal": "010000",
+          "phoneArea": "717",
+          "phoneNumber": "2700000"
+        }
+      ]
+    },
+    {
+      "code": "CAN",
+      "name": "Канада",
+      "addresses": [
+        {
+          "street": "100 Queen Street West",
+          "city": "Toronto",
+          "postal": "M5H 2N2",
+          "state": "ON",
+          "phoneArea": "416",
+          "phoneNumber": "3922486"
+        },
+        {
+          "street": "800 Burrard Street",
+          "city": "Vancouver",
+          "postal": "V6Z 2V8",
+          "state": "BC",
+          "phoneArea": "604",
+          "phoneNumber": "8737000"
+        }
+      ]
+    },
+    {
+      "code": "KEN",
+      "name": "Кения",
+      "addresses": [
+        {
+          "street": "Kenyatta Avenue 1",
+          "city": "Nairobi",
+          "postal": "00100",
+          "phoneArea": "20",
+          "phoneNumber": "2221000"
+        }
+      ]
+    },
+    {
+      "code": "KGZ",
+      "name": "Киргизия",
+      "addresses": [
+        {
+          "street": "Chuy Avenue 114",
+          "city": "Bishkek",
+          "postal": "720040",
+          "phoneArea": "312",
+          "phoneNumber": "661000"
+        },
+        {
+          "street": "Manas Avenue 40",
+          "city": "Bishkek",
+          "postal": "720001",
+          "phoneArea": "312",
+          "phoneNumber": "620000"
+        }
+      ]
+    },
+    {
+      "code": "CHN",
+      "name": "Китай",
+      "addresses": [
+        {
+          "street": "1 Changan Avenue",
+          "city": "Dongcheng",
+          "postal": "100006",
+          "state": "Beijing",
+          "phoneArea": "10",
+          "phoneNumber": "65130001"
+        }
+      ]
+    },
+    {
+      "code": "COL",
+      "name": "Колумбия",
+      "addresses": [
+        {
+          "street": "Carrera 7 71-21",
+          "city": "Bogota",
+          "postal": "110231",
+          "phoneArea": "1",
+          "phoneNumber": "6000000"
+        }
+      ]
+    },
+    {
+      "code": "MYS",
+      "name": "Малайзия",
+      "addresses": [
+        {
+          "street": "Jalan Ampang 1",
+          "city": "Kuala Lumpur",
+          "postal": "50450",
+          "phoneArea": "3",
+          "phoneNumber": "21610000"
+        }
+      ]
+    },
+    {
+      "code": "MEX",
+      "name": "Мексика",
+      "addresses": [
+        {
+          "street": "Paseo de la Reforma 222",
+          "city": "Mexico City",
+          "postal": "06600",
+          "phoneArea": "55",
+          "phoneNumber": "52000000"
+        },
+        {
+          "street": "Avenida Insurgentes Sur 1602",
+          "city": "Mexico City",
+          "postal": "03940",
+          "phoneArea": "55",
+          "phoneNumber": "56000000"
+        }
+      ]
+    },
+    {
+      "code": "MDA",
+      "name": "Молдова",
+      "addresses": [
+        {
+          "street": "Stefan cel Mare 1",
+          "city": "Chisinau",
+          "postal": "MD-2001",
+          "phoneArea": "22",
+          "phoneNumber": "250000"
+        }
+      ]
+    },
+    {
+      "code": "MNG",
+      "name": "Монголия",
+      "addresses": [
+        {
+          "street": "Peace Avenue 17",
+          "city": "Ulaanbaatar",
+          "postal": "14200",
+          "phoneArea": "11",
+          "phoneNumber": "310000"
+        }
+      ]
+    },
+    {
+      "code": "NGA",
+      "name": "Нигерия",
+      "addresses": [
+        {
+          "street": "Adeola Odeku Street 1",
+          "city": "Lagos",
+          "postal": "101241",
+          "phoneArea": "1",
+          "phoneNumber": "2700000"
+        }
+      ]
+    },
+    {
+      "code": "NZL",
+      "name": "Новая Зеландия",
+      "addresses": [
+        {
+          "street": "Queen Street 188",
+          "city": "Auckland",
+          "postal": "1010",
+          "phoneArea": "9",
+          "phoneNumber": "3077000"
+        }
+      ]
+    },
+    {
+      "code": "ARE",
+      "name": "ОАЭ",
+      "addresses": [
+        {
+          "street": "Sheikh Zayed Road 1",
+          "city": "Dubai",
+          "postal": "00000",
+          "phoneArea": "4",
+          "phoneNumber": "3010001"
+        }
+      ]
+    },
+    {
+      "code": "PAN",
+      "name": "Панама",
+      "addresses": [
+        {
+          "street": "Calle 50",
+          "city": "Panama City",
+          "postal": "0801",
+          "phoneArea": "507",
+          "phoneNumber": "3000000"
+        },
+        {
+          "street": "Avenida Balboa 101",
+          "city": "Panama City",
+          "postal": "0801",
+          "phoneArea": "507",
+          "phoneNumber": "3020000"
+        }
+      ]
+    },
+    {
+      "code": "PER",
+      "name": "Перу",
+      "addresses": [
+        {
+          "street": "Avenida Javier Prado Este 4200",
+          "city": "Lima",
+          "postal": "15023",
+          "phoneArea": "1",
+          "phoneNumber": "2110000"
+        }
+      ]
+    },
+    {
+      "code": "RUS",
+      "name": "Россия",
+      "addresses": [
+        {
+          "street": "Tverskaya Street 7",
+          "city": "Moscow",
+          "postal": "125009",
+          "phoneArea": "495",
+          "phoneNumber": "6290001"
+        },
+        {
+          "street": "Nevsky Prospect 28",
+          "city": "Saint Petersburg",
+          "postal": "191186",
+          "phoneArea": "812",
+          "phoneNumber": "5710001"
+        }
+      ]
+    },
+    {
+      "code": "USA",
+      "name": "США",
+      "addresses": [
+        {
+          "street": "350 5th Avenue",
+          "city": "New York",
+          "postal": "10118",
+          "state": "NY",
+          "phoneArea": "212",
+          "phoneNumber": "7363100"
+        },
+        {
+          "street": "1 Apple Park Way",
+          "city": "Cupertino",
+          "postal": "95014",
+          "state": "CA",
+          "phoneArea": "408",
+          "phoneNumber": "9961010"
+        },
+        {
+          "street": "410 Terry Avenue North",
+          "city": "Seattle",
+          "postal": "98109",
+          "state": "WA",
+          "phoneArea": "206",
+          "phoneNumber": "2661000"
+        },
+        {
+          "street": "1600 Amphitheatre Parkway",
+          "city": "Mountain View",
+          "postal": "94043",
+          "state": "CA",
+          "phoneArea": "650",
+          "phoneNumber": "2530000"
+        },
+        {
+          "street": "1 Microsoft Way",
+          "city": "Redmond",
+          "postal": "98052",
+          "state": "WA",
+          "phoneArea": "425",
+          "phoneNumber": "8828080"
+        },
+        {
+          "street": "233 South Wacker Drive",
+          "city": "Chicago",
+          "postal": "60606",
+          "state": "IL",
+          "phoneArea": "312",
+          "phoneNumber": "8750066"
+        },
+        {
+          "street": "200 Clarendon Street",
+          "city": "Boston",
+          "postal": "02116",
+          "state": "MA",
+          "phoneArea": "617",
+          "phoneNumber": "2666000"
+        },
+        {
+          "street": "1201 South Figueroa Street",
+          "city": "Los Angeles",
+          "postal": "90015",
+          "state": "CA",
+          "phoneArea": "213",
+          "phoneNumber": "7427100"
+        },
+        {
+          "street": "600 Congress Avenue",
+          "city": "Austin",
+          "postal": "78701",
+          "state": "TX",
+          "phoneArea": "512",
+          "phoneNumber": "4041900"
+        },
+        {
+          "street": "701 Brickell Avenue",
+          "city": "Miami",
+          "postal": "33131",
+          "state": "FL",
+          "phoneArea": "305",
+          "phoneNumber": "5773000"
+        }
+      ]
+    },
+    {
+      "code": "SRB",
+      "name": "Сербия",
+      "addresses": [
+        {
+          "street": "Knez Mihailova 1",
+          "city": "Belgrade",
+          "postal": "11000",
+          "phoneArea": "11",
+          "phoneNumber": "2020000"
+        }
+      ]
+    },
+    {
+      "code": "SGP",
+      "name": "Сингапур",
+      "addresses": [
+        {
+          "street": "Orchard Road 391",
+          "city": "Singapore",
+          "postal": "238873",
+          "phoneArea": "65",
+          "phoneNumber": "67331118"
+        }
+      ]
+    },
+    {
+      "code": "THA",
+      "name": "Таиланд",
+      "addresses": [
+        {
+          "street": "Ratchadamri Road 2",
+          "city": "Bangkok",
+          "postal": "10330",
+          "phoneArea": "2",
+          "phoneNumber": "2541234"
+        }
+      ]
+    },
+    {
+      "code": "TWN",
+      "name": "Тайвань",
+      "addresses": [
+        {
+          "street": "Zhongxiao East Road 1",
+          "city": "Taipei",
+          "postal": "100",
+          "phoneArea": "2",
+          "phoneNumber": "23412345"
+        }
+      ]
+    },
+    {
+      "code": "TUR",
+      "name": "Турция",
+      "addresses": [
+        {
+          "street": "Istiklal Caddesi 120",
+          "city": "Istanbul",
+          "postal": "34430",
+          "county": "Beyoglu",
+          "phoneArea": "212",
+          "phoneNumber": "2440001"
+        }
+      ]
+    },
+    {
+      "code": "UZB",
+      "name": "Узбекистан",
+      "addresses": [
+        {
+          "street": "Amir Temur Avenue 1",
+          "city": "Tashkent",
+          "postal": "100000",
+          "phoneArea": "71",
+          "phoneNumber": "2330000"
+        },
+        {
+          "street": "Navoi Street 12",
+          "city": "Tashkent",
+          "postal": "100011",
+          "phoneArea": "71",
+          "phoneNumber": "2440000"
+        }
+      ]
+    },
+    {
+      "code": "UKR",
+      "name": "Украина",
+      "addresses": [
+        {
+          "street": "Khreshchatyk Street 22",
+          "city": "Kyiv",
+          "postal": "01001",
+          "phoneArea": "44",
+          "phoneNumber": "2790001"
+        }
+      ]
+    },
+    {
+      "code": "PHL",
+      "name": "Филиппины",
+      "addresses": [
+        {
+          "street": "30th Street",
+          "city": "Taguig",
+          "postal": "1634",
+          "county": "Metro Manila",
+          "phoneArea": "02",
+          "phoneNumber": "88881000"
+        },
+        {
+          "street": "Ayala Avenue",
+          "city": "Makati",
+          "postal": "1226",
+          "county": "Metro Manila",
+          "phoneArea": "02",
+          "phoneNumber": "88881001"
+        },
+        {
+          "street": "Ortigas Avenue",
+          "city": "Pasig",
+          "postal": "1605",
+          "county": "Metro Manila",
+          "phoneArea": "02",
+          "phoneNumber": "86880000"
+        }
+      ]
+    },
+    {
+      "code": "CHL",
+      "name": "Чили",
+      "addresses": [
+        {
+          "street": "Avenida Apoquindo 3000",
+          "city": "Santiago",
+          "postal": "7550000",
+          "phoneArea": "2",
+          "phoneNumber": "23300000"
+        }
+      ]
+    },
+    {
+      "code": "ZAF",
+      "name": "ЮАР",
+      "addresses": [
+        {
+          "street": "5th Street 90",
+          "city": "Sandton",
+          "postal": "2196",
+          "phoneArea": "11",
+          "phoneNumber": "2173000"
+        }
+      ]
+    },
+    {
+      "code": "KOR",
+      "name": "Южная Корея",
+      "addresses": [
+        {
+          "street": "110 Sejong-daero",
+          "city": "Jung-gu",
+          "postal": "04524",
+          "state": "Seoul",
+          "phoneArea": "2",
+          "phoneNumber": "1200001"
+        }
+      ]
+    },
+    {
+      "code": "JPN",
+      "name": "Япония",
+      "addresses": [
+        {
+          "street": "1-1 Marunouchi",
+          "city": "Chiyoda-ku",
+          "postal": "100-0005",
+          "state": "Tokyo",
+          "phoneArea": "3",
+          "phoneNumber": "32110001"
+        }
+      ]
+    }
+  ],
+  "names": {
+    "DEU": "Германия",
+    "FRA": "Франция",
+    "ITA": "Италия",
+    "ESP": "Испания",
+    "POL": "Польша",
+    "NLD": "Нидерланды"
+  }
+}

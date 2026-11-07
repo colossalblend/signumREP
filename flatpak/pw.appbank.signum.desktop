@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Signum
+Comment=Установка приложений на iPhone с компьютера
+Comment[en]=Install iOS apps on your iPhone from a desktop computer
+Exec=signum
+Icon=pw.appbank.signum
+Terminal=false
+Categories=Utility;
+StartupWMClass=signum

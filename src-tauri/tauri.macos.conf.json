@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "macOS": { "bundleVersion": "40" },
+    "resources": {
+      "../apple-tools/macos-arm64/": "resources/apple-tools/macos-arm64/",
+      "../apple-tools/macos-x64/": "resources/apple-tools/macos-x64/"
+    }
+  }
+}

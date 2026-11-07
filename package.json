@@ -1,0 +1,47 @@
+{
+  "name": "signum-desktop",
+  "private": true,
+  "version": "1.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:app": "tauri dev",
+    "build": "tsc && vite build && node scripts/obfuscate-frontend.mjs",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "build:exe": "tauri build --no-bundle",
+    "build:installer": "tauri build",
+    "build:win": "npm run build:setup",
+    "build:setup-ui": "vite build --config vite.setup.config.ts",
+    "build:setup": "npm run build:exe && python installer/pack_payload.py && vite build --config vite.setup.config.ts && python installer/build-tauri-setup.py",
+    "build:setup-py": "python installer/pack_payload.py && python -m PyInstaller --noconfirm SignumSetup.spec",
+    "build:mac": "tauri build --bundles dmg",
+    "build:mac-installer": "bash scripts/make-mac-installer.sh",
+    "build:mac-universal": "tauri build --target universal-apple-darwin --bundles dmg",
+    "build:linux": "tauri build --bundles deb,appimage",
+    "build:linux-appimage": "tauri build --bundles appimage",
+    "build:linux-deb": "tauri build --bundles deb"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-dialog": "^2.4.0",
+    "lucide-react": "^0.468.0",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.1.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "javascript-obfuscator": "^4.1.1",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~5.6.3",
+    "vite": "^6.0.5"
+  }
+}

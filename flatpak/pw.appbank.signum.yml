@@ -1,0 +1,90 @@
+app-id: pw.appbank.signum
+runtime: org.gnome.Platform
+# 47 ships webkit2gtk-4.1, which is what Tauri links against. If a future
+# runtime drops it, this is the line to move.
+runtime-version: '47'
+sdk: org.gnome.Sdk
+command: signum
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # The iPhone is reached over USB through usbmuxd running on the host.
+  - --device=all
+  - --filesystem=/run/usbmuxd
+  - --filesystem=xdg-download
+  # Apple ID keychain passphrase lives in the session keyring.
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.freedesktop.Notifications
+  # Tray icon, so downloads keep running with the window closed.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=com.canonical.indicator.application
+  # Same reason as in main.rs: without it WebKit paints nothing on many seats.
+  - --env=WEBKIT_DISABLE_DMABUF_RENDERER=1
+  - --env=USBMUXD_SOCKET_ADDRESS=UNIX:/run/usbmuxd
+
+modules:
+  - name: libplist
+    buildsystem: autotools
+    config-opts:
+      - --without-cython
+    sources:
+      - type: git
+        url: https://github.com/libimobiledevice/libplist.git
+        tag: '2.6.0'
+
+  - name: libimobiledevice-glue
+    buildsystem: autotools
+    sources:
+      - type: git
+        url: https://github.com/libimobiledevice/libimobiledevice-glue.git
+        tag: '1.3.1'
+
+  - name: libusbmuxd
+    buildsystem: autotools
+    sources:
+      - type: git
+        url: https://github.com/libimobiledevice/libusbmuxd.git
+        tag: '2.1.0'
+
+  - name: libtatsu
+    buildsystem: autotools
+    sources:
+      - type: git
+        url: https://github.com/libimobiledevice/libtatsu.git
+        tag: '1.0.4'
+
+  - name: libimobiledevice
+    buildsystem: autotools
+    config-opts:
+      - --without-cython
+    sources:
+      - type: git
+        url: https://github.com/libimobiledevice/libimobiledevice.git
+        tag: '1.3.0'
+
+  - name: ideviceinstaller
+    buildsystem: autotools
+    sources:
+      - type: git
+        url: https://github.com/libimobiledevice/ideviceinstaller.git
+        tag: '1.1.1'
+
+  - name: signum
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 signum /app/bin/signum
+      # Tauri looks for resources next to the binary, at ../lib/<name>/resources.
+      - mkdir -p /app/lib/signum
+      - cp -r resources /app/lib/signum/resources
+      - chmod -R a+rX /app/lib/signum/resources
+      - find /app/lib/signum/resources -type f ! -name '*.json' ! -name '*.md' -exec chmod a+x {} +
+      - install -Dm644 pw.appbank.signum.desktop /app/share/applications/pw.appbank.signum.desktop
+      - install -Dm644 pw.appbank.signum.metainfo.xml /app/share/metainfo/pw.appbank.signum.metainfo.xml
+      - install -Dm644 icon.png /app/share/icons/hicolor/256x256/apps/pw.appbank.signum.png
+    sources:
+      - type: dir
+        path: stage

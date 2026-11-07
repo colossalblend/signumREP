@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../linux_x64/": "resources/linux-x64/",
+      "../linux_arm64/": "resources/linux-arm64/"
+    }
+  }
+}

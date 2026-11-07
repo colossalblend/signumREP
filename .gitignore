@@ -1,0 +1,84 @@
+# Dependencies & build
+node_modules/
+frontend-dist/
+src-tauri/target/
+dist/
+build/
+__pycache__/
+*.pyc
+.Python
+
+# Installers & large local artifacts
+installers/
+website/downloads/**/*.exe
+website/downloads/**/*.dmg
+website/downloads/**/*.AppImage
+website/downloads/**/*.deb
+*.exe
+!lib/**/*.exe
+Signum.exe
+Signum_*.exe
+SignumSetup.exe
+Signum*.spec
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+backend/signum/tg.secret.php
+*.log
+vite.out.log
+vite.err.log
+run-*.log
+terminals/
+temp_*.py
+temp_*.txt
+.tmp/
+tmp_*/
+
+# Local backups & secrets
+*.bak
+*.bak.*
+.env
+.env.*
+history-debug/
+.server.pid
+
+# Python packaging leftovers
+signum/__pycache__/
+
+# Optional heavy local stages
+installer/stage_*/
+installer/test_install/
+installer/payload/*.zip
+
+# flatpak build output
+flatpak/stage/
+flatpak/build-dir/
+flatpak/repo/
+.flatpak-builder/
+
+# telegram bot
+bot/.env
+bot/data/
+
+# Local builds, downloaded tools, and signing credentials
+src-setup/target/
+android/.gradle/
+android/**/build/
+android/local.properties
+android/keystore.properties
+android/keystore/
+android/**/*.jks
+android/**/*.keystore
+backups/
+tmp/
+*.apk
+*.aab
+*.dmg
+*.deb
+*.AppImage

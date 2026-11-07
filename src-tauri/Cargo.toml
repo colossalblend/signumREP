@@ -1,0 +1,63 @@
+[package]
+name = "signum"
+version = "1.2.0"
+description = "Signum iOS application utility"
+authors = ["Signum"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+                                                                                                                 
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "native-tls", "gzip", "deflate", "brotli", "cookies", "blocking", "socks"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hex = "0.4"
+num-bigint = { version = "0.4", features = ["rand"] }
+num-traits = "0.2"
+rand = "0.8"
+base64 = "0.22"
+futures-util = "0.3"
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+keyring = "3"
+aes-gcm = "0.10"
+plist = "1"
+flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+rcgen = "0.13"
+aes = "0.8"
+cbc = "0.1"
+                                                               
+isideload = { path = "vendor/isideload/isideload", default-features = false, features = ["fs-storage", "install"] }
+tracing = "0.1"
+
+[profile.release]
+debug = false
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+incremental = false
+panic = "abort"
+
+# Одна копия приложения на компьютер.
+#
+# Signum прячется в трей, окна не видно — человек снова жмёт ярлык, и
+# запускается ещё один процесс со своим значком. У людей набиралось по семь
+# значков в трее. Плагин отдаёт запуск уже работающей копии.
+# На маке этим занимается сама система: .app повторно не запускается.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

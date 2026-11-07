@@ -1,0 +1,113 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS DMG
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install macOS dependencies
+        run: |
+          brew install libimobiledevice ideviceinstaller openssl@3 minizip
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Prepare bundled device tools
+        run: |
+          set -eux
+          mkdir -p apple-tools/macos-arm64/v2 apple-tools/macos-arm64/v3-legacy apple-tools/macos-arm64/v4 apple-tools/macos-arm64/v5
+          mkdir -p apple-tools/macos-x64/v2 apple-tools/macos-x64/v3-legacy apple-tools/macos-x64/v4 apple-tools/macos-x64/v5
+          mkdir -p apple-tools/macos-arm64/support apple-tools/macos-x64/support
+          # v5 = ipatool-cpp straight from upstream, pinned by sha256: the tools
+          # tarball above may still carry an older build.
+          GH_TOKEN=${{ github.token }} gh release download 1.1.4 -R Sorvigolova/ipatool -p 'macOS_*_ipatool-cpp.zip' -D /tmp/ipatool-cpp
+          printf '%s  %s\n' \
+            d088f8e47ecf055207d197a98ee8d883d013443ebcc204b4cbca269d9777c08f /tmp/ipatool-cpp/macOS_arm64_ipatool-cpp.zip \
+            187364a99af6270756dc219c8a1064a3fc556395de33d7838e518b7d649e842b /tmp/ipatool-cpp/macOS_amd64_ipatool-cpp.zip \
+            | shasum -a 256 -c
+          unzip -p /tmp/ipatool-cpp/macOS_arm64_ipatool-cpp.zip ipatool-cpp-macOS-arm64 > apple-tools/macos-arm64/v5/ipatool
+          unzip -p /tmp/ipatool-cpp/macOS_amd64_ipatool-cpp.zip ipatool-cpp-macOS-amd64 > apple-tools/macos-x64/v5/ipatool
+          chmod +x apple-tools/macos-arm64/v5/ipatool apple-tools/macos-x64/v5/ipatool
+          # Device tools come from the tarball: one build per arch, libraries
+          # bound via @executable_path. Never copy Homebrew's here — the runner
+          # is arm64 and they link /opt/homebrew, which gave every Intel Mac
+          # "Bad CPU type" and broke Macs without Homebrew (1.1.6, 1.1.7 b31).
+          for arch in arm64 x64; do
+            chmod +x apple-tools/macos-${arch}/support/*
+          done
+          for tool in ideviceinfo ideviceinstaller idevicepair; do
+            test "$(lipo -archs apple-tools/macos-x64/support/${tool})" = x86_64
+            test "$(lipo -archs apple-tools/macos-arm64/support/${tool})" = arm64
+            if otool -L apple-tools/macos-x64/support/${tool} apple-tools/macos-arm64/support/${tool} | grep -q /opt/homebrew; then
+              echo "${tool} links Homebrew"; exit 1
+            fi
+          done
+          # v4/v2 needs the SAP helper when the native C++ engine is
+          # unavailable. Keep it in both architecture trees so Finder-launched
+          # builds do not depend on Homebrew or PATH.
+          for arch in arm64 x64; do
+            test -f "apple-tools/macos-${arch}/v2/sapsigner"
+            chmod +x "apple-tools/macos-${arch}/v2/sapsigner"
+          done
+
+      - name: Check embedded login resources
+        run: cargo test --manifest-path src-tauri/Cargo.toml macos_release_114 -- --nocapture
+
+      - name: Build macOS DMG
+        run: |
+          set -eux
+          npm run build:mac-universal
+
+      - name: Verify universal application
+        run: |
+          set -eux
+          dmg=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -type f | head -1)
+          mount=$(mktemp -d)
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
+          trap 'hdiutil detach "$mount"' EXIT
+          app="$mount/Signum.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")" = 1.2.0
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$app/Contents/Info.plist")" = 39
+          lipo "$app/Contents/MacOS/signum" -verify_arch x86_64 arm64
+          test -x "$app/Contents/Resources/resources/apple-tools/macos-arm64/v5/ipatool"
+          test -x "$app/Contents/Resources/resources/apple-tools/macos-x64/v5/ipatool"
+          codesign --verify --deep --strict "$app"
+
+      - name: Verify and checksum DMG
+        run: |
+          set -eux
+          dmg=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -type f | head -1)
+          test -n "$dmg"
+          shasum -a 256 "$dmg" | tee macos-sha256.txt
+
+      - name: Save macOS release for deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          gh release create macos-b39 --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "Signum 1.2.0 build 39 macOS" \
+            --notes "Universal Intel and Apple Silicon DMG; verified in CI." --draft
+          gh release upload macos-b39 \
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg \
+            macos-sha256.txt

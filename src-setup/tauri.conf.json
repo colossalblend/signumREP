@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SignumSetup",
+  "version": "1.2.0",
+  "identifier": "pw.appbank.signum.setup",
+  "build": {
+    "frontendDist": "../setup-dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Установка Signum",
+        "width": 420,
+        "height": 540,
+        "minWidth": 420,
+        "minHeight": 540,
+        "maxWidth": 420,
+        "maxHeight": 540,
+        "resizable": false,
+        "decorations": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: https: data:; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [],
+    "publisher": "Signum",
+    "icon": [
+      "../src-tauri/icons/32x32.png",
+      "../src-tauri/icons/128x128.png",
+      "../src-tauri/icons/128x128@2x.png",
+      "../src-tauri/icons/256x256.png",
+      "../src-tauri/icons/icon.png",
+      "../src-tauri/icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    }
+  }
+}
