@@ -16,8 +16,7 @@ export default function Signing2faGate() {
   const [hint, setHint] = useState("");
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void listen<{ message?: string; sms?: boolean }>("signing-2fa-required", event => {
+    const pending = listen<{ message?: string; sms?: boolean }>("signing-2fa-required", event => {
       setMessage(
         event.payload?.message?.trim() ||
           "Введите 6-значный код с iPhone.",
@@ -28,11 +27,11 @@ export default function Signing2faGate() {
       setOpen(true);
       setResending(false);
       setBusy(false);
-    }).then(fn => {
-      unlisten = fn;
     });
+    // Отписываемся через сам промис: если компонент снимут раньше, чем listen
+    // успеет ответить, подписка всё равно будет снята.
     return () => {
-      unlisten?.();
+      void pending.then(unlisten => unlisten());
     };
   }, []);
 

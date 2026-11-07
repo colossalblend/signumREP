@@ -24,10 +24,11 @@ export function resolveTheme(theme: AppSettings["theme"]): ResolvedTheme {
 }
 
 function updateThemeColor(resolved: ResolvedTheme) {
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) {
+  // В index.html два тега (для светлой и тёмной системы) — обновляем оба,
+  // иначе выбранная вручную тема расходится с цветом заголовка окна.
+  document.querySelectorAll('meta[name="theme-color"]').forEach(meta => {
     meta.setAttribute("content", resolved === "dark" ? "#0f1420" : "#f4f6fb");
-  }
+  });
 }
 
 export function applyAppearance(settings: AppearanceSettings) {

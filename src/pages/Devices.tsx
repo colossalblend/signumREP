@@ -135,15 +135,16 @@ export default function Devices() {
       "Разблокируйте iPhone. Если появится запрос — нажмите «Доверять» и введите код-пароль. Ждём подтверждение…",
     );
     try {
-      setMessage(await command<string>("trust_device"));
+      const result = await command<string>("trust_device");
       await refresh();
+      setMessage(result);
     } catch (e) {
       setMessage(errorMessage(e));
     }
   }
 
   return (
-    <div className="mx-auto max-w-6xl p-7 lg:p-9">
+    <div className="page">
       <PageHeader
         title="Устройства"
         subtitle="Выберите iPhone, если подключено несколько"

@@ -86,7 +86,7 @@ input[type="password"]::-ms-clear {
   .app-shell { @apply bg-space-radial text-theme; }
   .is-mac .app-sidebar { padding-top: 28px; }                                     
   .app-sidebar { @apply border-r border-subtle bg-sidebar backdrop-blur-2xl; }
-  .app-header { @apply border-b border-subtle bg-header; }
+  .app-header { background: transparent; }
   .text-theme { color: var(--app-text); }
   .text-muted { color: var(--app-muted); }
   .border-subtle { border-color: var(--app-border); }
@@ -128,13 +128,61 @@ input[type="password"]::-ms-clear {
   }
 
   .page-title {
-    @apply text-[30px] font-bold tracking-[-0.035em];
+    @apply text-[28px] font-bold leading-tight tracking-[-0.03em];
     color: var(--app-text);
   }
 
+  .page-title {
+    text-wrap: balance;
+  }
+
+  /* Одна сетка для всех разделов: заголовок страницы не «прыгает» по
+     горизонтали при переключении пунктов меню. Верхний отступ меньше
+     боковых — сверху уже есть полоса с кнопками окна. */
+  .page {
+    @apply mx-auto w-full max-w-[1200px] px-7 pb-10 pt-3 lg:px-9;
+  }
+
   .nav-link { @apply text-muted hover:text-theme; }
-  .nav-link-active { @apply bg-brand-500/15 text-brand-300 ring-1 ring-brand-400/15; }
+  .nav-link-active { @apply relative bg-brand-500/15 text-brand-300; }
+  .nav-link-active::before {
+    content: "";
+    position: absolute;
+    left: -16px;
+    top: 10px;
+    bottom: 10px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: #818cf8;
+  }
   html.light .nav-link-active { @apply text-brand-600; }
+  html.light .nav-link-active::before { background: #4453d8; }
+}
+
+/* Видимый фокус для клавиатуры. Мышью рамка не появляется — только по Tab. */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+html.light :focus-visible { outline-color: #4453d8; }
+.field:focus-visible { outline: none; }
+
+/* Цифры одной ширины: проценты и версии не дёргаются при обновлении. */
+.tabular-nums,
+[role="progressbar"],
+.page-subtitle { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  *:not(.animate-spin):not(.signum-progress-indeterminate),
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
                                                              
@@ -426,6 +474,13 @@ html.light [class*="text-violet-"] { color: #6d28d9; }
 html.light [class*="text-brand-200"],
 html.light [class*="text-brand-300"] { color: #4338ca; }
 
+/* Светлая тема перекрашивает .text-white в тёмный — для текста на белых
+   панелях это верно, но на насыщенных заливках (баннеры, основные кнопки,
+   плитки-заглушки) тёмный текст на синем не читается. Возвращаем белый. */
+html.light :is(.on-color, .btn-primary, .bg-brand-gradient, .bg-blue-gradient, .bg-amber-gradient, .bg-gradient-to-br, .bg-gradient-to-r, .bg-brand-500, .bg-brand-600, .bg-emerald-500, .bg-rose-500, .bg-red-500).text-white,
+html.light :is(.on-color, .btn-primary, .bg-brand-gradient, .bg-blue-gradient, .bg-amber-gradient, .bg-gradient-to-br, .bg-gradient-to-r, .bg-brand-500, .bg-brand-600, .bg-emerald-500, .bg-rose-500, .bg-red-500) .text-white,
+html.light .on-color { color: #ffffff; }
+
 .catalog-sort-picker {
   position: relative;
   z-index: 5;
@@ -449,6 +504,7 @@ html.light [class*="text-brand-300"] { color: #4338ca; }
 }
 
 .catalog-sort-picker > summary::-webkit-details-marker { display: none; }
+html.light .catalog-sort-picker > summary { background: #ffffff; }
 .catalog-sort-picker > summary:hover { border-color: color-mix(in srgb, #6478ff 48%, var(--app-border)); }
 .catalog-sort-picker[open] > summary {
   border-color: color-mix(in srgb, #6478ff 55%, var(--app-border));
@@ -560,7 +616,7 @@ html.lite.lite-simple-scrolling * {
 
 html.lite.lite-flat-backgrounds.dark .bg-space-radial,
 html.lite.lite-flat-backgrounds:not(.light) .bg-space-radial {
-  background: #070912 !important;
+  background: var(--app-bg) !important;
 }
 
 html.lite.lite-flat-backgrounds.light .bg-space-radial {

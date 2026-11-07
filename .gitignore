@@ -82,3 +82,6 @@ tmp/
 *.dmg
 *.deb
 *.AppImage
+
+# Setup UI build output
+setup-dist/

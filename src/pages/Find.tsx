@@ -4,7 +4,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Checkbox from "../components/Checkbox";
 import { isTwoFactorError } from "../lib/auth";
-import { formatMinIos, formatVersionWithIos } from "../lib/format";
+import { countLabel, formatMinIos, formatVersionWithIos } from "../lib/format";
 import {
   command, developerApps, errorMessage, fetchAppStoreVersions, logUi,
   searchStoreApps, searchStoreDevelopers, resolveAppStoreVersionsIos, namedAppStoreVersions,
@@ -522,7 +522,10 @@ export default function Find() {
       return;
     }
     if (failed.length) {
-      setActionError(`Не удалось поставить в очередь: ${failed.join(", ")}. Остальные скачиваются.`);
+      // Остаёмся на странице: после перехода в «Установки» сообщение никто бы не увидел.
+      setActionError(`Не удалось поставить в очередь: ${failed.join(", ")}. Остальные уже скачиваются — их видно в «Установках».`);
+      setPicked(new Set(chosen.filter(hit => failed.includes(hit.name)).map(hit => hit.appStoreId)));
+      return;
     }
     setPicked(new Set());
     navigate("/installs");
@@ -548,7 +551,7 @@ export default function Find() {
     const chosen = devApps.filter(hit => picked.has(hit.appStoreId));
     if (!chosen.length || !purchaseAccountEmails.length || purchaseBusy) return;
     if (!window.confirm(
-      `Будет выполнена покупка ${chosen.length} приложений на ${purchaseAccountEmails.length} Apple ID. Платные приложения могут привести к списанию средств на каждом аккаунте. Продолжить?`,
+      `Будет выполнена покупка ${countLabel(chosen.length, "приложения", "приложений", "приложений")} на ${purchaseAccountEmails.length} Apple ID. Платные приложения могут привести к списанию средств на каждом аккаунте. Продолжить?`,
     )) return;
     setPurchaseBusy(true);
     setPurchaseError("");
@@ -596,7 +599,7 @@ export default function Find() {
   const showEmpty = typed && !storeSearching && storeHits.length === 0 && !storeError && !tourDemo;
 
   return (
-    <div className="mx-auto max-w-[1100px] p-7 lg:p-9">
+    <div className="page">
       <PageHeader
         title="Поиск"
         subtitle="Название, ссылка, номер или имя разработчика"

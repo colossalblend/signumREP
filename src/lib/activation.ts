@@ -88,7 +88,10 @@ export async function fetchTbActivationPayload(
   if (!payload) {
     throw new Error(result.error || "Не удалось получить QR-код");
   }
-  const expiresIn = Math.max(0, Number(result.expires_in ?? result.ttl_seconds ?? 600));
+  // Нижняя граница — защита от цикла: при expires_in = 0 код считался
+  // истёкшим сразу после загрузки, и окно запрашивало его снова без паузы.
+  const ttl = Number(result.expires_in ?? result.ttl_seconds ?? 600);
+  const expiresIn = Number.isFinite(ttl) ? Math.max(15, ttl) : 600;
   return {
     payload,
     expiresIn,

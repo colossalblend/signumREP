@@ -105,13 +105,13 @@ export default function IpaSigning() {
         if (saved && list.some(d => d.udid === saved)) return saved;
         return list[0]?.udid || "";
       });
-      if (!outputDir && settings.exports_dir) setOutputDir(settings.exports_dir);
+      if (settings.exports_dir) setOutputDir(current => current || settings.exports_dir || "");
     } catch (e) {
       setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
-  }, [outputDir]);
+  }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -237,7 +237,7 @@ export default function IpaSigning() {
   const ipaName = ipaPath ? ipaPath.replace(/^.*[\\/]/, "") : "";
 
   return (
-    <div className="mx-auto max-w-6xl p-7 lg:p-9">
+    <div className="page">
       <PageHeader
         title="IPA-файл"
         subtitle="Выберите файл на компьютере. Signum покажет, что с ним делать."

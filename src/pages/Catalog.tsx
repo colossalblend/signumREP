@@ -685,7 +685,7 @@ export default function Catalog() {
   }
 
   return (
-    <div className="mx-auto max-w-[1500px] p-7 lg:p-9">
+    <div className="page">
       <PageHeader title="Каталог" subtitle={catalogSubtitle} actions={
         <div className="flex flex-wrap gap-2">
           {selectMode ? (
@@ -723,7 +723,7 @@ export default function Catalog() {
         {banners.map(banner => (
           <div
             key={banner.id}
-            className={`relative overflow-hidden rounded-2xl p-5 text-white shadow-panel ${bannerStyle(banner.style)}`}
+            className={`on-color relative overflow-hidden rounded-2xl p-5 text-white shadow-panel ${bannerStyle(banner.style)}`}
           >
             <div className="relative flex flex-wrap items-center justify-between gap-4">
               <div className="min-w-0 max-w-3xl">

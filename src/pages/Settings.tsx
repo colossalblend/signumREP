@@ -425,7 +425,7 @@ export default function Settings() {
   }
 
   return (
-    <div className="relative mx-auto max-w-5xl p-7 pb-28 lg:p-9 lg:pb-32">
+    <div className="page relative pb-28 lg:pb-32">
       <PageHeader title="Настройки" subtitle="Папка загрузок, оформление и обслуживание" />
       {dirty && (
         <div className="mt-5 rounded-xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-xs text-amber-100/90">
@@ -996,7 +996,7 @@ export default function Settings() {
       )}
 
 
-      <button
+      {(dirty || busy) && <button
         type="button"
         className={`signum-fab-save ${dirty ? "is-dirty" : ""}`}
         disabled={busy || !dirty}
@@ -1004,8 +1004,8 @@ export default function Settings() {
         title={dirty ? "Сохранить настройки" : "Изменений нет"}
       >
         {busy ? <LoaderCircle size={16} className="animate-spin" /> : <Save size={16} />}
-        {busy ? "Сохранение…" : dirty ? "Сохранить" : "Сохранено"}
-      </button>
+        {busy ? "Сохранение…" : "Сохранить"}
+      </button>}
 
       {pendingEngine && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">

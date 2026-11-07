@@ -20,3 +20,18 @@ export function formatCatalogCardVersion(
   if (formatted !== "Версия уточняется") return formatted;
   return "Версия уточняется";
 }
+
+/** Русское склонение по числу: plural(1, "задача", "задачи", "задач"). */
+export function plural(count: number, one: string, few: string, many: string): string {
+  const n = Math.abs(count) % 100;
+  const n1 = n % 10;
+  if (n > 10 && n < 20) return many;
+  if (n1 > 1 && n1 < 5) return few;
+  if (n1 === 1) return one;
+  return many;
+}
+
+/** Число вместе со словом: countLabel(3, "задача", "задачи", "задач") → «3 задачи». */
+export function countLabel(count: number, one: string, few: string, many: string): string {
+  return `${count} ${plural(count, one, few, many)}`;
+}

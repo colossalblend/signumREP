@@ -1,7 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  BadgeCheck, LayoutGrid, Maximize2, Minus, MonitorSmartphone, Search, Settings,
-  Smartphone, UserRound, X,
+  BadgeCheck, LayoutGrid, Minus, MonitorSmartphone, Search, Settings,
+  Smartphone, Square, UserRound, X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
@@ -36,7 +36,8 @@ function WindowButton({ children, onClick, danger = false, label }: {
       aria-label={label}
       onClick={onClick}
       data-no-drag
-      className={`grid h-11 w-12 place-items-center transition ${danger ? "hover:bg-red-500/80" : "hover:bg-black/5 dark:hover:bg-white/[0.07]"}`}
+      title={label}
+      className={`grid h-11 w-12 place-items-center text-muted transition hover:text-theme ${danger ? "hover:!bg-[#e81123] hover:!text-white" : "hover:bg-black/5 dark:hover:bg-white/[0.07]"}`}
     >
       {children}
     </button>
@@ -45,7 +46,7 @@ function WindowButton({ children, onClick, danger = false, label }: {
 
 export default function Layout() {
   const window = getCurrentWindow();
-  const [appVersion, setAppVersion] = useState("1.1.1");
+  const [appVersion, setAppVersion] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(() => !hasSeenOnboarding());
 
   useEffect(() => {
@@ -70,15 +71,15 @@ export default function Layout() {
         </TourBoundary>
       )}
       <aside className="app-sidebar relative z-20 flex w-[236px] shrink-0 flex-col px-4 pb-4">
-        <DragRegion className="flex h-[76px] w-full cursor-grab items-center gap-3 px-2 pt-0 active:cursor-grabbing is-mac:pt-7">
-          <img src={signumIcon} alt="Signum" draggable={false} className="pointer-events-none h-10 w-10 rounded-xl object-cover shadow-glow" />
+        <DragRegion className="flex h-[76px] w-full cursor-grab items-center gap-3 px-2 pt-0 active:cursor-grabbing">
+          <img src={signumIcon} alt="" draggable={false} className="pointer-events-none h-10 w-10 rounded-xl object-cover" />
           <div className="pointer-events-none">
             <div className="font-bold tracking-tight text-theme">Signum</div>
-            <div className="text-[10px] font-medium text-muted">{appVersion}</div>
+            <div className="text-[11px] font-medium tabular-nums text-muted">{appVersion ? `Версия ${appVersion}` : "\u00a0"}</div>
           </div>
         </DragRegion>
 
-        <nav className="mt-5 space-y-1.5" data-no-drag>
+        <nav aria-label="Разделы" className="mt-4 space-y-1" data-no-drag>
           {nav.map(([to, label, Icon, anchor]) => (
             <NavLink
               key={to}
@@ -86,7 +87,7 @@ export default function Layout() {
               end={to === "/"}
               data-tour={anchor}
               className={({ isActive }) =>
-                `flex items-center gap-3 rounded-xl px-3.5 py-3 text-sm font-medium transition ${isActive ? "nav-link-active" : "nav-link hover:bg-black/5 dark:hover:bg-white/[0.04]"}`}
+                `flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium transition ${isActive ? "nav-link-active" : "nav-link hover:bg-black/5 dark:hover:bg-white/[0.04]"}`}
             >
               <Icon size={18} strokeWidth={2} />{label}
             </NavLink>
@@ -97,7 +98,7 @@ export default function Layout() {
           <NavLink
             to="/settings"
             className={({ isActive }) =>
-              `flex items-center gap-3 rounded-xl px-3.5 py-3 text-sm font-medium transition ${isActive ? "nav-link-active" : "nav-link hover:bg-black/5 dark:hover:bg-white/[0.04]"}`}
+              `flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium transition ${isActive ? "nav-link-active" : "nav-link hover:bg-black/5 dark:hover:bg-white/[0.04]"}`}
           >
             <Settings size={18} />Настройки
           </NavLink>
@@ -109,9 +110,9 @@ export default function Layout() {
           {                                                                                            }
           <DragRegion className="h-11 min-h-[44px] min-w-0 flex-1 cursor-grab active:cursor-grabbing" />
           <div className="flex shrink-0 items-center" data-no-drag>
-            <WindowButton label="Свернуть" onClick={() => void window.minimize()}><Minus size={16} /></WindowButton>
-            <WindowButton label="Развернуть" onClick={() => void window.toggleMaximize()}><Maximize2 size={15} strokeWidth={1.75} /></WindowButton>
-            <WindowButton label="Закрыть" danger onClick={() => void window.close()}><X size={17} /></WindowButton>
+            <WindowButton label="Свернуть" onClick={() => void window.minimize()}><Minus size={16} strokeWidth={1.75} /></WindowButton>
+            <WindowButton label="Развернуть" onClick={() => void window.toggleMaximize()}><Square size={12} strokeWidth={1.75} /></WindowButton>
+            <WindowButton label="Закрыть" danger onClick={() => void window.close()}><X size={17} strokeWidth={1.75} /></WindowButton>
           </div>
         </header>
         <UpdateBanners />

@@ -4,9 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ActivationModal from "../components/ActivationModal";
 import PageHeader from "../components/PageHeader";
 import { hydrateActivation, takePendingPostInstallActivation } from "../lib/activation";
-import { command, errorMessage } from "../lib/tauri";
+import { command, displayError, errorMessage } from "../lib/tauri";
 import { tourInstallJob, useTourDemo, useTourSignal } from "../lib/tourStore";
-import { formatMinIos } from "../lib/format";
+import { countLabel, formatMinIos } from "../lib/format";
 import type { ActionHistoryEntry, AppActivation, AppUpdateFoundEvent, InstallJob, ProgressEvent } from "../types";
 
 /** Phases the walkthrough plays back so the progress bar is not a still image. */
@@ -185,13 +185,13 @@ export default function Installs() {
     finally { setQueueBusy(false); }
   }
 
-  return <div className="mx-auto max-w-6xl p-7 lg:p-9">
+  return <div className="page">
     <PageHeader
       title="Установки"
       subtitle={active
-        ? `${active} активных задач`
+        ? `${countLabel(active, "активная задача", "активные задачи", "активных задач")}`
         : updates.length > 0
-          ? `${updates.length} приложений на iPhone можно обновить`
+          ? `${countLabel(updates.length, "приложение", "приложения", "приложений")} на iPhone можно обновить`
           : "Очередь загрузок и установок"}
       actions={
         <div className="flex flex-wrap gap-2">
@@ -307,7 +307,7 @@ function JobRow({ job, onChanged, demo = false }: { job: InstallJob; onChanged: 
   const details = job.error
     ? exportJob && job.error.startsWith("Не удалось выполнить операцию. Проверьте Apple ID, подключение iPhone")
       ? "Не удалось скачать файл. Проверьте интернет, вход в Apple ID и доступ к папке экспорта. Подключать iPhone для скачивания не нужно."
-      : errorMessage(job.error)
+      : displayError(job.error)
     : job.message;
   const actionHint = job.error ? errorHint(details, exportJob) : "";
   const canCancel = job.status === "queued" || job.status === "running";

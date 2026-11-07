@@ -510,6 +510,11 @@ export function developerApps(artistId: string): Promise<StoreSearchApp[]> {
   return command<StoreSearchApp[]>("developer_apps", { input: { artistId } });
 }
 
+/** Текст ошибки для показа без отправки в диагностику (для рендера списков). */
+export function displayError(error: unknown): string {
+  return localizeError(extractInvokeError(error) || "Не удалось выполнить операцию");
+}
+
 export function errorMessage(error: unknown): string {
   const raw = extractInvokeError(error) || "Не удалось выполнить операцию";
   const message = localizeError(raw);

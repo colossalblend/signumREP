@@ -7,6 +7,7 @@ import Checkbox from "../components/Checkbox";
 import PageHeader from "../components/PageHeader";
 import SelectMenu from "../components/SelectMenu";
 import { formatAuthError, isTwoFactorError } from "../lib/auth";
+import { countLabel } from "../lib/format";
 import { cacheBustUrl } from "../lib/media";
 import { command, errorMessage, logUi } from "../lib/tauri";
 import {
@@ -719,7 +720,7 @@ export default function Account() {
       setHistoryError(
         failed.length === 1
           ? `Не удалось добавить «${failed[0]}».`
-          : `Не удалось добавить ${failed.length} приложений.`,
+          : `Не удалось добавить ${countLabel(failed.length, "приложение", "приложения", "приложений")}.`,
       );
     }
   }
@@ -1093,7 +1094,7 @@ export default function Account() {
 
   if (!authReady) {
     return (
-      <div className="mx-auto grid max-w-3xl place-items-center p-7 lg:p-9" style={{ minHeight: "60vh" }}>
+      <div className="page grid place-items-center" style={{ minHeight: "60vh" }}>
         <div className="flex flex-col items-center gap-3 text-slate-500">
           <LoaderCircle size={22} className="animate-spin text-brand-400" />
           <span className="text-xs">Загружаем аккаунт…</span>
@@ -1103,7 +1104,9 @@ export default function Account() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl p-7 lg:p-9">
+    // Формы читаются лучше узкой колонкой; заголовок при этом стоит там же,
+    // где на остальных страницах.
+    <div className="page [&>*:not(.fixed)]:max-w-3xl">
       <PageHeader
         title="Аккаунт"
         subtitle={

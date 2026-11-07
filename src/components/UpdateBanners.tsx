@@ -14,6 +14,7 @@ export default function UpdateBanners() {
   const [otaBusy, setOtaBusy] = useState(false);
   const [otaPercent, setOtaPercent] = useState(0);
   const [otaError, setOtaError] = useState<string | null>(null);
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
   const otaInFlight = useRef(false);
   const [legacyLogout, setLegacyLogout] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
@@ -45,15 +46,23 @@ export default function UpdateBanners() {
 
   async function installAppUpdate() {
     if (!appUpdate) return;
-    await command<string>("enqueue_catalog_install", {
-      input: {
-        title: appUpdate.title,
-        bundle_id: appUpdate.bundle_id,
-        app_store_id: appUpdate.app_store_id,
-        in_store: appUpdate.in_store,
-        min_ios: appUpdate.min_ios,
-      },
-    });
+    setAppUpdateError(null);
+    try {
+      await command<string>("enqueue_catalog_install", {
+        input: {
+          title: appUpdate.title,
+          bundle_id: appUpdate.bundle_id,
+          app_store_id: appUpdate.app_store_id,
+          in_store: appUpdate.in_store,
+          min_ios: appUpdate.min_ios,
+        },
+      });
+    } catch (error) {
+      // Без этого кнопка «Обновить» молча ничего не делала: нет iPhone, нет
+      // входа — человек жал ещё раз и не понимал, что происходит.
+      setAppUpdateError(errorMessage(error));
+      return;
+    }
     setAppUpdate(null);
     navigate("/installs");
   }
@@ -106,10 +115,10 @@ export default function UpdateBanners() {
         <Banner
           icon={<Sparkles size={16} />}
           title={`Доступно обновление ${appUpdate.title}`}
-          text={`${appUpdate.installed_version} → ${appUpdate.remote_version}`}
-          actionLabel="Обновить"
+          text={appUpdateError ?? `${appUpdate.installed_version} → ${appUpdate.remote_version}`}
+          actionLabel={appUpdateError ? "Повторить" : "Обновить"}
           onAction={() => void installAppUpdate()}
-          onDismiss={() => setAppUpdate(null)}
+          onDismiss={() => { setAppUpdate(null); setAppUpdateError(null); }}
         />
       )}
       {otaUpdate && (
