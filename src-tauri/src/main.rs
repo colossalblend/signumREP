@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex as StdMutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -2664,7 +2664,23 @@ fn auth_stage(stage: &str, email: &str, detail: &str) {
     ));
 }
 
+/// Текст ошибки входа без служебной метки в начале.
+///
+/// Метки нужны коду (`SIGNUM_APPLE_UNAVAILABLE:` останавливает переход на
+/// второй движок), а на странице аккаунта сохранённая ошибка показывается как
+/// есть — человеку метка ни к чему.
+fn without_login_marker(msg: &str) -> &str {
+    let msg = msg.trim();
+    for marker in [APPLE_UNAVAILABLE_MARKER, "SIGNUM_LOGIN_OPAQUE:"] {
+        if let Some(rest) = msg.strip_prefix(marker) {
+            return rest.trim_start();
+        }
+    }
+    msg
+}
+
 fn save_last_catalog_error(msg: &str) {
+    let msg = without_login_marker(msg);
     let Some(dir) = store_session_dir() else {
         return;
     };
@@ -3511,7 +3527,7 @@ fn start_background_refresh(app: &AppHandle) {
             if state.jobs.lock().await.values().any(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running)) {
                 continue;
             }
-            warm_kbsync_now(&app, &email, false).await;
+            warm_kbsync_now(&app, &email, KbsyncWarm::RefreshIfStale).await;
         }
     });
 }
@@ -3521,33 +3537,53 @@ const KBSYNC_UPSTREAM_VERSION: &str = "1.3.0";
 #[cfg(not(target_os = "windows"))]
 const KBSYNC_UPSTREAM_VERSION: &str = "1.2.0";
 const KBSYNC_REFRESH_AFTER_SECS: u64 = 3600;
-static KBSYNC_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-fn cancel_kbsync_warm() {
-    KBSYNC_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
-}
-
-fn reset_kbsync_cancel() {
-    KBSYNC_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
-}
+/// Сколько команд сейчас просят остановить KBSync.
+///
+/// Счётчик, а не флаг: выход, вход и смена аккаунта могут наложиться друг на
+/// друга (двойной щелчок, выход во время входа). С флагом первая же
+/// закончившаяся команда сбрасывала отмену, пока вторая ещё ждала замок, и
+/// фоновый прогрев мог стартовать заново прямо перед ней.
+static KBSYNC_CANCEL_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
 fn kbsync_cancel_requested() -> bool {
-    KBSYNC_CANCEL_REQUESTED.load(Ordering::SeqCst)
+    KBSYNC_CANCEL_REQUESTS.load(Ordering::SeqCst) > 0
 }
 
+/// Пока живёт — KBSync не запускается, а уже запущенный завершается.
+///
+/// Создаётся ДО ожидания общего замка ipatool: прогрев держит этот замок, и
+/// без отмены выход из Apple ID ждал бы конца порождения (у людей — до 172 с).
+/// Снимается только при выходе из команды, то есть уже после того, как она
+/// сама отпустила замок — раньше времени отмена не пропадает.
 struct KbsyncCancelGuard;
 
 impl KbsyncCancelGuard {
     fn new() -> Self {
-        cancel_kbsync_warm();
+        KBSYNC_CANCEL_REQUESTS.fetch_add(1, Ordering::SeqCst);
         Self
     }
 }
 
 impl Drop for KbsyncCancelGuard {
     fn drop(&mut self) {
-        reset_kbsync_cancel();
+        // Команда переписала или удалила файл аккаунта — прежняя проверка
+        // «blob на месте» к новому файлу уже не относится.
+        forget_kbsync_presence();
+        KBSYNC_CANCEL_REQUESTS.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// Чем закончился запуск, прерванный сменой аккаунта.
+const KBSYNC_CANCELLED: &str = "KBSYNC_CANCELLED";
+
+/// Зачем прогревают KBSync.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KbsyncWarm {
+    /// Фон: пересоздать blob, если отметке больше часа или сменился движок.
+    RefreshIfStale,
+    /// Перед опросом версий: породить, только если у аккаунта blob нет вовсе.
+    /// Готовый движок отдаёт из файла аккаунта за доли секунды.
+    OnlyIfMissing,
 }
 
 fn kbsync_warm_lock() -> &'static Mutex<()> {
@@ -3563,7 +3599,7 @@ fn warm_kbsync_cache(app: &AppHandle, email: &str) {
         if !load_settings(&app).map(|s| s.background_enabled).unwrap_or(false) { return; }
         let state = app.state::<AppState>();
         let Ok(_tool_guard) = state.ipatool_lock.try_lock() else { return; };
-        warm_kbsync_now(&app, &email, false).await;
+        warm_kbsync_now(&app, &email, KbsyncWarm::RefreshIfStale).await;
     });
 }
 
@@ -3626,39 +3662,60 @@ fn active_v5_version(app: &AppHandle) -> String {
         .unwrap_or_else(|_| KBSYNC_UPSTREAM_VERSION.to_string())
 }
 
-async fn warm_kbsync_now(app: &AppHandle, email: &str, refresh: bool) {
+/// Чем закончился прогрев.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KbsyncWarmOutcome {
+    /// Blob у аккаунта есть (порождён сейчас или уже лежал в файле).
+    Ready,
+    /// Прогрев не понадобился или не удался; повторять сразу незачем.
+    Unavailable,
+    /// Прерван входом, выходом или сменой аккаунта.
+    Cancelled,
+}
+
+async fn warm_kbsync_now(app: &AppHandle, email: &str, mode: KbsyncWarm) -> KbsyncWarmOutcome {
     let _warm_guard = kbsync_warm_lock().lock().await;
     if kbsync_cancel_requested() {
-        return;
+        return KbsyncWarmOutcome::Cancelled;
     }
+    let scope = match mode {
+        KbsyncWarm::RefreshIfStale => "фон",
+        KbsyncWarm::OnlyIfMissing => "каталог",
+    };
     let email = normalize_account_email(email);
     let engine_version = active_v5_version(app);
     let cache_fresh = kbsync_cache_is_fresh(app, &email, &engine_version);
     if active_account_email(app).as_deref() != Some(email.as_str())
         || !saved_account_session_exists(app, &email)
-        || (!refresh && cache_fresh)
-        || kbsync_cancel_requested()
     {
-        return;
+        return KbsyncWarmOutcome::Unavailable;
+    }
+    if cache_fresh {
+        // Отметка свежая: blob порождён этим движком меньше часа назад.
+        return KbsyncWarmOutcome::Ready;
     }
     let Ok(tools) = resolve_tool_paths(app) else {
-        return;
+        return KbsyncWarmOutcome::Unavailable;
     };
     if !is_cpp_ipatool(&tools.ipatool) {
-        return;
+        return KbsyncWarmOutcome::Unavailable;
     }
     let Ok(keychain) = resolve_ipatool_keychain(app) else {
-        return;
+        return KbsyncWarmOutcome::Unavailable;
     };
-    match run_auth_info_once(&tools.ipatool, &keychain).await {
-        Ok(owner) if normalize_account_email(&owner) == email => {}
-        Ok(_) => return,
-        Err(error) => {
-            ipatool_debug_log(&format!(
-                "kbsync warm skipped: session unavailable ({})",
-                technical_excerpt(&error, 180)
-            ));
-            return;
+    // Фон сверяет владельца сессии сам. Перед опросом версий это уже сделал
+    // вызывающий (ensure_active_ipatool_session), второй запуск движка лишний.
+    if mode == KbsyncWarm::RefreshIfStale {
+        match run_auth_info_once(&tools.ipatool, &keychain).await {
+            Ok(owner) if normalize_account_email(&owner) == email => {}
+            Ok(_) => return KbsyncWarmOutcome::Unavailable,
+            Err(error) => {
+                ipatool_debug_log(&format!(
+                    "kbsync warm skipped: session unavailable ({})",
+                    technical_excerpt(&error, 180)
+                ));
+                return KbsyncWarmOutcome::Unavailable;
+            }
         }
     }
 
@@ -3667,74 +3724,185 @@ async fn warm_kbsync_now(app: &AppHandle, email: &str, refresh: bool) {
     args.push("kbsync".into());
     // A missing/expired marker means the account's embedded blob may be stale.
     // Force one generation after upgrade; subsequent catalog checks reuse it.
-    if refresh || !cache_fresh {
+    // Перед опросом версий --refresh не нужен: движок вернёт blob из файла
+    // аккаунта, а породит его, только если там пусто.
+    if mode == KbsyncWarm::RefreshIfStale {
         args.push("--refresh".into());
     }
     if kbsync_cancel_requested() {
-        return;
+        return KbsyncWarmOutcome::Cancelled;
     }
-    diag_log::note("фон", "прогрев KBSync для активного Apple ID: начат");
+    diag_log::note(scope, "прогрев KBSync для активного Apple ID: начат");
     let started = Instant::now();
-    let low_priority = std::env::args().any(|arg| arg == "--background")
+    // Человек ждёт список версий — приоритет не занижаем.
+    let low_priority = mode == KbsyncWarm::RefreshIfStale
+        && std::env::args().any(|arg| arg == "--background")
         && app.state::<AppState>().background_mode.load(Ordering::Relaxed);
     let output = match run_process_inner(&tools.ipatool, &args, Duration::from_secs(300), None, true, low_priority).await {
         Ok(output) => output,
+        Err(error) if error == KBSYNC_CANCELLED => {
+            diag_log::note(
+                scope,
+                &format!(
+                    "прогрев KBSync остановлен через {} с: меняется вход в Apple ID",
+                    started.elapsed().as_secs()
+                ),
+            );
+            return KbsyncWarmOutcome::Cancelled;
+        }
         Err(error) => {
             diag_log::note(
-                "фон",
+                scope,
                 &format!(
                 "прогрев KBSync: ошибка за {} с — {}",
                 started.elapsed().as_secs(),
                 technical_excerpt(&redact_kbsync_output(&error), 240)
             ),
             );
-            return;
+            return KbsyncWarmOutcome::Unavailable;
         }
     };
     let Some(result) = parse_json_object_from_text(&output) else {
-        diag_log::note("фон", "прогрев KBSync: движок вернул некорректный ответ");
-        return;
+        diag_log::note(scope, "прогрев KBSync: движок вернул некорректный ответ");
+        return KbsyncWarmOutcome::Unavailable;
     };
     if !json_bool(result.get("success"), false) {
         diag_log::note(
-            "фон",
+            scope,
             &format!(
                 "прогрев KBSync: движок не подтвердил blob, length={} header={}",
                 result.get("length").and_then(JsonValue::as_u64).unwrap_or(0),
                 result.get("header").and_then(JsonValue::as_str).unwrap_or("нет")
             ),
         );
-        return;
+        return KbsyncWarmOutcome::Unavailable;
+    }
+    let source = result.get("source").and_then(JsonValue::as_str).unwrap_or("готово");
+    if !kbsync_result_is_fresh_generation(mode, source) {
+        // Blob уже лежал в файле аккаунта. Отметку не трогаем: она говорит
+        // фону, когда blob порождали в последний раз, а сейчас его не порождали.
+        diag_log::note(
+            scope,
+            &format!("KBSync уже есть у аккаунта ({source}), порождать не пришлось"),
+        );
+        return KbsyncWarmOutcome::Ready;
     }
     if let Err(error) = backup_ipatool_session_for_account(app, &email) {
         ipatool_debug_log(&format!("KBSync generated but account session backup failed: {error}"));
-        return;
+        return KbsyncWarmOutcome::Ready;
     }
     let Some(stamp) = kbsync_stamp_path(app, &email) else {
-        return;
+        return KbsyncWarmOutcome::Ready;
     };
     if let Some(parent) = stamp.parent() {
         if fs::create_dir_all(parent).is_err() {
-            return;
+            return KbsyncWarmOutcome::Ready;
         }
     }
     let temp = stamp.with_extension(format!("stamp.{}.tmp", std::process::id()));
     if fs::write(&temp, engine_version.as_bytes()).is_err() {
-        return;
+        return KbsyncWarmOutcome::Ready;
     }
     let _ = fs::remove_file(&stamp);
     if fs::rename(&temp, &stamp).is_err() {
         let _ = fs::remove_file(&temp);
-        return;
+        return KbsyncWarmOutcome::Ready;
     }
     diag_log::note(
-        "фон",
+        scope,
         &format!(
-            "прогрев KBSync {} готов за {} с",
-            result.get("source").and_then(JsonValue::as_str).unwrap_or("готово"),
+            "прогрев KBSync {source} готов за {} с",
             started.elapsed().as_secs()
         ),
     );
+    KbsyncWarmOutcome::Ready
+}
+
+/// Порождён ли blob этим запуском — только тогда обновляется отметка.
+///
+/// Фон всегда зовёт движок с `--refresh`, и тот порождает заново. Перед
+/// опросом версий `--refresh` нет: `source: "cache"` значит, что blob взят из
+/// файла аккаунта как есть.
+fn kbsync_result_is_fresh_generation(mode: KbsyncWarm, source: &str) -> bool {
+    mode == KbsyncWarm::RefreshIfStale || !source.eq_ignore_ascii_case("cache")
+}
+
+/// Через сколько повторить проверку KBSync после неудачи.
+const KBSYNC_PRESENCE_RETRY: Duration = Duration::from_secs(600);
+
+/// Что известно о KBSync активного аккаунта в этом запуске приложения.
+struct KbsyncPresence {
+    email: String,
+    ready: bool,
+    checked_at: Instant,
+}
+
+fn kbsync_presence_memo() -> &'static StdMutex<Option<KbsyncPresence>> {
+    static MEMO: OnceLock<StdMutex<Option<KbsyncPresence>>> = OnceLock::new();
+    MEMO.get_or_init(|| StdMutex::new(None))
+}
+
+/// Нужно ли снова спрашивать движок про KBSync этого аккаунта.
+///
+/// Удачу помним до смены аккаунта. Отказ — десять минут: движок без команды
+/// `kbsync` иначе запускался бы впустую перед каждой проверкой каталога, а
+/// вечно помнить отказ нельзя — причина могла быть разовой.
+fn kbsync_presence_needs_check(
+    memo: Option<&KbsyncPresence>,
+    email: &str,
+    now: Instant,
+) -> bool {
+    match memo {
+        Some(known) if known.email == email => {
+            !known.ready
+                && now.saturating_duration_since(known.checked_at) >= KBSYNC_PRESENCE_RETRY
+        }
+        _ => true,
+    }
+}
+
+/// Перед серией `list-versions`: убедиться, что у аккаунта есть KBSync.
+///
+/// `list-versions` зовёт в движке `prepare_kbsync`, и при пустом файле аккаунта
+/// тот порождает blob сам — 20 секунд на быстрой машине и до трёх минут на
+/// медленной. Опрос версий при этом живёт 75 секунд: на медленной машине его
+/// убивали до конца порождения, blob не сохранялся, и следующий опрос начинал
+/// с нуля — список версий не появлялся никогда. Поэтому порождаем один раз
+/// заранее, с запасом по времени.
+///
+/// Прежний `ensure_kbsync_warm` делал то же, но пересоздавал blob каждый час
+/// (`--refresh`), даже когда тот был на месте, — и каталог раз в час замирал
+/// на всё время порождения. Здесь blob порождается, только если его нет;
+/// ежечасное обновление остаётся фону.
+async fn ensure_kbsync_present(app: &AppHandle) {
+    let Some(email) = active_account_email(app)
+        .filter(|email| saved_account_session_exists(app, email))
+    else {
+        return;
+    };
+    if !kbsync_presence_needs_check(
+        kbsync_presence_memo().lock().unwrap().as_ref(),
+        &email,
+        Instant::now(),
+    ) {
+        return;
+    }
+    let ready = match warm_kbsync_now(app, &email, KbsyncWarm::OnlyIfMissing).await {
+        // Прервали сменой аккаунта — для нового аккаунта спросим заново.
+        KbsyncWarmOutcome::Cancelled => return,
+        KbsyncWarmOutcome::Ready => true,
+        KbsyncWarmOutcome::Unavailable => false,
+    };
+    *kbsync_presence_memo().lock().unwrap() = Some(KbsyncPresence {
+        email,
+        ready,
+        checked_at: Instant::now(),
+    });
+}
+
+/// Забыть, что KBSync проверяли: файл аккаунта переписан или удалён.
+fn forget_kbsync_presence() {
+    *kbsync_presence_memo().lock().unwrap() = None;
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -3888,6 +4056,188 @@ fn ensure_macos_sap_sidecar(ipatool: &str) {
 
 #[cfg(not(target_os = "macos"))]
 fn ensure_macos_sap_sidecar(_ipatool: &str) {}
+
+/// Разложить Go-движок вместе с подписчиком в папку, куда можно писать.
+///
+/// Копируются все файлы из папки движка (рядом могут лежать его библиотеки)
+/// и `sapsigner`. Возвращает путь к движку в новой папке.
+///
+/// Копируем содержимое, а не файл целиком: `fs::copy` на macOS переносит и
+/// расширенные атрибуты, в том числе карантин с только что скачанного .app, а
+/// помеченный карантином исполняемый файл вне пакета система может не
+/// запустить.
+///
+/// Повторно не копирует: рядом кладётся список «имя, размер, время изменения»
+/// исходных файлов, и пока он совпадает, папка считается готовой. Новая версия
+/// приложения приносит другие файлы — список расходится, папка обновляется.
+#[cfg(any(target_os = "macos", test))]
+fn stage_engine_with_signer(
+    engine: &Path,
+    signer: &Path,
+    stage_dir: &Path,
+) -> Result<PathBuf, String> {
+    // Две операции разом (вход и проверка каталога) не должны писать одни и
+    // те же файлы наперегонки.
+    static STAGING: StdMutex<()> = StdMutex::new(());
+    let _serial = STAGING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let engine_name = engine
+        .file_name()
+        .ok_or_else(|| format!("у движка нет имени файла: {}", engine.display()))?;
+    let source_dir = engine
+        .parent()
+        .ok_or_else(|| format!("у движка нет папки: {}", engine.display()))?;
+    let mut wanted: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(source_dir).map_err(|e| format!("{}: {e}", source_dir.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_file() && entry.file_name() != "sapsigner" {
+            wanted.push((entry.file_name(), path));
+        }
+    }
+    wanted.push(("sapsigner".into(), signer.to_path_buf()));
+    wanted.sort();
+
+    let mut listing = String::new();
+    for (name, path) in &wanted {
+        let meta = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|age| age.as_secs())
+            .unwrap_or(0);
+        listing.push_str(&format!("{}\t{}\t{modified}\n", name.to_string_lossy(), meta.len()));
+    }
+
+    let marker = stage_dir.join(".staged");
+    let same_size = |name: &std::ffi::OsString, source: &PathBuf| {
+        fs::metadata(stage_dir.join(name))
+            .ok()
+            .zip(fs::metadata(source).ok())
+            .is_some_and(|(staged, original)| staged.is_file() && staged.len() == original.len())
+    };
+    let ready = fs::read_to_string(&marker).ok().as_deref() == Some(listing.as_str())
+        && wanted.iter().all(|(name, source)| same_size(name, source));
+    if !ready {
+        fs::create_dir_all(stage_dir).map_err(|e| format!("{}: {e}", stage_dir.display()))?;
+        // Список пишется последним: оборванное копирование не выдаст
+        // недописанную папку за готовую.
+        let _ = fs::remove_file(&marker);
+        for (name, source) in &wanted {
+            let target = stage_dir.join(name);
+            let mut temp_name = name.clone();
+            temp_name.push(format!(".{}.tmp", std::process::id()));
+            let temp = stage_dir.join(temp_name);
+            let copied = (|| -> std::io::Result<()> {
+                let mut from = fs::File::open(source)?;
+                let mut to = fs::File::create(&temp)?;
+                std::io::copy(&mut from, &mut to)?;
+                to.flush()?;
+                drop(to);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&temp, fs::Permissions::from_mode(0o755))?;
+                }
+                fs::rename(&temp, &target)
+            })();
+            if let Err(error) = copied {
+                let _ = fs::remove_file(&temp);
+                return Err(format!("{} -> {}: {error}", source.display(), target.display()));
+            }
+        }
+        fs::write(&marker, &listing).map_err(|e| format!("{}: {e}", marker.display()))?;
+    }
+    Ok(stage_dir.join(engine_name))
+}
+
+/// Можно ли создать файл в этой папке. Ответ запоминается на время работы.
+///
+/// Права в `metadata` тут не помогут: при App Translocation и при запуске из
+/// образа .dmg они выглядят обычными, а том смонтирован только для чтения.
+/// Узнать это можно одним способом — попробовать.
+#[cfg(target_os = "macos")]
+fn macos_dir_accepts_files(dir: &Path) -> bool {
+    static KNOWN: OnceLock<StdMutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(|| StdMutex::new(HashMap::new()));
+    if let Some(answer) = known.lock().unwrap().get(dir) {
+        return *answer;
+    }
+    let probe = dir.join(format!(".signum-write-probe-{}", std::process::id()));
+    let writable = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .is_ok();
+    let _ = fs::remove_file(&probe);
+    known.lock().unwrap().insert(dir.to_path_buf(), writable);
+    writable
+}
+
+/// Go-движок (v4) с подписчиком `sapsigner` рядом — где бы ни лежал Signum.
+///
+/// Подписчик должен лежать в одной папке с движком. Обычно его докладывает
+/// туда `ensure_macos_sap_sidecar`, но папка движка — внутри Signum.app, а
+/// писать туда можно не всегда:
+///
+/// * приложение запущено прямо из «Загрузок» или из образа .dmg — macOS
+///   показывает его из копии только для чтения (App Translocation, путь вида
+///   `/private/var/folders/…/AppTranslocation/…/Signum.app`);
+/// * приложение поставил администратор, а работает обычный пользователь.
+///
+/// В отчётах это выглядело как `sapsigner copy failed`, а человеку вход
+/// отвечал «не найден компонент подписи… переустановите Signum» — хотя
+/// переустановка тут ничего не меняла. В таких случаях движок и подписчик
+/// раскладываются в Application Support и запускаются оттуда — так же, как
+/// живёт движок, приехавший обновлением по воздуху.
+#[cfg(target_os = "macos")]
+fn macos_go_engine_ready(app: &AppHandle, engine: String) -> String {
+    if engine.is_empty() || is_cpp_ipatool(&engine) {
+        return engine;
+    }
+    let engine_path = PathBuf::from(&engine);
+    let Some(engine_dir) = engine_path.parent().filter(|dir| dir.is_dir()) else {
+        return engine;
+    };
+    if !engine_path.is_file()
+        || sap_helper_path_for(&engine).is_some()
+        || macos_dir_accepts_files(engine_dir)
+    {
+        // Подписчик уже рядом либо его можно положить рядом — прежний путь.
+        return engine;
+    }
+    let Some(signer) = resolve_store_sap_helper(app) else {
+        ipatool_debug_log(&format!(
+            "sap signer is not bundled; {engine} stays where it is"
+        ));
+        return engine;
+    };
+    let Ok(tools_dir) = managed_tools_dir(app) else {
+        return engine;
+    };
+    let leaf = engine_dir
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| "v4".into());
+    let stage_dir = tools_dir.join("staged").join(leaf);
+    match stage_engine_with_signer(&engine_path, Path::new(&signer), &stage_dir) {
+        Ok(staged) => {
+            ipatool_debug_log(&format!(
+                "engine folder is read-only ({}); running {} with its signer",
+                engine_dir.display(),
+                staged.display()
+            ));
+            staged.to_string_lossy().into_owned()
+        }
+        Err(error) => {
+            ipatool_debug_log(&format!(
+                "could not stage the engine out of a read-only folder: {error}"
+            ));
+            engine
+        }
+    }
+}
 
 /// Unicorn 2.1.4 (v4 engine) normally downloads libunicorn.dll from GitHub,
 /// which is slow/unreachable from some networks (seen: i/o timeout on
@@ -4145,6 +4495,9 @@ fn resolve_tool_paths(app: &AppHandle) -> Result<ToolPaths, String> {
             _ if tool_available(&v5) => v5,
             _ => v4,
         };
+        // Из Signum.app, открытого только для чтения, Go-движок переезжает в
+        // Application Support вместе с подписчиком (см. macos_go_engine_ready).
+        let ipatool = macos_go_engine_ready(app, ipatool);
         let paths = ToolPaths {
             ipatool,
             anisette: None,
@@ -4197,6 +4550,9 @@ fn resolve_tool_paths(app: &AppHandle) -> Result<ToolPaths, String> {
             _ if tool_available(&v5) => v5,
             _ => v4,
         };
+        // Из Signum.app, открытого только для чтения, Go-движок переезжает в
+        // Application Support вместе с подписчиком (см. macos_go_engine_ready).
+        let ipatool = macos_go_engine_ready(app, ipatool);
         let paths = ToolPaths {
             ipatool,
             anisette: None,
@@ -4538,11 +4894,16 @@ fn login_tool_paths(app: &AppHandle) -> Vec<(String, ToolPaths)> {
             Err(_) => return Vec::new(),
         };
         let v4 = ToolPaths {
-            ipatool: engine_binary_or_empty(
+            // Тот же путь, что выберет resolve_tool_paths: иначе вход и
+            // последующие операции запускали бы движок из разных папок.
+            ipatool: macos_go_engine_ready(
                 app,
-                "ipatool-v4",
-                "resources/apple-tools/macos-arm64/v4/ipatool",
-                "apple-tools/macos-arm64/v4/ipatool",
+                engine_binary_or_empty(
+                    app,
+                    "ipatool-v4",
+                    "resources/apple-tools/macos-arm64/v4/ipatool",
+                    "apple-tools/macos-arm64/v4/ipatool",
+                ),
             ),
             anisette: None,
             ..base.clone()
@@ -4571,11 +4932,16 @@ fn login_tool_paths(app: &AppHandle) -> Vec<(String, ToolPaths)> {
             Err(_) => return Vec::new(),
         };
         let v4 = ToolPaths {
-            ipatool: engine_binary_or_empty(
+            // Тот же путь, что выберет resolve_tool_paths: иначе вход и
+            // последующие операции запускали бы движок из разных папок.
+            ipatool: macos_go_engine_ready(
                 app,
-                "ipatool-v4",
-                "resources/apple-tools/macos-x64/v4/ipatool",
-                "apple-tools/macos-x64/v4/ipatool",
+                engine_binary_or_empty(
+                    app,
+                    "ipatool-v4",
+                    "resources/apple-tools/macos-x64/v4/ipatool",
+                    "apple-tools/macos-x64/v4/ipatool",
+                ),
             ),
             anisette: None,
             ..base.clone()
@@ -7346,9 +7712,31 @@ async fn available_catalog_versions_on_account(
     // truncating writers cannot corrupt the session between requests.
     let probe_concurrency = ACCOUNT_VERSION_PROBE_CONCURRENCY;
 
+    // Один раз до серии опросов убеждаемся, что у аккаунта есть KBSync.
+    // Пересоздавать готовый blob здесь нельзя (это и подвешивало каталог раз в
+    // час), а вот пустой файл аккаунта надо заполнить заранее: иначе каждый
+    // list-versions порождает blob сам и на медленной машине не успевает.
+    if !candidates.is_empty() {
+        ensure_kbsync_present(app).await;
+    }
+
     let mut owned: Vec<JsonValue> = Vec::new();
     let mut unchecked = 0usize;
+    let mut probed = 0usize;
     for chunk in candidates.chunks(probe_concurrency) {
+        // Человек нажал «Выйти» или входит в другой Apple ID. Команда ждёт
+        // общий замок, который держит эта проверка, а ответы про прежний
+        // аккаунт уже никому не нужны: остаток помечаем непроверенным и
+        // отпускаем замок, не доходя до конца списка (по 75 с на строку).
+        if kbsync_cancel_requested() {
+            unchecked += candidates.len() - probed;
+            ipatool_debug_log(&format!(
+                "version-probe остановлен: меняется вход в Apple ID, не проверено {}",
+                candidates.len() - probed
+            ));
+            break;
+        }
+        probed += chunk.len();
     let chunk_concurrency = probe_concurrency;
     let results = stream::iter(chunk.to_vec().into_iter().enumerate())
         .map(|(index, version)| async move {
@@ -11055,6 +11443,20 @@ fn format_login_error(output: &str, password: &str) -> String {
             &sanitized,
         );
     }
+    // Apple ответила на вход не решением, а служебным кодом: 301, 204, 403,
+    // 404 или 500. Пароль тут ни при чём, и второй движок с теми же данными
+    // получит то же самое. Метку SIGNUM_APPLE_UNAVAILABLE читает
+    // login_catalog_with_fallback: технический хвост с кодом ответа в обычном
+    // режиме отрезается, и без метки отличить этот отказ было бы не по чему.
+    if let Some(status) = apple_opaque_auth_status(&lowered) {
+        return with_technical_detail(
+            &format!(
+                "{APPLE_UNAVAILABLE_MARKER} Apple сейчас не принимает вход (ответ сервера {status}). \
+                 Пароль менять не нужно — подождите несколько минут и повторите."
+            ),
+            &sanitized,
+        );
+    }
     // Opaque ipatool-cpp body. The caller may turn this into a 2FA retry only
     // when it actually submitted a code; an initial login remains a generic
     // transient Apple error.
@@ -11885,6 +12287,9 @@ async fn login_apple(
         Err(error)
             if providing_2fa
                 && !is_invalid_2fa_code_error(&error)
+                // Служебный ответ Apple — не сбой связи: повтор стал бы ещё
+                // одной засчитанной попыткой входа.
+                && !is_apple_opaque_auth_response(&error)
                 && is_transient_2fa_check_error(&error) =>
         {
             ipatool_debug_log("login 2fa transient retry");
@@ -12531,15 +12936,53 @@ async fn logout_apple(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
     remove_apple_account_inner(&app, &email).await
 }
 
+/// Метка «Apple ответила служебным кодом, а не решением по входу».
+const APPLE_UNAVAILABLE_MARKER: &str = "SIGNUM_APPLE_UNAVAILABLE:";
+
+/// Коды, которыми Apple отвечает на вход, когда не говорит ни «да», ни «нет».
+const APPLE_OPAQUE_AUTH_STATUSES: [u16; 5] = [301, 204, 403, 404, 500];
+
+/// Служебный код ответа Apple из сырого вывода движка, если он из «немых».
+///
+/// Движки пишут его по-разному: ipatool-cpp — «something went wrong
+/// (status=403)», Go-движок — «authentication request failed after 3 attempts
+/// (HTTP 204, 404, 404): …». Ждёт текст в нижнем регистре.
+fn apple_opaque_auth_status(lowered: &str) -> Option<u16> {
+    let about_sign_in = lowered.contains("login error")
+        || lowered.contains("something went wrong")
+        || lowered.contains("authentication request")
+        || lowered.contains("no usable authentication response")
+        || lowered.contains("empty or non-plist");
+    if !about_sign_in {
+        return None;
+    }
+    static STATUS: OnceLock<Regex> = OnceLock::new();
+    static HTTP_LIST: OnceLock<Regex> = OnceLock::new();
+    let status = STATUS.get_or_init(|| Regex::new(r"status\s*=\s*(\d{3})\b").unwrap());
+    let http_list =
+        HTTP_LIST.get_or_init(|| Regex::new(r"http\s+(\d{3}(?:\s*,\s*\d{3})*)").unwrap());
+    let mut codes: Vec<u16> = status
+        .captures_iter(lowered)
+        .filter_map(|found| found[1].parse::<u16>().ok())
+        .collect();
+    for found in http_list.captures_iter(lowered) {
+        codes.extend(found[1].split(',').filter_map(|code| code.trim().parse::<u16>().ok()));
+    }
+    // Последний код — тот, на котором движок сдался.
+    codes
+        .into_iter()
+        .rev()
+        .find(|code| APPLE_OPAQUE_AUTH_STATUSES.contains(code))
+}
+
+/// Apple ответила на вход служебным кодом — второй движок не поможет.
+///
+/// Принимает и сырой вывод движка, и уже готовое сообщение из
+/// `format_login_error`: в обычном режиме (без подробных ошибок) от вывода
+/// остаётся только метка, кода ответа в тексте уже нет.
 fn is_apple_opaque_auth_response(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("something went wrong")
-        || (lower.contains("status=301") || lower.contains("status=204")
-            || lower.contains("status=403") || lower.contains("status=404")
-            || lower.contains("status=500"))
-            && (lower.contains("login error") || lower.contains("authentication request")
-                || lower.contains("no usable authentication response")
-                || lower.contains("empty or non-plist"))
+    error.contains(APPLE_UNAVAILABLE_MARKER)
+        || apple_opaque_auth_status(&error.to_ascii_lowercase()).is_some()
 }
 
 fn parse_key_values(output: &str) -> HashMap<String, String> {
@@ -12655,34 +13098,117 @@ fn is_sinf_warning_only_install_output(text: &str) -> bool {
     true
 }
 
-fn ideviceinstaller_reports_install_done(program: &str, args: &[String], output: &str) -> bool {
-    let name = Path::new(program)
-        .file_name()
-        .and_then(|name| name.to_str())
+/// Сколько ждать, пока ideviceinstaller сам выйдет после «Complete».
+const IDEVICEINSTALLER_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Запуск ideviceinstaller на установку или обновление приложения.
+fn is_ideviceinstaller_install_command(program: &str, args: &[String]) -> bool {
+    // Делим по обоим разделителям: путь из Windows приходит с «\», а проверки
+    // гоняются и на Linux, где `Path::file_name` такую строку не разбирает.
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
         .unwrap_or(program)
         .to_ascii_lowercase();
-    if !name.starts_with("ideviceinstaller")
-        || !args.iter().any(|arg| matches!(arg.as_str(), "install" | "upgrade"))
-    {
-        return false;
+    name.starts_with("ideviceinstaller")
+        && args.iter().any(|arg| matches!(arg.as_str(), "install" | "upgrade"))
+}
+
+/// Телефон подтвердил установку: в выводе есть «Install: Complete».
+///
+/// Это единственная строка, которую ideviceinstaller печатает ПОСЛЕ того, как
+/// installd закончил работу (статус `Complete` в status_cb). Строки
+/// «DONE.» и «Installing '<bundle>'» печатаются раньше: первая — когда IPA
+/// залит на телефон, вторая — перед самой отправкой команды установки. Считать
+/// их успехом нельзя: приложение в этот момент ещё не ставилось, и отказ
+/// телефона («ERROR: Install failed. Got error …») приходит позже.
+fn ideviceinstaller_install_completed(lines: &[String]) -> bool {
+    let mut completed = false;
+    for line in lines {
+        let line = strip_ansi(line).trim().to_ascii_lowercase();
+        if line.starts_with("error:") || line.contains("apiinternalerror") {
+            // Отказ: пусть процесс выйдет сам и вернёт свой код.
+            return false;
+        }
+        let status = line
+            .strip_prefix("install")
+            .or_else(|| line.strip_prefix("upgrade"))
+            .map(|rest| rest.trim_start_matches([' ', ':', '-']));
+        // Новые сборки пишут «Install: Complete», старые — «Install - Complete».
+        if status == Some("complete") {
+            completed = true;
+        }
     }
-    let lower = strip_ansi(output).to_ascii_lowercase();
-    let terminal_done = lower.lines().any(|line| {
-        let line = line.trim();
-        line == "done." || line.starts_with("done. installing '") || line.starts_with("done. upgrading '")
-    });
-    let reports_target = lower.contains("installing '") || lower.contains("upgrading '");
-    if !(terminal_done && reports_target) {
-        return false;
+    completed
+}
+
+/// Стоит ли после отказа `install` пробовать `upgrade`, как это делает
+/// IPA_Downloader.
+///
+/// Не стоит, когда второй заход заведомо ничего не изменит: человек отменил
+/// задание, телефон пропал (для этого есть свой повтор по Wi‑Fi), процесс не
+/// ответил за шесть минут (ещё шесть минут ожидания никому не нужны) или сам
+/// ideviceinstaller не запустился.
+fn install_failure_allows_upgrade_retry(error: &str, cancelled: bool) -> bool {
+    !cancelled
+        && !is_process_timeout_error(error)
+        && !is_device_missing_error(error)
+        && !error.starts_with("Не удалось запустить")
+}
+
+/// Какую из двух ошибок показать, когда не помогли ни install, ни upgrade.
+fn pick_install_error(install_error: String, upgrade_error: String) -> String {
+    if is_device_missing_error(&upgrade_error) {
+        return device_not_found_message();
     }
-    !lower.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with("error:")
-            || line.starts_with("failed:")
-            || line.contains("apiinternalerror")
-            || line.contains("could not connect to lockdownd")
-            || line.contains("no device found")
-    })
+    // Общая фраза ничего не объясняет — если upgrade назвал причину точнее,
+    // показываем её. Во всех остальных случаях важнее первый отказ: это ответ
+    // на то действие, о котором человек просил.
+    let install_is_generic = install_error.starts_with("Не удалось выполнить операцию");
+    if install_is_generic && !is_process_timeout_error(&upgrade_error) {
+        upgrade_error
+    } else {
+        install_error
+    }
+}
+
+/// Стоит ли на телефоне та самая сборка, что лежит в IPA.
+///
+/// Совпадения одного идентификатора мало: приложение могло стоять и раньше.
+/// Нужна ещё и та же версия; если её не узнать с любой из сторон — «нет».
+fn installed_app_matches_ipa(
+    installed: &HashMap<String, InstalledApp>,
+    bundle_id: &str,
+    ipa_version: Option<&str>,
+) -> bool {
+    let Some(app) = installed.get(bundle_id) else {
+        return false;
+    };
+    match (ipa_version, app.version.as_deref()) {
+        (Some(want), Some(have)) if !want.trim().is_empty() && !have.trim().is_empty() => {
+            compare_versions(have, want) == 0
+        }
+        _ => false,
+    }
+}
+
+/// Встало ли приложение за время установки, которая кончилась таймаутом.
+///
+/// Одного «на телефоне стоит эта версия» мало: ту же версию переставляют
+/// постоянно (перевыпуск подписи раз в неделю), и старая копия выглядела бы
+/// как удачная установка. Поэтому нужен снимок ДО: успех — только когда этой
+/// сборки на телефоне не было, а теперь она есть. Нет снимка — не гадаем.
+fn timed_out_install_landed(
+    before: Option<&HashMap<String, InstalledApp>>,
+    after: &HashMap<String, InstalledApp>,
+    bundle_id: &str,
+    ipa_version: Option<&str>,
+) -> bool {
+    let Some(before) = before else {
+        return false;
+    };
+    !installed_app_matches_ipa(before, bundle_id, ipa_version)
+        && installed_app_matches_ipa(after, bundle_id, ipa_version)
 }
 
 fn is_usable_device_udid(value: &str) -> bool {
@@ -14114,6 +14640,41 @@ fn apply_windows_ipatool_helper_env(command: &mut Command, program: &str) {
     }
 }
 
+/// Начало сообщения о превышенном времени ожидания.
+///
+/// Вынесено, чтобы установка могла отличить «не дождались» от настоящего
+/// отказа, не сравнивая русский текст в двух местах.
+const PROCESS_TIMEOUT_PREFIX: &str = "Компонент не ответил вовремя";
+
+fn is_process_timeout_error(error: &str) -> bool {
+    error.starts_with(PROCESS_TIMEOUT_PREFIX)
+}
+
+/// Сколько ждать, пока убитый процесс закроет свои потоки вывода.
+const KILLED_CHILD_DRAIN: Duration = Duration::from_secs(2);
+
+/// Дочитать вывод убитого процесса, но не ждать его вечно.
+///
+/// Каналы stdout/stderr закрываются, только когда их отпустят ВСЕ владельцы.
+/// Если движок успел запустить соседний процесс (kbsync на macOS и Linux
+/// собирается отдельным файлом), тот наследует канал и держит его открытым
+/// ещё минуты после смерти родителя. Ждать тут без предела — значит вернуть
+/// ту самую задержку, ради снятия которой процесс убивали.
+async fn drain_killed_child_output(
+    out_task: &mut tokio::task::JoinHandle<()>,
+    err_task: &mut tokio::task::JoinHandle<()>,
+) {
+    let drained = tokio::time::timeout(KILLED_CHILD_DRAIN, async {
+        let _ = (&mut *out_task).await;
+        let _ = (&mut *err_task).await;
+    })
+    .await;
+    if drained.is_err() {
+        out_task.abort();
+        err_task.abort();
+    }
+}
+
 async fn run_process(
     program: &str,
     args: &[String],
@@ -14338,14 +14899,21 @@ async fn run_process_inner(
         .take()
         .ok_or_else(|| "Не удалось получить журнал вспомогательного компонента.".to_string())?;
     let output = Arc::new(StdMutex::new(Vec::<String>::new()));
-    let out_task = tokio::spawn(consume_stream(stdout, output.clone(), progress.clone()));
-    let err_task = tokio::spawn(consume_stream(stderr, output.clone(), progress.clone()));
+    let mut out_task = tokio::spawn(consume_stream(stdout, output.clone(), progress.clone()));
+    let mut err_task = tokio::spawn(consume_stream(stderr, output.clone(), progress.clone()));
     let started = Instant::now();
+    let is_kbsync_run = args.iter().any(|arg| arg == "kbsync");
+    let watch_install_complete = is_ideviceinstaller_install_command(program, args);
+    let mut install_complete_since: Option<Instant> = None;
     let status = loop {
-        if args.iter().any(|arg| arg == "kbsync") && kbsync_cancel_requested() {
+        if is_kbsync_run && kbsync_cancel_requested() {
             let _ = child.kill().await;
-            let _ = tokio::join!(out_task, err_task);
-            return Err("KBSYNC_CANCELLED".into());
+            drain_killed_child_output(&mut out_task, &mut err_task).await;
+            ipatool_debug_log(&format!(
+                "kbsync остановлен: меняется вход в Apple ID elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            return Err(KBSYNC_CANCELLED.into());
         }
         if let Some(progress) = progress.as_ref() {
             let state = progress.app.state::<AppState>();
@@ -14354,33 +14922,41 @@ async fn run_process_inner(
                 return Err("Загрузка отменена".into());
             }
         }
-        if ideviceinstaller_reports_install_done(
-            program,
-            args,
-            &output.lock().unwrap().join("\n"),
-        ) {
-            ipatool_debug_log(&format!(
-                "ideviceinstaller reported DONE before process exit elapsed_ms={}",
-                started.elapsed().as_millis()
-            ));
-            let _ = child.kill().await;
-            let _ = tokio::join!(out_task, err_task);
-            return Ok(output.lock().unwrap().join("\n"));
-        }
         if let Some(status) = child.try_wait().map_err(|_| {
             "Не удалось дождаться завершения вспомогательного компонента.".to_string()
         })? {
             break status;
         }
+        // ideviceinstaller уже напечатал «Install: Complete», но не выходит
+        // (ждёт уведомление от телефона или отписку от usbmuxd). Установка
+        // состоялась — даём ему несколько секунд выйти самому и завершаем.
+        if watch_install_complete {
+            if install_complete_since.is_none()
+                && ideviceinstaller_install_completed(&output.lock().unwrap())
+            {
+                install_complete_since = Some(Instant::now());
+            }
+            if install_complete_since
+                .is_some_and(|since| since.elapsed() >= IDEVICEINSTALLER_EXIT_GRACE)
+            {
+                ipatool_debug_log(&format!(
+                    "ideviceinstaller reported Complete but did not exit; stopping it elapsed_ms={}",
+                    started.elapsed().as_millis()
+                ));
+                let _ = child.kill().await;
+                drain_killed_child_output(&mut out_task, &mut err_task).await;
+                return Ok(output.lock().unwrap().join("\n"));
+            }
+        }
         if started.elapsed() >= duration {
             let _ = child.kill().await;
-            let _ = tokio::join!(out_task, err_task);
+            drain_killed_child_output(&mut out_task, &mut err_task).await;
             let text = output.lock().unwrap().join("\n");
             let program_name = Path::new(program)
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("Компонент");
-            let timeout_text = if args.iter().any(|arg| arg == "kbsync") {
+            let timeout_text = if is_kbsync_run {
                 redact_kbsync_output(&text)
             } else {
                 text
@@ -14392,7 +14968,7 @@ async fn run_process_inner(
             ));
             return Err(with_technical_detail(
                 &format!(
-                    "Компонент не ответил вовремя ({} с). Проверьте подключение и повторите попытку.",
+                    "{PROCESS_TIMEOUT_PREFIX} ({} с). Проверьте подключение и повторите попытку.",
                     duration.as_secs()
                 ),
                 &excerpt,
@@ -14402,7 +14978,7 @@ async fn run_process_inner(
     };
     let _ = tokio::join!(out_task, err_task);
     let text = output.lock().unwrap().join("\n");
-    let diagnostic_text = if args.iter().any(|arg| arg == "kbsync") {
+    let diagnostic_text = if is_kbsync_run {
         redact_kbsync_output(&text)
     } else {
         text.clone()
@@ -14741,9 +15317,13 @@ async fn install_ipa(
         progress_from,
         progress_to,
     );
+    // Что стоит на телефоне до установки. Понадобится, только если
+    // ideviceinstaller замолчит до таймаута: тогда по этому снимку видно,
+    // появилось приложение сейчас или стояло и раньше.
+    let installed_before = installed_snapshot_before_install(app).await;
     let base = vec!["install".into(), path.to_string_lossy().into_owned()];
     let args = idevice_args_with_udid(app, base.clone());
-    match run_process(
+    let install_error = match run_process(
         &tools.ideviceinstaller,
         &args,
         Duration::from_secs(360),
@@ -14751,41 +15331,34 @@ async fn install_ipa(
     )
     .await
     {
-        Ok(_) => Ok(()),
+        Ok(_) => return Ok(()),
         // Free-sign IPAs have no App Store .sinf — warning only, install still OK.
-        Err(error) if is_sinf_warning_only_install_output(&error) => Ok(()),
-        // Match IPA_Downloader: an existing bundle is upgraded after a normal
-        // install refusal. This also handles the common «already installed»
-        // path without making the user remove the app manually.
-        Err(error) if !is_device_missing_error(&error) => {
-            let upgrade = idevice_args_with_udid(
-                app,
-                vec!["upgrade".into(), path.to_string_lossy().into_owned()],
-            );
-            match run_process(
-                &tools.ideviceinstaller,
-                &upgrade,
-                Duration::from_secs(360),
-                Some(ProcessProgress::new(
-                    app.clone(),
-                    job_id.into(),
-                    "install".into(),
-                    progress_from,
-                    progress_to,
-                )),
-            )
-            .await
-            {
-                Ok(_) => Ok(()),
-                Err(upgrade_error) if is_sinf_warning_only_install_output(&upgrade_error) => Ok(()),
-                Err(upgrade_error) => Err(upgrade_error),
-            }
-        }
-        Err(error)
-            if is_device_missing_error(&error)
-                && !args.iter().any(|a| a == "-n")
-                && selected_device_connection(app) != "wifi" =>
+        Err(error) if is_sinf_warning_only_install_output(&error) => return Ok(()),
+        Err(error) => error,
+    };
+    let cancelled = is_job_cancelled(&app.state::<AppState>(), job_id);
+    if cancelled {
+        return Err(install_error);
+    }
+    if is_process_timeout_error(&install_error) {
+        // ideviceinstaller молчал шесть минут. Бывает, что телефон приложение
+        // поставил, а процесс так и не узнал об этом. Гадать по его выводу
+        // нельзя — спрашиваем сам телефон.
+        if ipa_landed_on_device_after_timeout(
+            app,
+            job_id,
+            path,
+            progress_to,
+            installed_before.as_ref(),
+        )
+        .await
         {
+            return Ok(());
+        }
+        return Err(install_error);
+    }
+    if is_device_missing_error(&install_error) {
+        if !args.iter().any(|a| a == "-n") && selected_device_connection(app) != "wifi" {
             // USB gone mid-job — retry over Wi‑Fi if the phone is on the network.
             let progress_retry = ProcessProgress::new(
                 app.clone(),
@@ -14795,7 +15368,7 @@ async fn install_ipa(
                 progress_to,
             );
             let net_args = idevice_args_network(app, base);
-            match run_process(
+            return match run_process(
                 &tools.ideviceinstaller,
                 &net_args,
                 Duration::from_secs(360),
@@ -14809,11 +15382,136 @@ async fn install_ipa(
                     Err(device_not_found_message())
                 }
                 Err(net_err) => Err(net_err),
-            }
+            };
         }
-        Err(error) if is_device_missing_error(&error) => Err(device_not_found_message()),
-        Err(error) => Err(error),
+        return Err(device_not_found_message());
     }
+    if !install_failure_allows_upgrade_retry(&install_error, cancelled) {
+        return Err(install_error);
+    }
+    // Match IPA_Downloader: an existing bundle is upgraded after a normal
+    // install refusal. This also handles the common «already installed»
+    // path without making the user remove the app manually.
+    ipatool_debug_log(&format!(
+        "install refused, trying upgrade: {}",
+        technical_excerpt(&install_error, 400)
+    ));
+    let upgrade = idevice_args_with_udid(
+        app,
+        vec!["upgrade".into(), path.to_string_lossy().into_owned()],
+    );
+    match run_process(
+        &tools.ideviceinstaller,
+        &upgrade,
+        Duration::from_secs(360),
+        Some(ProcessProgress::new(
+            app.clone(),
+            job_id.into(),
+            "install".into(),
+            progress_from,
+            progress_to,
+        )),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(upgrade_error) if is_sinf_warning_only_install_output(&upgrade_error) => Ok(()),
+        Err(upgrade_error) => {
+            if is_job_cancelled(&app.state::<AppState>(), job_id) {
+                return Err(upgrade_error);
+            }
+            if is_process_timeout_error(&upgrade_error)
+                && ipa_landed_on_device_after_timeout(
+                    app,
+                    job_id,
+                    path,
+                    progress_to,
+                    installed_before.as_ref(),
+                )
+                .await
+            {
+                return Ok(());
+            }
+            ipatool_debug_log(&format!(
+                "upgrade after refused install failed too: {}",
+                technical_excerpt(&upgrade_error, 400)
+            ));
+            Err(pick_install_error(install_error, upgrade_error))
+        }
+    }
+}
+
+/// Список приложений на телефоне перед установкой.
+///
+/// Ждём недолго: это страховка на редкий случай, и задерживать из-за неё
+/// каждую установку нельзя. Не успели или телефон не ответил — снимка нет, и
+/// после таймаута установка останется ошибкой, как и раньше.
+async fn installed_snapshot_before_install(
+    app: &AppHandle,
+) -> Option<HashMap<String, InstalledApp>> {
+    match tokio::time::timeout(Duration::from_secs(8), list_installed_apps_inner(app)).await {
+        Ok(Ok(apps)) => Some(
+            apps.into_iter()
+                .filter(|item| !item.is_placeholder)
+                .map(|item| (item.bundle_id.clone(), item))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// После таймаута ideviceinstaller: поставилось ли приложение на самом деле.
+///
+/// Смотрим список приложений на телефоне и сверяем идентификатор и версию с
+/// тем, что лежит в IPA, и со снимком до установки. Телефон мог ещё
+/// доделывать установку в момент, когда процесс убили, поэтому спрашиваем
+/// дважды с паузой.
+async fn ipa_landed_on_device_after_timeout(
+    app: &AppHandle,
+    job_id: &str,
+    path: &Path,
+    progress: f64,
+    installed_before: Option<&HashMap<String, InstalledApp>>,
+) -> bool {
+    // Без снимка «до» ответ телефона ничего не доказывает — не тратим время.
+    if installed_before.is_none() {
+        return false;
+    }
+    let (bundle_id, _, version, _) = cached_ipa_metadata(path);
+    let Some(bundle_id) = bundle_id.filter(|value| !value.trim().is_empty()) else {
+        return false;
+    };
+    update_job(
+        app,
+        job_id,
+        "install",
+        progress,
+        "Проверяем, установилось ли приложение на iPhone…",
+        JobStatus::Running,
+        None,
+    )
+    .await;
+    for attempt in 0..2u8 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        if is_job_cancelled(&app.state::<AppState>(), job_id) {
+            return false;
+        }
+        let installed = installed_apps_map(app).await;
+        if timed_out_install_landed(installed_before, &installed, &bundle_id, version.as_deref()) {
+            ipatool_debug_log(&format!(
+                "install timed out, but {bundle_id} {} appeared on the device — treating as installed",
+                version.as_deref().unwrap_or("?")
+            ));
+            return true;
+        }
+    }
+    ipatool_debug_log(&format!(
+        "install timed out; {bundle_id} {} did not appear on the device",
+        version.as_deref().unwrap_or("?")
+    ));
+    false
 }
 
 /// Добавить приложение в покупки Apple ID, не скачивая его.
@@ -21339,33 +22037,376 @@ Download error: storefront blocked";
         ));
         assert!(!is_apple_opaque_auth_response("incorrect password"));
         assert!(!is_apple_opaque_auth_response("2FA code is required"));
+        // Код из «немых» должен относиться ко входу, а не встретиться где попало.
+        assert!(!is_apple_opaque_auth_response("download failed: HTTP 404"));
+        // Обычный отказ со статусом 200 — прежнее поведение: пробуем второй движок.
+        assert!(!is_apple_opaque_auth_response(
+            "Login error: something went wrong (status=200)"
+        ));
     }
 
     #[test]
-    fn ideviceinstaller_done_marker_ends_successful_install() {
-        let output = "WARNING: could not locate iTunesMetadata.plist in archive!\n\
-                      WARNING: could not locate Payload/App.app/SC_Info/App.sinf in archive!\n\
-                      DONE.\nInstalling 'com.example.app'";
-        assert!(ideviceinstaller_reports_install_done(
-            r"C:\Signum\ideviceinstaller.exe",
-            &["install".into(), "app.ipa".into()],
-            output,
-        ));
-        assert!(ideviceinstaller_reports_install_done(
-            "ideviceinstaller",
-            &["upgrade".into(), "app.ipa".into()],
-            "DONE.\nUpgrading 'com.example.app'",
-        ));
-        assert!(!ideviceinstaller_reports_install_done(
+    fn opaque_apple_login_is_recognised_without_detailed_errors() {
+        // Обычный режим: технический хвост отрезан, от вывода движка остаётся
+        // только готовая фраза. Именно её видит login_catalog_with_fallback —
+        // по ней он и должен остановить переход на второй движок.
+        let _detailed = with_detailed_errors(false);
+        for raw in [
+            "Login error: something went wrong (status=403)",
+            "Login error: something went wrong (status=500)",
+            "authentication request failed after 3 attempts (HTTP 204, 404, 404): Apple returned no usable authentication response",
+        ] {
+            let shown = format_login_error(raw, "secret-password");
+            assert!(shown.starts_with(APPLE_UNAVAILABLE_MARKER), "{shown}");
+            assert!(is_apple_opaque_auth_response(&shown), "{shown}");
+            assert!(!shown.contains("status="), "технический хвост попал в обычный режим");
+            // Пароль не обвиняем и к коду 2FA не отсылаем.
+            assert!(shown.contains("Пароль менять не нужно"), "{shown}");
+            assert!(!is_fatal_account_error(&shown), "{shown}");
+            assert!(!is_two_factor_error(&shown), "{shown}");
+        }
+        let plain = format_login_error("Login error: something went wrong (status=200)", "x");
+        assert!(plain.starts_with("SIGNUM_LOGIN_OPAQUE:"), "{plain}");
+        assert!(!is_apple_opaque_auth_response(&plain));
+        let wrong = format_login_error("Login error: Your Apple ID or password is incorrect.", "x");
+        assert!(!is_apple_opaque_auth_response(&wrong), "{wrong}");
+    }
+
+    #[test]
+    fn saved_login_error_carries_no_internal_marker() {
+        assert_eq!(
+            without_login_marker(&format!("{APPLE_UNAVAILABLE_MARKER} Apple сейчас не принимает вход.")),
+            "Apple сейчас не принимает вход."
+        );
+        assert_eq!(without_login_marker("SIGNUM_LOGIN_OPAQUE: Apple отклонил вход."), "Apple отклонил вход.");
+        assert_eq!(without_login_marker("Неверный Apple ID или пароль."), "Неверный Apple ID или пароль.");
+    }
+
+    #[test]
+    fn opaque_apple_status_reports_the_code_the_engine_gave_up_on() {
+        assert_eq!(apple_opaque_auth_status("login error: something went wrong (status=301)"), Some(301));
+        assert_eq!(
+            apple_opaque_auth_status("authentication request failed after 3 attempts (http 500, 204, 404)"),
+            Some(404)
+        );
+        assert_eq!(apple_opaque_auth_status("login error: rate limited by apple (http 429): <html>"), None);
+        assert_eq!(apple_opaque_auth_status("list-versions error: http 500"), None);
+    }
+
+    /// Счётчик отмены KBSync общий на процесс — тесты с ним идут по одному.
+    static KBSYNC_CANCEL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn kbsync_cancel_survives_overlapping_commands() {
+        let _serial = KBSYNC_CANCEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(!kbsync_cancel_requested());
+        let logout = KbsyncCancelGuard::new();
+        assert!(kbsync_cancel_requested());
+        // Вторая команда (вход во время выхода, двойной щелчок).
+        let login = KbsyncCancelGuard::new();
+        drop(logout);
+        // Первая закончилась, вторая ещё работает — отмена обязана держаться.
+        assert!(kbsync_cancel_requested(), "отмена снята раньше времени");
+        drop(login);
+        assert!(!kbsync_cancel_requested());
+    }
+
+    #[test]
+    fn kbsync_cancel_guard_forgets_presence_check() {
+        let _serial = KBSYNC_CANCEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *kbsync_presence_memo().lock().unwrap() = Some(KbsyncPresence {
+            email: "user@example.com".into(),
+            ready: true,
+            checked_at: Instant::now(),
+        });
+        drop(KbsyncCancelGuard::new());
+        assert!(kbsync_presence_memo().lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn kbsync_presence_is_asked_once_per_account() {
+        let checked_at = Instant::now();
+        let known = |ready: bool| KbsyncPresence {
+            email: "user@example.com".into(),
+            ready,
+            checked_at,
+        };
+        let soon = checked_at + Duration::from_secs(5);
+        let later = checked_at + KBSYNC_PRESENCE_RETRY + Duration::from_secs(1);
+        assert!(kbsync_presence_needs_check(None, "user@example.com", soon));
+        // Blob на месте — больше не спрашиваем, сколько бы ни прошло.
+        assert!(!kbsync_presence_needs_check(Some(&known(true)), "user@example.com", later));
+        // Другой аккаунт — спрашиваем заново.
+        assert!(kbsync_presence_needs_check(Some(&known(true)), "other@example.com", soon));
+        // Отказ помним недолго.
+        assert!(!kbsync_presence_needs_check(Some(&known(false)), "user@example.com", soon));
+        assert!(kbsync_presence_needs_check(Some(&known(false)), "user@example.com", later));
+    }
+
+    #[test]
+    fn kbsync_stamp_is_touched_only_by_a_real_generation() {
+        // Фон зовёт движок с --refresh: blob порождён заново при любом ответе.
+        assert!(kbsync_result_is_fresh_generation(KbsyncWarm::RefreshIfStale, "generated"));
+        assert!(kbsync_result_is_fresh_generation(KbsyncWarm::RefreshIfStale, "cache"));
+        // Перед опросом версий --refresh нет: «cache» — blob просто прочитан.
+        assert!(kbsync_result_is_fresh_generation(KbsyncWarm::OnlyIfMissing, "generated"));
+        assert!(!kbsync_result_is_fresh_generation(KbsyncWarm::OnlyIfMissing, "cache"));
+    }
+
+    /// Убитый процесс оставил потомка, который держит канал вывода открытым.
+    /// Раньше чтение ждало конца потомка — на KBSync это минуты.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn killed_child_output_is_not_awaited_forever() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "echo started; sleep 30 & wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let output = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let mut out_task =
+            tokio::spawn(consume_stream(child.stdout.take().unwrap(), output.clone(), None));
+        let mut err_task =
+            tokio::spawn(consume_stream(child.stderr.take().unwrap(), output.clone(), None));
+        // Дождаться первой строки: оболочка запущена и уже породила sleep.
+        for _ in 0..50 {
+            if !output.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(output.lock().unwrap().as_slice(), ["started"]);
+        let started = Instant::now();
+        child.kill().await.unwrap();
+        drain_killed_child_output(&mut out_task, &mut err_task).await;
+        assert!(
+            started.elapsed() < KILLED_CHILD_DRAIN + Duration::from_secs(3),
+            "ждали осиротевшего потомка {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Отмена должна остановить уже запущенный процесс KBSync, а не только
+    /// не дать стартовать новому. Вместо движка — оболочка с потомком, который
+    /// живёт ещё полминуты и держит канал вывода: так ведёт себя kbsync,
+    /// собранный отдельным файлом.
+    ///
+    /// Запускается вручную: `run_process_inner` перед запуском приводит в
+    /// порядок настоящую папку сессии ipatool, а обычным тестам чужие файлы
+    /// трогать незачем.  `cargo test -- --ignored kbsync_cancel_stops`
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "трогает настоящую папку сессии ipatool; запускать вручную"]
+    async fn kbsync_cancel_stops_a_running_process() {
+        let _serial = KBSYNC_CANCEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Последний аргумент достаётся оболочке как $0 — по нему
+        // run_process_inner и узнаёт запуск KBSync.
+        let args: Vec<String> = ["-c", "sleep 30 & wait", "kbsync"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let started = Instant::now();
+        let run = tokio::spawn(async move {
+            run_process_inner("/bin/sh", &args, Duration::from_secs(60), None, true, false).await
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!run.is_finished(), "без отмены процесс должен работать");
+        let logout = KbsyncCancelGuard::new();
+        let result = run.await.unwrap();
+        drop(logout);
+        assert_eq!(result, Err(KBSYNC_CANCELLED.to_string()));
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "отмена заняла {:?}",
+            started.elapsed()
+        );
+        // Отмена снята — следующий запуск идёт до конца.
+        let quick: Vec<String> = ["-c", "echo ok", "kbsync"].into_iter().map(str::to_string).collect();
+        let output = run_process_inner("/bin/sh", &quick, Duration::from_secs(10), None, true, false)
+            .await
+            .unwrap();
+        assert_eq!(output.trim(), "ok");
+    }
+
+    #[test]
+    fn go_engine_is_staged_with_its_signer_and_reused() {
+        let root = std::env::temp_dir().join(format!("signum-stage-{}", Uuid::new_v4()));
+        // Как в Signum.app: движок в v4, подписчик в v2.
+        let v4 = root.join("bundle").join("macos-arm64").join("v4");
+        let v2 = root.join("bundle").join("macos-arm64").join("v2");
+        std::fs::create_dir_all(&v4).unwrap();
+        std::fs::create_dir_all(&v2).unwrap();
+        std::fs::write(v4.join("ipatool"), b"engine-one").unwrap();
+        std::fs::write(v4.join("libhelper.dylib"), b"library").unwrap();
+        std::fs::write(v2.join("sapsigner"), b"signer").unwrap();
+        let stage = root.join("Application Support").join("tools").join("staged").join("v4");
+
+        let staged = stage_engine_with_signer(&v4.join("ipatool"), &v2.join("sapsigner"), &stage).unwrap();
+        assert_eq!(staged, stage.join("ipatool"));
+        assert_eq!(std::fs::read(&staged).unwrap(), b"engine-one");
+        assert_eq!(std::fs::read(stage.join("sapsigner")).unwrap(), b"signer");
+        assert_eq!(std::fs::read(stage.join("libhelper.dylib")).unwrap(), b"library");
+        // Движок в новой папке — по-прежнему Go-движок, и подписчик у него рядом.
+        let staged_text = staged.to_string_lossy().into_owned();
+        assert!(!is_cpp_ipatool(&staged_text));
+        assert_eq!(
+            sap_helper_path_for(&staged_text).as_deref(),
+            Some(stage.join("sapsigner").to_string_lossy().as_ref())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for name in ["ipatool", "sapsigner"] {
+                let mode = std::fs::metadata(stage.join(name)).unwrap().permissions().mode();
+                assert_eq!(mode & 0o111, 0o111, "{name} должен запускаться");
+            }
+        }
+
+        // Второй вызов ничего не переписывает: метка того же размера на месте.
+        std::fs::write(&staged, b"engine-XXX").unwrap();
+        stage_engine_with_signer(&v4.join("ipatool"), &v2.join("sapsigner"), &stage).unwrap();
+        assert_eq!(std::fs::read(&staged).unwrap(), b"engine-XXX");
+
+        // Приложение обновилось — движок другой, папка обновляется.
+        std::fs::write(v4.join("ipatool"), b"engine-two-longer").unwrap();
+        stage_engine_with_signer(&v4.join("ipatool"), &v2.join("sapsigner"), &stage).unwrap();
+        assert_eq!(std::fs::read(&staged).unwrap(), b"engine-two-longer");
+
+        // Пропавший из папки файл возвращается.
+        std::fs::remove_file(stage.join("sapsigner")).unwrap();
+        stage_engine_with_signer(&v4.join("ipatool"), &v2.join("sapsigner"), &stage).unwrap();
+        assert_eq!(std::fs::read(stage.join("sapsigner")).unwrap(), b"signer");
+
+        // Нет подписчика — честная ошибка, а не полупустая папка.
+        assert!(stage_engine_with_signer(&v4.join("ipatool"), &v2.join("missing"), &stage).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ideviceinstaller_install_command_is_recognised_on_any_path_style() {
+        let install = ["-u".to_string(), "00008030-000000000000002E".into(), "install".into(), "app.ipa".into()];
+        assert!(is_ideviceinstaller_install_command(r"C:\Signum\support\ideviceinstaller.exe", &install));
+        assert!(is_ideviceinstaller_install_command("/opt/signum/support/ideviceinstaller", &install));
+        assert!(is_ideviceinstaller_install_command("ideviceinstaller", &["upgrade".into(), "app.ipa".into()]));
+        assert!(!is_ideviceinstaller_install_command("ideviceinstaller.exe", &["list".into(), "--user".into()]));
+        assert!(!is_ideviceinstaller_install_command(r"C:\Signum\v5\ipatool.exe", &install));
+    }
+
+    #[test]
+    fn ideviceinstaller_upload_done_is_not_a_finished_install() {
+        fn lines(text: &str) -> Vec<String> {
+            text.lines().map(str::to_string).collect()
+        }
+        // Вывод из отчёта пользователя: IPA залит, команда установки ушла,
+        // ответа телефона ещё нет. Это НЕ успех.
+        let uploaded = "WARNING: could not locate iTunesMetadata.plist in archive!\n\
+                        WARNING: could not locate Payload/App.app/SC_Info/App.sinf in archive!\n\
+                        DONE.\nInstalling 'com.example.app'";
+        assert!(!ideviceinstaller_install_completed(&lines(uploaded)));
+        assert!(!ideviceinstaller_install_completed(&lines(
+            "Copying 'app.ipa' to device... DONE.\nInstalling 'com.example.app'\nInstall: CreatingStagingDirectory (5%)\nInstall: InstallingApplication (60%)"
+        )));
+        // Отказ телефона приходит после «Installing» — успехом он не станет.
+        assert!(!ideviceinstaller_install_completed(&lines(&format!(
+            "{uploaded}\nERROR: Install failed. Got error \"APIInternalError\" with code 0xe8008001: verification failed"
+        ))));
+        assert!(!ideviceinstaller_install_completed(&lines(&format!(
+            "{uploaded}\nInstall: Complete\nERROR: Install failed. Got error \"ApplicationVerificationFailed\"."
+        ))));
+        // Настоящее окончание: статус Complete от installd.
+        assert!(ideviceinstaller_install_completed(&lines(&format!(
+            "{uploaded}\nInstall: CreatingStagingDirectory (5%)\nInstall: GeneratingApplicationMap (90%)\nInstall: Complete"
+        ))));
+        assert!(ideviceinstaller_install_completed(&lines("Upgrading 'com.example.app'\nUpgrade: Complete")));
+        assert!(ideviceinstaller_install_completed(&lines("Installing 'com.example.app'\nInstall - Complete")));
+        assert!(!ideviceinstaller_install_completed(&[]));
+    }
+
+    #[test]
+    fn upgrade_retry_follows_a_real_install_refusal_only() {
+        let _detailed = with_detailed_errors(false);
+        let refused = format_process_error(
             "ideviceinstaller.exe",
-            &["list".into()],
-            output,
+            128,
+            "Installing 'com.example.app'\nERROR: Install failed. Got error \"ApplicationAlreadyInstalled\".",
+        );
+        assert!(install_failure_allows_upgrade_retry(&refused, false));
+        // Отменённое задание, пропавший телефон, таймаут и незапустившийся
+        // инструмент второй заход не исправит.
+        assert!(!install_failure_allows_upgrade_retry(&refused, true));
+        assert!(!install_failure_allows_upgrade_retry(&device_not_found_message(), false));
+        let timeout = format!("{PROCESS_TIMEOUT_PREFIX} (360 с). Проверьте подключение и повторите попытку.");
+        assert!(is_process_timeout_error(&timeout));
+        assert!(!install_failure_allows_upgrade_retry(&timeout, false));
+        assert!(!install_failure_allows_upgrade_retry(
+            "Не удалось запустить ideviceinstaller.exe: отказано в доступе",
+            false
         ));
-        assert!(!ideviceinstaller_reports_install_done(
-            "ideviceinstaller.exe",
-            &["install".into(), "app.ipa".into()],
-            "DONE.\nInstalling 'com.example.app'\nERROR: APIInternalError",
-        ));
+    }
+
+    #[test]
+    fn install_error_prefers_the_answer_that_names_a_cause() {
+        let generic = "Не удалось выполнить операцию. Проверьте Apple ID, подключение iPhone и повторите попытку.".to_string();
+        let specific = "iPhone отклонил приложение при проверке. Переподключите устройство и повторите установку.".to_string();
+        let timeout = format!("{PROCESS_TIMEOUT_PREFIX} (360 с). Проверьте подключение и повторите попытку.");
+        assert_eq!(pick_install_error(generic.clone(), specific.clone()), specific);
+        assert_eq!(pick_install_error(specific.clone(), generic.clone()), specific);
+        assert_eq!(pick_install_error(generic.clone(), timeout), generic);
+        assert_eq!(
+            pick_install_error(specific, device_not_found_message()),
+            device_not_found_message()
+        );
+    }
+
+    #[test]
+    fn timed_out_install_counts_only_when_the_same_build_is_on_the_phone() {
+        let on_phone = |version: Option<&str>| -> HashMap<String, InstalledApp> {
+            HashMap::from([(
+                "com.example.app".to_string(),
+                InstalledApp {
+                    bundle_id: "com.example.app".into(),
+                    name: Some("Example".into()),
+                    version: version.map(str::to_string),
+                    app_store_id: None,
+                    is_placeholder: false,
+                },
+            )])
+        };
+        assert!(installed_app_matches_ipa(&on_phone(Some("2.4.1")), "com.example.app", Some("2.4.1")));
+        // Стояла прежняя версия — значит, новая не встала.
+        assert!(!installed_app_matches_ipa(&on_phone(Some("2.3.0")), "com.example.app", Some("2.4.1")));
+        assert!(!installed_app_matches_ipa(&on_phone(Some("2.4.1")), "com.other.app", Some("2.4.1")));
+        // Версию не узнать — не гадаем.
+        assert!(!installed_app_matches_ipa(&on_phone(None), "com.example.app", Some("2.4.1")));
+        assert!(!installed_app_matches_ipa(&on_phone(Some("2.4.1")), "com.example.app", None));
+        assert!(!installed_app_matches_ipa(&HashMap::new(), "com.example.app", Some("2.4.1")));
+
+        let fresh = on_phone(Some("2.4.1"));
+        let old = on_phone(Some("2.3.0"));
+        let empty = HashMap::new();
+        let landed = |before: Option<&HashMap<String, InstalledApp>>, after| {
+            timed_out_install_landed(before, after, "com.example.app", Some("2.4.1"))
+        };
+        // Не было — появилось; стояла старая — обновилась.
+        assert!(landed(Some(&empty), &fresh));
+        assert!(landed(Some(&old), &fresh));
+        // Та же версия стояла и до установки (перевыпуск подписи): по списку
+        // не отличить новую копию от старой — успехом не считаем.
+        assert!(!landed(Some(&fresh), &fresh));
+        // Не встало.
+        assert!(!landed(Some(&empty), &empty));
+        assert!(!landed(Some(&old), &old));
+        // Снимка до установки нет — не гадаем.
+        assert!(!landed(None, &fresh));
     }
 
     #[test]
