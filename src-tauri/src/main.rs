@@ -3785,6 +3785,12 @@ async fn warm_kbsync_now(app: &AppHandle, email: &str, mode: KbsyncWarm) -> Kbsy
             scope,
             &format!("KBSync уже есть у аккаунта ({source}), порождать не пришлось"),
         );
+        // Blob мог породить сам движок во время list-versions или загрузки —
+        // тогда в сохранённой копии сессии его ещё нет, и после её
+        // восстановления он пропал бы, а мы считали бы, что он на месте.
+        if let Err(error) = backup_ipatool_session_for_account(app, &email) {
+            ipatool_debug_log(&format!("KBSync present but account session backup failed: {error}"));
+        }
         return KbsyncWarmOutcome::Ready;
     }
     if let Err(error) = backup_ipatool_session_for_account(app, &email) {
@@ -12374,6 +12380,13 @@ async fn login_apple(
             ),
             catalog_error: Some(error),
         }),
+        // Код отправлен, а Apple ответила служебным кодом. «Введите тот же код
+        // ещё раз» звало бы сразу сделать ещё одну засчитанную попытку —
+        // показываем как есть: подождать. Состояние 2FA не трогаем.
+        Err(error) if providing_2fa && is_apple_opaque_auth_response(&error) => {
+            auth_stage("catalog-2fa-submit", &email, "apple-unavailable");
+            Err(error)
+        }
         Err(error) if providing_2fa && !is_fatal_account_error(&error) => {
             ipatool_debug_log(&format!(
                 "login 2fa check failed: {}",
@@ -13069,6 +13082,12 @@ fn is_harmless_sinf_warning(text: &str) -> bool {
 fn is_sinf_warning_only_install_output(text: &str) -> bool {
     let clean = strip_ansi(text);
     if clean.trim().is_empty() {
+        return false;
+    }
+    // Таймаут — не «одни предупреждения». С подробными ошибками к нему
+    // приклеен вывод процесса, где у переподписанного IPA всегда есть строки
+    // про .sinf; без этой проверки зависшая установка считалась удачной.
+    if is_process_timeout_error(clean.trim_start()) {
         return false;
     }
     if !is_harmless_sinf_warning(&clean) {
@@ -14948,7 +14967,9 @@ async fn run_process_inner(
                 return Ok(output.lock().unwrap().join("\n"));
             }
         }
-        if started.elapsed() >= duration {
+        // Телефон уже подтвердил установку — общий предел её не отменяет,
+        // процесс доживает свои секунды и завершается веткой выше.
+        if started.elapsed() >= duration && install_complete_since.is_none() {
             let _ = child.kill().await;
             drain_killed_child_output(&mut out_task, &mut err_task).await;
             let text = output.lock().unwrap().join("\n");
@@ -14998,6 +15019,16 @@ async fn run_process_inner(
         diag_log::proc_out(program, status.code(), &diagnostic_text);
     }
     if status.success() {
+        return Ok(text);
+    }
+    // Телефон ответил «Complete» и ни одной ошибки не было, а процесс вышел с
+    // ненулевым кодом (сбой уже на разъединении). Приложение установлено;
+    // считать это отказом — значит заливать IPA заново через upgrade.
+    if watch_install_complete && ideviceinstaller_install_completed(&output.lock().unwrap()) {
+        ipatool_debug_log(&format!(
+            "ideviceinstaller exit={:?} after Complete — treating as installed",
+            status.code()
+        ));
         return Ok(text);
     }
     // Keep the untouched output for the automatic report. The friendly Russian
@@ -15498,7 +15529,13 @@ async fn ipa_landed_on_device_after_timeout(
         if is_job_cancelled(&app.state::<AppState>(), job_id) {
             return false;
         }
-        let installed = installed_apps_map(app).await;
+        // Сам опрос тоже ограничен: зависший телефон иначе добавил бы к
+        // шести минутам ожидания ещё несколько.
+        let Ok(installed) =
+            tokio::time::timeout(Duration::from_secs(20), installed_apps_map(app)).await
+        else {
+            continue;
+        };
         if timed_out_install_landed(installed_before, &installed, &bundle_id, version.as_deref()) {
             ipatool_debug_log(&format!(
                 "install timed out, but {bundle_id} {} appeared on the device — treating as installed",
@@ -22351,6 +22388,25 @@ Download error: storefront blocked";
             "Не удалось запустить ideviceinstaller.exe: отказано в доступе",
             false
         ));
+    }
+
+    #[test]
+    fn timed_out_install_is_not_excused_by_sinf_warnings() {
+        // Подробные ошибки включены: к таймауту приклеен вывод процесса.
+        let _detailed = with_detailed_errors(true);
+        let output = "WARNING: could not locate iTunesMetadata.plist in archive!\n\
+                      WARNING: could not locate Payload/App.app/SC_Info/App.sinf in archive!\n\
+                      Copying 'app.ipa' to device... DONE.\nInstalling 'com.example.app'";
+        let timeout = with_technical_detail(
+            &format!("{PROCESS_TIMEOUT_PREFIX} (360 с). Проверьте подключение и повторите попытку."),
+            output,
+        );
+        assert!(timeout.contains(".sinf"), "в тексте должен быть вывод процесса");
+        assert!(is_process_timeout_error(&timeout));
+        assert!(!is_sinf_warning_only_install_output(&timeout));
+        // Сами по себе предупреждения по-прежнему безобидны.
+        assert!(is_sinf_warning_only_install_output(output));
+        DETAILED_ERRORS_ENABLED.store(false, Ordering::Relaxed);
     }
 
     #[test]
