@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-09T00:00:00+00:00",
+  "targets": {
+    "windows-x64": {
+      "ipatool-v2": {
+        "version": "3.9.9.5",
+        "file": "ipatool-v2-3.9.9.5.exe",
+        "sha256": "a0a161abaddc2df020878374929b317db62292e54df399f178059ad7a600b173",
+        "size": 27062784
+      },
+      "ipatool-v3": {
+        "version": "3.0.0-legacy",
+        "file": "ipatool-v3-3.0.0-legacy.exe",
+        "sha256": "be7e2ca296c7ae96c530d1262bfb85892bc11094df6fe5303bbad8235f9f4f11",
+        "size": 5722624
+      },
+      "anisette": {
+        "version": "3.0.0-legacy",
+        "file": "anisette-3.0.0-legacy.exe",
+        "sha256": "b1151e3fc1b550b1dfe07dd81f922203413ae45b3a05a2c592b875451f864712",
+        "size": 261632
+      },
+      "ipatool-v5": {
+        "version": "1.3.0",
+        "file": "ipatool-v5-1.3.0.exe",
+        "size": 47711232,
+        "sha256": "b99082f8d984dc53ec3c2b38421aa953455ba38d7fadfbfb7b838db10f57d230"
+      }
+    },
+    "macos-x64": {
+      "ipatool-v2": {
+        "version": "3.9.9.5",
+        "file": "ipatool-v2-3.9.9.5",
+        "sha256": "60403b20f6c6d7dccbbccaf5dce00a09fe4531fb04a5c191dd24133807ad2c87",
+        "size": 26958120
+      },
+      "ipatool-v3": {
+        "version": "3.0.0-legacy",
+        "file": "ipatool-v3-3.0.0-legacy",
+        "sha256": "29143fe752e5c18b3957bfefd41594382430f1dcfb541e7ba900a07fbf0d7626",
+        "size": 6693248
+      },
+      "ipatool-v5": {
+        "version": "1.2.0",
+        "file": "ipatool-v5-1.2.0",
+        "size": 43978880,
+        "sha256": "2d6b4391fed1e4f3778af730a5b95f0aaee139f8f0aede4c3e62b6cd66ff2c6d"
+      }
+    },
+    "macos-arm64": {
+      "ipatool-v2": {
+        "version": "3.9.9.5",
+        "file": "ipatool-v2-3.9.9.5",
+        "sha256": "f150ba9707c327581ac2b62b074600cdcbe4cd69217bcba127007549803cf5cc",
+        "size": 25913314
+      },
+      "ipatool-v3": {
+        "version": "3.0.0-legacy",
+        "file": "ipatool-v3-3.0.0-legacy",
+        "sha256": "e7b023d463d210e88984252ce9f4f0fca75af4dcbcddecec2a974fdacea520a4",
+        "size": 6241752
+      },
+      "ipatool-v5": {
+        "version": "1.2.0",
+        "file": "ipatool-v5-1.2.0",
+        "size": 43385456,
+        "sha256": "2a5f789bbbc94e78eac1ae31fd55b883374b4244a23c9c65bf1240fad8b29594"
+      }
+    },
+    "linux-x64": {
+      "ipatool-v2": {
+        "version": "3.9.9.5",
+        "file": "ipatool-v2-3.9.9.5",
+        "sha256": "1e059a29c4b5b177aff645959fbf7e74298add5a317a37742fbeff427e8591da",
+        "size": 26775714
+      },
+      "ipatool-v5": {
+        "version": "1.2.0",
+        "file": "ipatool-v5-1.2.0",
+        "size": 45347616,
+        "sha256": "d6d8bb6d0cbf2011838d872e7eb5550f1db417b243495a7db7c2c499ae62689f"
+      }
+    },
+    "linux-arm64": {
+      "ipatool-v2": {
+        "version": "3.9.9.5",
+        "file": "ipatool-v2-3.9.9.5",
+        "sha256": "e576fa5f8fef3c8d51fce8bfe554d0d128bfc3ab968927629bda7a06b9b3cc3a",
+        "size": 25690274
+      }
+    }
+  }
+}

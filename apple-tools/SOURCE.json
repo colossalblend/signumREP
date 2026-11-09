@@ -1,0 +1,10 @@
+{
+  "v5_mode": "ipatool-cpp 1.3.0 (Sorvigolova/ipatool): native Store AMD authentication, Store ADI proof, SAP signer and KBSync compiled in; per-account encrypted KBSync cache; no anisette or kbsync sidecar",
+  "v5_source": "https://github.com/Sorvigolova/ipatool/releases/tag/1.3.0",
+  "v4_mode": "ipatool-go (sapfix): signs Apple actions locally, needs libunicorn.dll on Windows",
+  "v2_mode": "Go sapfix: X-Apple-ActionSignature via sapsigner (Unicorn FairPlay) or macOS CommerceKit",
+  "source": "C:\\ipatool\\ipatool-main (majd/ipatool + sapfix SignAction)",
+  "helper": "sapsigner / sapsign-ssh / IPATOOL_SAP_HELPER",
+  "v3_mode": "Preserved legacy ipatool-cpp; not selected when SAP helper is present",
+  "verified_at": "2026-11-09"
+}

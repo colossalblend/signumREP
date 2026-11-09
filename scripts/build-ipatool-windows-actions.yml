@@ -1,0 +1,65 @@
+name: Build ipatool Windows source
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Commit, branch, or tag to build
+        required: true
+        default: d5050b1604b8b8964061e59c789ba975b4a68691
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    steps:
+      - name: Check out requested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:VCPKG_ROOT = "$env:RUNNER_TEMP\vcpkg"
+          "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
+          & "$env:VCPKG_ROOT\vcpkg.exe" install curl:x64-windows-static nlohmann-json:x64-windows-static mbedtls:x64-windows-static unicorn:x64-windows-static
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure
+        shell: pwsh
+        run: >-
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          -DSTATIC_BUILD=ON
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Verify CLI
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path .\build\Release\ipatool.exe
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          if ($bytes.Length -lt 4096 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw 'Output is not a valid Windows executable.'
+          }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ($peOffset -lt 0x40 -or $peOffset + 4 -gt $bytes.Length -or
+              [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -ne "PE`0`0") {
+            throw 'Windows PE signature is missing.'
+          }
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipatool-windows-x64-${{ inputs.source_ref }}
+          path: build/Release/ipatool.exe
+          if-no-files-found: error
+          retention-days: 7

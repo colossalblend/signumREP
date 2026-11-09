@@ -3516,8 +3516,39 @@ fn start_background_refresh(app: &AppHandle) {
     });
 }
 
+#[cfg(target_os = "windows")]
+const KBSYNC_UPSTREAM_VERSION: &str = "1.3.0";
+#[cfg(not(target_os = "windows"))]
 const KBSYNC_UPSTREAM_VERSION: &str = "1.2.0";
 const KBSYNC_REFRESH_AFTER_SECS: u64 = 3600;
+static KBSYNC_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+fn cancel_kbsync_warm() {
+    KBSYNC_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn reset_kbsync_cancel() {
+    KBSYNC_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+fn kbsync_cancel_requested() -> bool {
+    KBSYNC_CANCEL_REQUESTED.load(Ordering::SeqCst)
+}
+
+struct KbsyncCancelGuard;
+
+impl KbsyncCancelGuard {
+    fn new() -> Self {
+        cancel_kbsync_warm();
+        Self
+    }
+}
+
+impl Drop for KbsyncCancelGuard {
+    fn drop(&mut self) {
+        reset_kbsync_cancel();
+    }
+}
 
 fn kbsync_warm_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -3595,25 +3626,18 @@ fn active_v5_version(app: &AppHandle) -> String {
         .unwrap_or_else(|_| KBSYNC_UPSTREAM_VERSION.to_string())
 }
 
-async fn ensure_kbsync_warm(app: &AppHandle) {
-    let Some(email) = active_account_email(app)
-        .filter(|email| saved_account_session_exists(app, email))
-    else {
-        return;
-    };
-    if !kbsync_cache_is_fresh(app, &email, &active_v5_version(app)) {
-        warm_kbsync_now(app, &email, false).await;
-    }
-}
-
 async fn warm_kbsync_now(app: &AppHandle, email: &str, refresh: bool) {
     let _warm_guard = kbsync_warm_lock().lock().await;
+    if kbsync_cancel_requested() {
+        return;
+    }
     let email = normalize_account_email(email);
     let engine_version = active_v5_version(app);
     let cache_fresh = kbsync_cache_is_fresh(app, &email, &engine_version);
     if active_account_email(app).as_deref() != Some(email.as_str())
         || !saved_account_session_exists(app, &email)
         || (!refresh && cache_fresh)
+        || kbsync_cancel_requested()
     {
         return;
     }
@@ -3645,6 +3669,9 @@ async fn warm_kbsync_now(app: &AppHandle, email: &str, refresh: bool) {
     // Force one generation after upgrade; subsequent catalog checks reuse it.
     if refresh || !cache_fresh {
         args.push("--refresh".into());
+    }
+    if kbsync_cancel_requested() {
+        return;
     }
     diag_log::note("фон", "прогрев KBSync для активного Apple ID: начат");
     let started = Instant::now();
@@ -7318,18 +7345,6 @@ async fn available_catalog_versions_on_account(
     // All bundled engines share one cookie jar. Serialize probes so concurrent
     // truncating writers cannot corrupt the session between requests.
     let probe_concurrency = ACCOUNT_VERSION_PROBE_CONCURRENCY;
-
-    // Прогреваем подтверждение FairPlay ОДИН раз, до веера.
-    //
-    // Иначе шесть параллельных опросов упираются каждый в своё: у всех кеш
-    // холодный, все лезут порождать, порождение защищено замком и идёт по
-    // одному — пятеро стоят в очереди и умирают по таймауту. В логах это
-    // выглядело как сплошные «timeout secs=25» без единой строки о том, что
-    // вообще происходило. Один прогрев наперёд снимает затор целиком:
-    // дальше каждый опрос читает готовый кеш за секунду.
-    if !candidates.is_empty() {
-        ensure_kbsync_warm(app).await;
-    }
 
     let mut owned: Vec<JsonValue> = Vec::new();
     let mut unchecked = 0usize;
@@ -11754,6 +11769,14 @@ async fn login_catalog_with_fallback(
                     auth_stage("catalog-account-rejected", email, "fallback=stopped");
                     return Err(error);
                 }
+                // Apple transport/auth endpoints returning an opaque 301/204/
+                // 403/404/500 response are not made better by submitting the
+                // same credentials through a second engine. The old fallback
+                // created extra attempts and could trigger Apple's rate limit.
+                if is_apple_opaque_auth_response(&error) {
+                    auth_stage("catalog-apple-opaque", email, "fallback=stopped");
+                    return Err(error);
+                }
                 last_error = error;
             }
         }
@@ -11822,6 +11845,7 @@ async fn login_apple(
     // Lock password into storage immediately (memory + disk) so history never "loses" it.
     let _ = history_secrets::store_history_password(&email, &store_pw);
 
+    let _kbsync_cancel = KbsyncCancelGuard::new();
     let _guard = state.ipatool_lock.lock().await;
     // A failed update check never blocks sign-in: the last verified or bundled tool remains active.
     let _ = refresh_managed_tools(&app).await;
@@ -12394,6 +12418,7 @@ async fn switch_apple_account(
     if email.is_empty() {
         return Err("Укажите Apple ID".into());
     }
+    let _kbsync_cancel = KbsyncCancelGuard::new();
     let _guard = state.ipatool_lock.lock().await;
     cleanup_stale_cookie_lock(false);
     if active_account_email(&app).as_deref() == Some(email.as_str()) {
@@ -12480,6 +12505,7 @@ async fn remove_apple_account(
     state: State<'_, AppState>,
     input: AccountEmailInput,
 ) -> Result<(), String> {
+    let _kbsync_cancel = KbsyncCancelGuard::new();
     let _guard = state.ipatool_lock.lock().await;
     clear_account_version_cache(&state);
     remove_apple_account_inner(&app, &input.email).await
@@ -12492,6 +12518,7 @@ async fn logout_apple(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         clear_account_version_cache(&state);
         return Ok(());
     }
+    let _kbsync_cancel = KbsyncCancelGuard::new();
     let Some(email) = active_account_email(&app) else {
         clear_active_auth_state(&app);
         return Ok(());
@@ -12502,6 +12529,17 @@ async fn logout_apple(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         *slot = None;
     }
     remove_apple_account_inner(&app, &email).await
+}
+
+fn is_apple_opaque_auth_response(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("something went wrong")
+        || (lower.contains("status=301") || lower.contains("status=204")
+            || lower.contains("status=403") || lower.contains("status=404")
+            || lower.contains("status=500"))
+            && (lower.contains("login error") || lower.contains("authentication request")
+                || lower.contains("no usable authentication response")
+                || lower.contains("empty or non-plist"))
 }
 
 fn parse_key_values(output: &str) -> HashMap<String, String> {
@@ -12615,6 +12653,36 @@ fn is_sinf_warning_only_install_output(text: &str) -> bool {
         }
     }
     true
+}
+
+fn ideviceinstaller_reports_install_done(program: &str, args: &[String], output: &str) -> bool {
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    if !name.starts_with("ideviceinstaller")
+        || !args.iter().any(|arg| matches!(arg.as_str(), "install" | "upgrade"))
+    {
+        return false;
+    }
+    let lower = strip_ansi(output).to_ascii_lowercase();
+    let terminal_done = lower.lines().any(|line| {
+        let line = line.trim();
+        line == "done." || line.starts_with("done. installing '") || line.starts_with("done. upgrading '")
+    });
+    let reports_target = lower.contains("installing '") || lower.contains("upgrading '");
+    if !(terminal_done && reports_target) {
+        return false;
+    }
+    !lower.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("error:")
+            || line.starts_with("failed:")
+            || line.contains("apiinternalerror")
+            || line.contains("could not connect to lockdownd")
+            || line.contains("no device found")
+    })
 }
 
 fn is_usable_device_udid(value: &str) -> bool {
@@ -14274,12 +14342,30 @@ async fn run_process_inner(
     let err_task = tokio::spawn(consume_stream(stderr, output.clone(), progress.clone()));
     let started = Instant::now();
     let status = loop {
+        if args.iter().any(|arg| arg == "kbsync") && kbsync_cancel_requested() {
+            let _ = child.kill().await;
+            let _ = tokio::join!(out_task, err_task);
+            return Err("KBSYNC_CANCELLED".into());
+        }
         if let Some(progress) = progress.as_ref() {
             let state = progress.app.state::<AppState>();
             if is_job_cancelled(&state, &progress.job_id) {
                 let _ = child.kill().await;
                 return Err("Загрузка отменена".into());
             }
+        }
+        if ideviceinstaller_reports_install_done(
+            program,
+            args,
+            &output.lock().unwrap().join("\n"),
+        ) {
+            ipatool_debug_log(&format!(
+                "ideviceinstaller reported DONE before process exit elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            let _ = child.kill().await;
+            let _ = tokio::join!(out_task, err_task);
+            return Ok(output.lock().unwrap().join("\n"));
         }
         if let Some(status) = child.try_wait().map_err(|_| {
             "Не удалось дождаться завершения вспомогательного компонента.".to_string()
@@ -14668,6 +14754,33 @@ async fn install_ipa(
         Ok(_) => Ok(()),
         // Free-sign IPAs have no App Store .sinf — warning only, install still OK.
         Err(error) if is_sinf_warning_only_install_output(&error) => Ok(()),
+        // Match IPA_Downloader: an existing bundle is upgraded after a normal
+        // install refusal. This also handles the common «already installed»
+        // path without making the user remove the app manually.
+        Err(error) if !is_device_missing_error(&error) => {
+            let upgrade = idevice_args_with_udid(
+                app,
+                vec!["upgrade".into(), path.to_string_lossy().into_owned()],
+            );
+            match run_process(
+                &tools.ideviceinstaller,
+                &upgrade,
+                Duration::from_secs(360),
+                Some(ProcessProgress::new(
+                    app.clone(),
+                    job_id.into(),
+                    "install".into(),
+                    progress_from,
+                    progress_to,
+                )),
+            )
+            .await
+            {
+                Ok(_) => Ok(()),
+                Err(upgrade_error) if is_sinf_warning_only_install_output(&upgrade_error) => Ok(()),
+                Err(upgrade_error) => Err(upgrade_error),
+            }
+        }
         Err(error)
             if is_device_missing_error(&error)
                 && !args.iter().any(|a| a == "-n")
@@ -21211,6 +21324,47 @@ Download error: storefront blocked";
         // A Go engine with no helper beside it genuinely cannot sign.
         assert!(!ipatool_signs_store_requests(
             "apple-tools/windows-x64/v3-legacy/ipatool.exe"
+        ));
+    }
+
+    #[test]
+    fn opaque_apple_login_status_stops_engine_fallback() {
+        for status in [301, 204, 403, 404, 500] {
+            assert!(is_apple_opaque_auth_response(&format!(
+                "Login error: something went wrong (status={status})"
+            )));
+        }
+        assert!(is_apple_opaque_auth_response(
+            "authentication request failed after 3 attempts (HTTP 204, 404, 404): apple returned no usable authentication response"
+        ));
+        assert!(!is_apple_opaque_auth_response("incorrect password"));
+        assert!(!is_apple_opaque_auth_response("2FA code is required"));
+    }
+
+    #[test]
+    fn ideviceinstaller_done_marker_ends_successful_install() {
+        let output = "WARNING: could not locate iTunesMetadata.plist in archive!\n\
+                      WARNING: could not locate Payload/App.app/SC_Info/App.sinf in archive!\n\
+                      DONE.\nInstalling 'com.example.app'";
+        assert!(ideviceinstaller_reports_install_done(
+            r"C:\Signum\ideviceinstaller.exe",
+            &["install".into(), "app.ipa".into()],
+            output,
+        ));
+        assert!(ideviceinstaller_reports_install_done(
+            "ideviceinstaller",
+            &["upgrade".into(), "app.ipa".into()],
+            "DONE.\nUpgrading 'com.example.app'",
+        ));
+        assert!(!ideviceinstaller_reports_install_done(
+            "ideviceinstaller.exe",
+            &["list".into()],
+            output,
+        ));
+        assert!(!ideviceinstaller_reports_install_done(
+            "ideviceinstaller.exe",
+            &["install".into(), "app.ipa".into()],
+            "DONE.\nInstalling 'com.example.app'\nERROR: APIInternalError",
         ));
     }
 
