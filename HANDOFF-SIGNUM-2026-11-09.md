@@ -28,6 +28,14 @@
 
 В этой среде нет локального Git CLI. GitHub используется через `gh api` и `gh workflow`.
 
+Последний опубликованный commit SignumRep на момент передачи:
+
+```text
+c66032c46760532c3b7eb464014bd92ebd51c634
+```
+
+URL: `https://github.com/colossalblend/signumREP/commit/c66032c46760532c3b7eb464014bd92ebd51c634`
+
 ## Что проверено
 
 ### ipatool
@@ -93,6 +101,8 @@ Restore native Store authentication and IPA downloads
 7. Установка IPA повторяет схему IPA_Downloader: после отказа `install` пробует `upgrade`.
 8. `ideviceinstaller`-вывод с `DONE. Installing '...'` / `DONE. Upgrading '...'` распознаётся как успешный install даже если процесс не завершается после предупреждений `.sinf`/`iTunesMetadata.plist`.
 9. Добавлены unit tests для opaque Apple response и `ideviceinstaller DONE` marker.
+10. Фоновый прогрев KBSync больше не запускается синхронно перед массовым `list-versions` каталога.
+11. Logout/login/switch/remove используют `KbsyncCancelGuard`; уже запущенный KBSync child process завершается до ожидания общего ipatool lock.
 
 Важно: после последних правок Signum **не собирался**, потому что пользователь попросил сначала закончить анализ и подготовку.
 
@@ -215,6 +225,8 @@ Installing 'com.example.app'
 6. Проверить install локального IPA на реальном iPhone с `install -> upgrade` fallback.
 7. Проверить macOS App Translocation и V4 `sapsigner` placement.
 8. Только после этого собрать финальный Signum Windows installer.
+
+После добавления последних изменений сборка Signum намеренно не запускалась по прямой просьбе пользователя.
 
 ## Запрещено делать без отдельного решения пользователя
 
