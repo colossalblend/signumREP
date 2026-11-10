@@ -1,0 +1,51 @@
+name: Tools discovery
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/gifted-lamport-si8lz0
+    paths:
+      - .github/workflows/tools-discover.yml
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List release assets of candidate sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for repo in \
+            Sorvigolova/ipatool \
+            kda2495/IPA_Downloader \
+            majd/ipatool \
+            zhlynn/zsign \
+            libimobiledevice-win32/imobiledevice-net \
+            libimobiledevice/libimobiledevice \
+            libimobiledevice/ideviceinstaller \
+            unicorn-engine/unicorn \
+            ; do
+            echo "################ $repo"
+            gh api "repos/$repo/releases?per_page=6" \
+              --jq '.[] | "== \(.tag_name) \(.published_at) draft=\(.draft)\n" + ([.assets[] | "   \(.name)  \(.size)  \(.digest // "-")"] | join("\n"))' \
+              || echo "   (no access)"
+          done
+
+      - name: Search GitHub for helper sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for q in "sapsigner" "ipatool sapfix" "libsapsigner" "ipatool-cpp" "libimobiledevice windows build" "kbsync ucworker"; do
+            echo "################ search: $q"
+            gh api -X GET search/repositories -f q="$q" -f per_page=15 \
+              --jq '.items[] | "\(.full_name)  stars=\(.stargazers_count)  pushed=\(.pushed_at)  \(.description // "")"' || true
+          done
+          for q in "ucworker.dll" "libsapsigner.so" "sapsigner unicorn"; do
+            echo "################ code search: $q"
+            gh api -X GET search/code -f q="$q" -f per_page=15 \
+              --jq '.items[] | "\(.repository.full_name)  \(.path)"' || true
+          done
