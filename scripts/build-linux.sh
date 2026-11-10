@@ -66,7 +66,9 @@ if [[ -d "$BUNDLE/Signum.AppDir" ]] && ! ls "$BUNDLE"/*.AppImage >/dev/null 2>&1
     TOOLS_LIB="$PWD/Signum.AppDir/usr/lib/Signum/resources/linux-x64"
     LD_LIBRARY_PATH="$TOOLS_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     PATH="$PWD:$PATH" ARCH=x86_64 ./linuxdeploy-x86_64.AppImage --appdir Signum.AppDir --output appimage
-    mv -f Signum-x86_64.AppImage "Signum_${VERSION}_amd64.AppImage"
+    # Имя зависит от версии плагина: Signum-x86_64 или Signum-<версия>-x86_64.
+    built=$(ls -t Signum*-x86_64.AppImage | head -1)
+    mv -f "$built" "Signum_${VERSION}_amd64.AppImage"
     sha256sum "Signum_${VERSION}_amd64.AppImage"
   )
 fi
