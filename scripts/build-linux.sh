@@ -60,6 +60,11 @@ if [[ -d "$BUNDLE/Signum.AppDir" ]] && ! ls "$BUNDLE"/*.AppImage >/dev/null 2>&1
       wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
       chmod +x linuxdeploy-plugin-appimage-x86_64.AppImage
     fi
+    # linuxdeploy разбирает зависимости всех ELF внутри AppDir, в том числе
+    # наших инструментов; их библиотеки (libminizip для zsign и т.п.) лежат
+    # рядом в resources/linux-x64 — показываем ему эту папку.
+    TOOLS_LIB="$PWD/Signum.AppDir/usr/lib/Signum/resources/linux-x64"
+    LD_LIBRARY_PATH="$TOOLS_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     PATH="$PWD:$PATH" ARCH=x86_64 ./linuxdeploy-x86_64.AppImage --appdir Signum.AppDir --output appimage
     mv -f Signum-x86_64.AppImage "Signum_${VERSION}_amd64.AppImage"
     sha256sum "Signum_${VERSION}_amd64.AppImage"
