@@ -82,3 +82,4 @@ tmp/
 *.dmg
 *.deb
 *.AppImage
+setup-dist/
