@@ -1,6 +1,6 @@
 [package]
 name = "signum"
-version = "1.2.0"
+version = "1.2.1"
 description = "Signum iOS application utility"
 authors = ["Signum"]
 edition = "2021"

@@ -1,0 +1,350 @@
+name: Release build
+
+# Сборка Signum под Windows, macOS, Linux и Android.
+# Вспомогательные бинарники не лежат в git: они берутся из черновика релиза
+# TOOLS_TAG и сверяются по sha256 (MANIFEST-b41.txt в том же релизе).
+# Готовые сборки складываются в черновик релиза v<версия>-b<билд>.
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/gifted-lamport-si8lz0
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERSION: "1.2.1"
+  BUILD: "41"
+  TOOLS_TAG: tools-b41
+  SHA_WINDOWS: 5b38dd09e4ab33c70bad0658b01351e6620878c957f2b9a3bc226b945c755c46
+  SHA_MACOS: 79e3538d0627b1340f6e84ac9dee3f3c494bdb9d89cdc551a43b683b9386a8a2
+  SHA_LINUX: 52024064f60d73f3b4af7e31dad5a38da3d998ee9b7240b83c6c70d64cc3f8ea
+  SHA_ANDROID: bc208afdae93539090e75281c947127c3191569d1cfb9b5d6284b28a7a976bcd
+
+jobs:
+  versions:
+    name: Version check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every version string says 1.2.1 / 41
+        run: |
+          set -eux
+          grep -q "\"version\": \"$VERSION\"" package.json
+          grep -q "\"version\": \"$VERSION\"" src-tauri/tauri.conf.json
+          grep -q "\"version\": \"$VERSION\"" src-setup/tauri.conf.json
+          grep -q "^version = \"$VERSION\"" src-tauri/Cargo.toml
+          grep -q "^version = \"$VERSION\"" src-setup/Cargo.toml
+          grep -q "APP_VERSION: &str = \"$VERSION\"" src-tauri/src/main.rs
+          grep -q "APP_BUILD: &str = \"$BUILD\"" src-tauri/src/main.rs
+          grep -q "\"bundleVersion\": \"$BUILD\"" src-tauri/tauri.macos.conf.json
+          grep -q "versionCode = $BUILD" android/app/build.gradle.kts
+          grep -q "versionName = \"$VERSION\"" android/app/build.gradle.kts
+
+  windows:
+    name: Windows installer
+    needs: versions
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            src-setup
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python tools
+        run: python -m pip install --disable-pip-version-check pefile
+
+      - name: Fetch Windows tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-windows-b41.zip' -D "$RUNNER_TEMP"
+          echo "$SHA_WINDOWS  $RUNNER_TEMP/signum-tools-windows-b41.zip" | sha256sum -c
+          python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('.')" "$RUNNER_TEMP/signum-tools-windows-b41.zip"
+          test -f apple-tools/windows-x64/v5/ipatool.exe
+          echo "b99082f8d984dc53ec3c2b38421aa953455ba38d7fadfbfb7b838db10f57d230  apple-tools/windows-x64/v5/ipatool.exe" | sha256sum -c
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build signum.exe
+        run: npm run tauri -- build --no-bundle
+
+      - name: Build installer UI
+        run: npx vite build --config vite.setup.config.ts
+
+      - name: Build installer
+        run: bash scripts/build-windows-installer.sh
+
+      - name: Check installer
+        run: |
+          set -eux
+          exe="installers/Signum_${VERSION}_Setup.exe"
+          test -s "$exe"
+          python - "$exe" <<'PY'
+          import sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          names = set(z.namelist())
+          for need in ["signum.exe", "uninstall.exe",
+                       "resources/apple-tools/windows-x64/v5/ipatool.exe",
+                       "resources/apple-tools/windows-x64/support/ideviceinstaller.exe"]:
+              assert need in names, need
+          print("payload files:", len(names))
+          PY
+          mkdir -p out
+          cp "$exe" "out/Signum_${VERSION}_b${BUILD}_Windows_Setup.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signum-windows
+          path: out/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS DMG (universal)
+    needs: versions
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Fetch macOS tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-macos-b41.tar.gz' -D "$RUNNER_TEMP"
+          echo "$SHA_MACOS  $RUNNER_TEMP/signum-tools-macos-b41.tar.gz" | shasum -a 256 -c
+          tar -xzf "$RUNNER_TEMP/signum-tools-macos-b41.tar.gz"
+          find apple-tools/macos-arm64 apple-tools/macos-x64 -type f ! -name '*.json' ! -name '*.txt' ! -name '*.bin' -exec chmod +x {} +
+          for tool in idevice_id ideviceinfo ideviceinstaller idevicepair; do
+            test "$(lipo -archs apple-tools/macos-x64/support/${tool})" = x86_64
+            test "$(lipo -archs apple-tools/macos-arm64/support/${tool})" = arm64
+            if otool -L apple-tools/macos-x64/support/${tool} apple-tools/macos-arm64/support/${tool} | grep -q /opt/homebrew; then
+              echo "${tool} links Homebrew"; exit 1
+            fi
+          done
+          test "$(lipo -archs apple-tools/macos-x64/v5/ipatool)" = x86_64
+          test "$(lipo -archs apple-tools/macos-arm64/v5/ipatool)" = arm64
+          test -f apple-tools/macos-arm64/v2/sapsigner
+          test -f apple-tools/macos-x64/v2/sapsigner
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Engine checks
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml macos_release_114 -- --nocapture
+
+      - name: Build DMG
+        run: npm run build:mac-universal
+
+      - name: Verify DMG
+        run: |
+          set -eux
+          dmg=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -type f | head -1)
+          test -n "$dmg"
+          mount=$(mktemp -d)
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
+          app="$mount/Signum.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$app/Contents/Info.plist")" = "$BUILD"
+          lipo "$app/Contents/MacOS/signum" -verify_arch x86_64 arm64
+          test -x "$app/Contents/Resources/resources/apple-tools/macos-arm64/v5/ipatool"
+          test -x "$app/Contents/Resources/resources/apple-tools/macos-x64/v5/ipatool"
+          codesign --verify --deep --strict "$app"
+          hdiutil detach "$mount"
+          mkdir -p out
+          cp "$dmg" "out/Signum_${VERSION}_b${BUILD}_macOS_universal.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signum-macos
+          path: out/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux AppImage and deb
+    needs: versions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Fetch Linux tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-linux-b41.tar.gz' -D "$RUNNER_TEMP"
+          echo "$SHA_LINUX  $RUNNER_TEMP/signum-tools-linux-b41.tar.gz" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/signum-tools-linux-b41.tar.gz"
+          test -x linux_x64/ipatool-v5
+          file linux_x64/ipatool-v5 | grep -q x86-64
+
+      - name: Build
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: bash scripts/build-linux.sh
+
+      - name: Collect
+        run: |
+          set -eux
+          mkdir -p out
+          appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' | head -1)
+          deb=$(find src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' | head -1)
+          test -n "$appimage" && test -n "$deb"
+          dpkg-deb -f "$deb" Version | grep -qx "$VERSION"
+          dpkg-deb -c "$deb" | grep -q 'resources/linux-x64/ipatool-v5'
+          cp "$appimage" "out/Signum_${VERSION}_b${BUILD}_Linux_x86_64.AppImage"
+          cp "$deb" "out/Signum_${VERSION}_b${BUILD}_Linux_amd64.deb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signum-linux
+          path: out/*
+          if-no-files-found: error
+
+  android:
+    name: Android APK
+    needs: versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Fetch Android tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-android-b41.zip' -D "$RUNNER_TEMP"
+          echo "$SHA_ANDROID  $RUNNER_TEMP/signum-tools-android-b41.zip" | sha256sum -c
+          unzip -o "$RUNNER_TEMP/signum-tools-android-b41.zip" -d .
+          test -s android/app/src/main/jniLibs/arm64-v8a/libsapsigner.so
+
+      - name: Signing key
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KSP: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KP: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -eu
+          test -n "$KS" && test -n "$KSP" && test -n "$KA" && test -n "$KP"
+          mkdir -p android/keystore
+          printf '%s' "$KS" | base64 -d > android/keystore/release.jks
+          {
+            echo "storeFile=keystore/release.jks"
+            echo "storePassword=$KSP"
+            echo "keyAlias=$KA"
+            echo "keyPassword=$KP"
+          } > android/keystore.properties
+
+      - name: Build release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Verify APK
+        run: |
+          set -eux
+          apk=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          test -n "$apk"
+          case "$apk" in *unsigned*) echo "APK is unsigned"; exit 1;; esac
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$bt/apksigner" verify --print-certs "$apk" | grep -i 'certificate SHA-256'
+          "$bt/aapt2" dump badging "$apk" | head -1 | tee badging.txt
+          grep -q "versionCode='$BUILD'" badging.txt
+          grep -q "versionName='$VERSION'" badging.txt
+          unzip -l "$apk" | grep -q 'lib/arm64-v8a/libsapsigner.so'
+          mkdir -p out
+          cp "$apk" "out/Signum_${VERSION}_b${BUILD}_Android.apk"
+
+      - name: Remove signing key
+        if: always()
+        run: rm -rf android/keystore android/keystore.properties
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signum-android
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    name: Draft release
+    needs: [windows, macos, linux, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          tag="v${VERSION}-b${BUILD}"
+          cd dist
+          sha256sum * | tee SHA256SUMS.txt
+          if ! gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+              --title "Signum $VERSION build $BUILD" \
+              --notes "Windows, macOS (universal), Linux, Android. Built by GitHub Actions from $GITHUB_SHA."
+          fi
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber *

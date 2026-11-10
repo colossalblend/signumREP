@@ -16,8 +16,8 @@ android {
         applicationId = "com.appbank.signum"
         minSdk = 26
         targetSdk = 36
-        versionCode = 40
-        versionName = "1.2.0"
+        versionCode = 41
+        versionName = "1.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
