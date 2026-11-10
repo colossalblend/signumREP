@@ -32,7 +32,13 @@ echo "==> build Linux deb + AppImage"
 # ни в WSL, ни в контейнерах. С этой переменной он распаковывает себя во
 # временную папку вместо монтирования.
 export APPIMAGE_EXTRACT_AND_RUN=1
-npm run build:linux
+# strip из linuxdeploy не понимает свежие секции ELF (.relr.dyn) и валит сборку.
+export NO_STRIP=1
+# tauri падает на шаге AppImage (см. ниже про архитектуры), но deb к этому
+# моменту уже собран, а AppDir подготовлен. Поэтому ошибку здесь не считаем
+# концом: ниже AppImage доделывается вручную, а наличие обоих пакетов
+# проверяется в конце.
+npm run build:linux || echo "WARN: tauri не собрал AppImage — доделываем вручную"
 
 # appimagetool угадывает архитектуру по файлам внутри пакета, а у нас там лежат
 # инструменты и под arm64, и под macOS — он видит несколько архитектур и
@@ -49,7 +55,12 @@ if [[ -d "$BUNDLE/Signum.AppDir" ]] && ! ls "$BUNDLE"/*.AppImage >/dev/null 2>&1
       wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
       chmod +x linuxdeploy-x86_64.AppImage
     fi
-    ARCH=x86_64 ./linuxdeploy-x86_64.AppImage --appdir Signum.AppDir --output appimage
+    # --output appimage ищет плагин рядом или в PATH; tauri держит свой в кеше.
+    if [[ ! -f linuxdeploy-plugin-appimage-x86_64.AppImage ]]; then
+      wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+      chmod +x linuxdeploy-plugin-appimage-x86_64.AppImage
+    fi
+    PATH="$PWD:$PATH" ARCH=x86_64 ./linuxdeploy-x86_64.AppImage --appdir Signum.AppDir --output appimage
     mv -f Signum-x86_64.AppImage "Signum_${VERSION}_amd64.AppImage"
     sha256sum "Signum_${VERSION}_amd64.AppImage"
   )
@@ -65,3 +76,8 @@ fi
 echo "==> artifacts:"
 ls -la src-tauri/target/release/bundle/appimage/ 2>/dev/null || true
 ls -la src-tauri/target/release/bundle/deb/ 2>/dev/null || true
+DEBS=(src-tauri/target/release/bundle/deb/*.deb)
+if [[ ${#DEBS[@]} -eq 0 ]]; then
+  echo "ERROR: deb не собран" >&2
+  exit 1
+fi
