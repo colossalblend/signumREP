@@ -1,4 +1,4 @@
-name: Tools discovery
+name: Tools inspect
 
 "on":
   workflow_dispatch:
@@ -9,43 +9,33 @@ name: Tools discovery
       - .github/workflows/tools-discover.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  discover:
+  inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: List release assets of candidate sources
+      - name: Inspect tools-b41
         env:
           GH_TOKEN: ${{ github.token }}
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KSP: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KP: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          for repo in \
-            Sorvigolova/ipatool \
-            kda2495/IPA_Downloader \
-            majd/ipatool \
-            zhlynn/zsign \
-            libimobiledevice-win32/imobiledevice-net \
-            libimobiledevice/libimobiledevice \
-            libimobiledevice/ideviceinstaller \
-            unicorn-engine/unicorn \
-            ; do
-            echo "################ $repo"
-            gh api "repos/$repo/releases?per_page=6" \
-              --jq '.[] | "== \(.tag_name) \(.published_at) draft=\(.draft)\n" + ([.assets[] | "   \(.name)  \(.size)  \(.digest // "-")"] | join("\n"))' \
-              || echo "   (no access)"
+          set -u
+          for v in KS KSP KA KP; do
+            if [ -n "${!v}" ]; then echo "secret $v: set"; else echo "secret $v: MISSING"; fi
           done
-
-      - name: Search GitHub for helper sources
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for q in "sapsigner" "ipatool sapfix" "libsapsigner" "ipatool-cpp" "libimobiledevice windows build" "kbsync ucworker"; do
-            echo "################ search: $q"
-            gh api -X GET search/repositories -f q="$q" -f per_page=15 \
-              --jq '.items[] | "\(.full_name)  stars=\(.stargazers_count)  pushed=\(.pushed_at)  \(.description // "")"' || true
-          done
-          for q in "ucworker.dll" "libsapsigner.so" "sapsigner unicorn"; do
-            echo "################ code search: $q"
-            gh api -X GET search/code -f q="$q" -f per_page=15 \
-              --jq '.items[] | "\(.repository.full_name)  \(.path)"' || true
+          echo "################ assets"
+          gh api "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select(.tag_name=="tools-b41") | .assets[] | "\(.name)  \(.size)  \(.digest // "-")"'
+          mkdir -p /tmp/t && cd /tmp/t
+          gh release download tools-b41 -R "$GITHUB_REPOSITORY" -D . || { echo "download failed"; exit 1; }
+          for f in *; do
+            echo "################ $f  $(sha256sum "$f" | cut -d' ' -f1)"
+            case "$f" in
+              *.zip) unzip -l "$f" | awk '{print $1, $4}' | sed '1,3d' ;;
+              *.tar.gz|*.tgz) tar -tvzf "$f" | awk '{print $1, $3, $6}' ;;
+              *.txt) cat "$f" ;;
+            esac
           done
