@@ -51,6 +51,10 @@ jobs:
     name: Windows installer
     needs: versions
     runs-on: windows-2022
+    env:
+      # Скрипты сборки печатают по-русски, а консоль раннера — cp1252.
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
     defaults:
       run:
         shell: bash
