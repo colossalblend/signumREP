@@ -19,12 +19,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  VERSION: "1.2.1"
-  BUILD: "41"
-  TOOLS_TAG: tools-b41
-  SHA_WINDOWS: 5b38dd09e4ab33c70bad0658b01351e6620878c957f2b9a3bc226b945c755c46
-  SHA_MACOS: 79e3538d0627b1340f6e84ac9dee3f3c494bdb9d89cdc551a43b683b9386a8a2
-  SHA_LINUX: 52024064f60d73f3b4af7e31dad5a38da3d998ee9b7240b83c6c70d64cc3f8ea
+  VERSION: "1.2.2"
+  BUILD: "42"
+  TOOLS_TAG: tools-b42
+  SHA_WINDOWS: 5056b7b153a26d8bb44bf85b4e76c180887d90f7ebedcb4ae8ef0e7403915387
+  SHA_MACOS: 0f309167ece84ef5dfb2340d186357fff51754c5c8104b352d0035e64ef03aef
+  SHA_LINUX: 20df56367995b61fde711da899c562d593d7bdb0a2c680b2b714f6ca3c659093
   SHA_ANDROID: bc208afdae93539090e75281c947127c3191569d1cfb9b5d6284b28a7a976bcd
 
 jobs:
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Every version string says 1.2.1 / 41
+      - name: Every version string says 1.2.2 / 42
         run: |
           set -eux
           grep -q "\"version\": \"$VERSION\"" package.json
@@ -86,9 +86,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-windows-b41.zip' -D "$RUNNER_TEMP"
-          echo "$SHA_WINDOWS  $RUNNER_TEMP/signum-tools-windows-b41.zip" | sha256sum -c
-          python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('.')" "$RUNNER_TEMP/signum-tools-windows-b41.zip"
+          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-windows-b42.zip' -D "$RUNNER_TEMP"
+          echo "$SHA_WINDOWS  $RUNNER_TEMP/signum-tools-windows-b42.zip" | sha256sum -c
+          python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('.')" "$RUNNER_TEMP/signum-tools-windows-b42.zip"
           test -f apple-tools/windows-x64/v5/ipatool.exe
           echo "b99082f8d984dc53ec3c2b38421aa953455ba38d7fadfbfb7b838db10f57d230  apple-tools/windows-x64/v5/ipatool.exe" | sha256sum -c
 
@@ -153,9 +153,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-macos-b41.tar.gz' -D "$RUNNER_TEMP"
-          echo "$SHA_MACOS  $RUNNER_TEMP/signum-tools-macos-b41.tar.gz" | shasum -a 256 -c
-          tar -xzf "$RUNNER_TEMP/signum-tools-macos-b41.tar.gz"
+          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-macos-b42.tar.gz' -D "$RUNNER_TEMP"
+          echo "$SHA_MACOS  $RUNNER_TEMP/signum-tools-macos-b42.tar.gz" | shasum -a 256 -c
+          tar -xzf "$RUNNER_TEMP/signum-tools-macos-b42.tar.gz"
           find apple-tools/macos-arm64 apple-tools/macos-x64 -type f ! -name '*.json' ! -name '*.txt' ! -name '*.bin' -exec chmod +x {} +
           for tool in idevice_id ideviceinfo ideviceinstaller idevicepair; do
             test "$(lipo -archs apple-tools/macos-x64/support/${tool})" = x86_64
@@ -226,9 +226,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-linux-b41.tar.gz' -D "$RUNNER_TEMP"
-          echo "$SHA_LINUX  $RUNNER_TEMP/signum-tools-linux-b41.tar.gz" | sha256sum -c
-          tar -xzf "$RUNNER_TEMP/signum-tools-linux-b41.tar.gz"
+          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-linux-b42.tar.gz' -D "$RUNNER_TEMP"
+          echo "$SHA_LINUX  $RUNNER_TEMP/signum-tools-linux-b42.tar.gz" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/signum-tools-linux-b42.tar.gz"
           test -x linux_x64/ipatool-v5
           file linux_x64/ipatool-v5 | grep -q x86-64
 
@@ -274,9 +274,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-android-b41.zip' -D "$RUNNER_TEMP"
-          echo "$SHA_ANDROID  $RUNNER_TEMP/signum-tools-android-b41.zip" | sha256sum -c
-          unzip -o "$RUNNER_TEMP/signum-tools-android-b41.zip" -d .
+          gh release download "$TOOLS_TAG" -R "$GITHUB_REPOSITORY" -p 'signum-tools-android-b42.zip' -D "$RUNNER_TEMP"
+          echo "$SHA_ANDROID  $RUNNER_TEMP/signum-tools-android-b42.zip" | sha256sum -c
+          unzip -o "$RUNNER_TEMP/signum-tools-android-b42.zip" -d .
           test -s android/app/src/main/jniLibs/arm64-v8a/libsapsigner.so
 
       - name: Signing key
