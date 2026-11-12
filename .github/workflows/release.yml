@@ -90,7 +90,7 @@ jobs:
           echo "$SHA_WINDOWS  $RUNNER_TEMP/signum-tools-windows-b42.zip" | sha256sum -c
           python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('.')" "$RUNNER_TEMP/signum-tools-windows-b42.zip"
           test -f apple-tools/windows-x64/v5/ipatool.exe
-          echo "b99082f8d984dc53ec3c2b38421aa953455ba38d7fadfbfb7b838db10f57d230  apple-tools/windows-x64/v5/ipatool.exe" | sha256sum -c
+          echo "189feec141b56b80b8f7c0f6d3c26c1b05060b622a5167dcc3697dbcf55a8b8c  apple-tools/windows-x64/v5/ipatool.exe" | sha256sum -c
 
       - name: npm ci
         run: npm ci
