@@ -3960,6 +3960,9 @@ fn macos_ipatool_embeds_kbsync(hash: &str) -> bool {
         | "9900a16212e0697b64094fa4dec0d9da367b76f8d01b84604b21d9808d86347e"
         | "2d6b4391fed1e4f3778af730a5b95f0aaee139f8f0aede4c3e62b6cd66ff2c6d"
         | "2a5f789bbbc94e78eac1ae31fd55b883374b4244a23c9c65bf1240fad8b29594"
+        // IPA_Downloader 4.4.1 ipatool-cpp builds (macOS x64 / arm64).
+        | "4222df99a21dd1e026aff0ce0b33d4cdb5dcbc5df8c233fab283c87d859647d6"
+        | "9dab3025eb6212ad558bb0bf23e3d3f62077d7462e0481c520aa8c6274c97179"
     )
 }
 
@@ -21621,6 +21624,8 @@ mod tests {
             "9900a16212e0697b64094fa4dec0d9da367b76f8d01b84604b21d9808d86347e",
             "2d6b4391fed1e4f3778af730a5b95f0aaee139f8f0aede4c3e62b6cd66ff2c6d",
             "2a5f789bbbc94e78eac1ae31fd55b883374b4244a23c9c65bf1240fad8b29594",
+            "4222df99a21dd1e026aff0ce0b33d4cdb5dcbc5df8c233fab283c87d859647d6",
+            "9dab3025eb6212ad558bb0bf23e3d3f62077d7462e0481c520aa8c6274c97179",
         ] {
             assert!(super::macos_ipatool_embeds_kbsync(hash));
         }
