@@ -1,0 +1,9 @@
+# Signum landing
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://appbank.pw/signum/sitemap.xml
+
+# Crawl hints
+Host: appbank.pw
