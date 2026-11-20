@@ -8659,7 +8659,13 @@ struct PurchaseHistoryResult {
     /// Temporary HTTP debug log path (for diagnosing history login).
     #[serde(skip_serializing_if = "Option::is_none")]
     debug_log_path: Option<String>,
+    /// Откуда список: `reportproblem` (полная история с reportaproblem.apple.com)
+    /// или `library` (ipatool list-purchases без кода — может быть неполной).
+    source: String,
 }
+
+const HISTORY_SOURCE_REPORTPROBLEM: &str = "reportproblem";
+const HISTORY_SOURCE_LIBRARY: &str = "library";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -8687,6 +8693,10 @@ struct FetchPurchaseHistoryInput {
     /// Drain all remaining cursor pages in one sequential backend request.
     #[serde(default, alias = "load_all")]
     load_all: Option<bool>,
+    /// «Попробовать без кода»: взять историю через библиотеку ipatool
+    /// (`list-purchases` по уже сохранённой сессии App Store), без reportaproblem и 2FA.
+    #[serde(default, alias = "via_library")]
+    via_library: Option<bool>,
 }
 
 /// Resolve CFBundleIdentifier for an App Store adamId.
@@ -8802,6 +8812,7 @@ async fn fetch_purchase_history(
             session_saved: true,
             from_cache: false,
             debug_log_path: None,
+            source: HISTORY_SOURCE_REPORTPROBLEM.into(),
         });
     }
     let email = input
@@ -8864,6 +8875,7 @@ async fn fetch_purchase_history(
     let load_more = input.load_more.unwrap_or(false);
     let force_refresh = input.force_refresh.unwrap_or(false);
     let load_all = input.load_all.unwrap_or(false);
+    let via_library = input.via_library.unwrap_or(false);
     let client_batch = input
         .batch_id
         .as_ref()
@@ -8906,6 +8918,7 @@ async fn fetch_purchase_history(
                             session_saved,
                             from_cache: false,
                             debug_log_path: debug_path,
+                            source: HISTORY_SOURCE_REPORTPROBLEM.into(),
                         });
                     }
                     Err(e) => {
@@ -8934,47 +8947,47 @@ async fn fetch_purchase_history(
         }
     }
 
-    // ---- Path 0a: ipatool list-purchases (DAAP) — ОТКЛЮЧЁН ----
-    // DAAP-метод медленнее RAP-сессии и не возвращает обложки (artwork пустой).
-    // Старый idmsa-метод ниже остаётся основным. Код в apple_history.rs сохранён;
-    // чтобы вернуть DAAP первым — поставь true здесь.
-    const HISTORY_VIA_IPATOOL: bool = false;
-    if HISTORY_VIA_IPATOOL && two_factor.is_none() && !resend && !load_more && !load_all {
-        let via_ipatool = (|| async {
-            let tools = resolve_tool_paths(&app).ok()?;
-            let keychain = resolve_ipatool_keychain(&app).ok()?;
-            if !current_ipatool_session_exists() {
-                ipatool_debug_log("history-ipatool skip: no ipatool session");
-                return None;
-            }
-            let debug = |msg: &str| ipatool_debug_log(msg);
-            apple_history::fetch_history_via_ipatool(&tools.ipatool, &keychain, &debug).await
-        })()
-        .await;
-        if let Some(apps) = via_ipatool {
-            if !apps.is_empty() {
-                ipatool_debug_log(&format!(
-                    "history-ipatool ok count={} — using DAAP history",
-                    apps.len()
-                ));
-                let success = apple_history::HistorySuccess {
-                    apps,
-                    cookies: HashMap::new(),
-                    next_batch_id: None,
-                    has_more: false,
-                    rap_dsid: None,
-                    rap_xsrf: None,
-                };
-                return finalize_purchase_history_result(
-                    email,
-                    success,
-                    detailed,
-                    false,
-                    false,
-                )
-                .await;
-            }
+    // ---- «Попробовать без кода»: библиотека ipatool (list-purchases, DAAP) ----
+    // Основной путь — reportaproblem.apple.com (полная история, нужен код).
+    // Этот путь берёт уже сохранённую сессию App Store из ipatool и обходится
+    // без 2FA, но Apple отдаёт по нему не все покупки (скрытые, семейные и часть
+    // старых не приходят), поэтому UI помечает такой список как неполный.
+    if via_library {
+        let tools = resolve_tool_paths(&app)?;
+        let keychain = resolve_ipatool_keychain(&app)?;
+        if !current_ipatool_session_exists() {
+            return Err(
+                "Библиотека ipatool не видит вход в App Store. Войдите в Apple ID на странице «Аккаунт» или откройте историю с кодом."
+                    .into(),
+            );
         }
+        let debug = |msg: &str| ipatool_debug_log(msg);
+        let apps = apple_history::fetch_history_via_ipatool(&tools.ipatool, &keychain, &debug)
+            .await
+            .filter(|apps| !apps.is_empty())
+            .ok_or_else(|| {
+                "Через библиотеку ipatool историю получить не удалось. Откройте историю с кодом подтверждения."
+                    .to_string()
+            })?;
+        ipatool_debug_log(&format!("history-ipatool ok count={}", apps.len()));
+        let mut apps = apps;
+        enrich_history_apps_from_itunes(&mut apps).await;
+        let success = apple_history::HistorySuccess {
+            apps,
+            cookies: HashMap::new(),
+            next_batch_id: None,
+            has_more: false,
+            rap_dsid: None,
+            rap_xsrf: None,
+        };
+        return finalize_purchase_history_result(
+            email,
+            success,
+            detailed,
+            false,
+            HISTORY_SOURCE_LIBRARY,
+        )
+        .await;
     }
 
     // ---- Path 0: reuse saved RAP session (no password / no 2FA) ----
@@ -9029,7 +9042,7 @@ async fn fetch_purchase_history(
                         success,
                         detailed,
                         load_more || load_all,
-                        false,
+                        HISTORY_SOURCE_REPORTPROBLEM,
                     )
                     .await;
                 }
@@ -9092,6 +9105,7 @@ async fn fetch_purchase_history(
                     session_saved,
                     from_cache: false,
                     debug_log_path: None,
+                    source: HISTORY_SOURCE_REPORTPROBLEM.into(),
                 });
             }
             *slot = None;
@@ -9144,6 +9158,7 @@ async fn fetch_purchase_history(
                 session_saved,
                 from_cache: false,
                 debug_log_path: debug_path,
+                source: HISTORY_SOURCE_REPORTPROBLEM.into(),
             });
         }
         Err(e) => {
@@ -9162,6 +9177,7 @@ async fn fetch_purchase_history(
                     session_saved,
                     from_cache: false,
                     debug_log_path: debug_path,
+                    source: HISTORY_SOURCE_REPORTPROBLEM.into(),
                 });
             }
             if e.clear_pending() {
@@ -9188,7 +9204,7 @@ async fn fetch_purchase_history(
         }
     };
 
-    finalize_purchase_history_result(email, success, detailed, false, false).await
+    finalize_purchase_history_result(email, success, detailed, false, HISTORY_SOURCE_REPORTPROBLEM).await
 }
 
 fn region_account_email(app: &AppHandle, explicit: Option<&str>) -> Result<String, String> {
@@ -9830,6 +9846,10 @@ fn history_result_from_cache(
     detailed: bool,
 ) -> PurchaseHistoryResult {
     let next_batch_id = cache.next_batch_id.clone();
+    let source = cache
+        .source
+        .clone()
+        .unwrap_or_else(|| HISTORY_SOURCE_REPORTPROBLEM.into());
     let apps: Vec<PurchaseHistoryApp> = cache
         .apps
         .into_iter()
@@ -9853,6 +9873,7 @@ fn history_result_from_cache(
         } else {
             None
         },
+        source,
     }
 }
 
@@ -9900,12 +9921,77 @@ async fn enrich_history_cache_bundle_ids(
     result
 }
 
+/// ipatool отдаёт только номер, bundle и имя. Достраиваем значок, разработчика
+/// и название пачками через публичный iTunes lookup (до 150 номеров за запрос).
+async fn enrich_history_apps_from_itunes(apps: &mut [apple_history::HistoryApp]) {
+    let Ok(client) = itunes_lookup_client() else {
+        return;
+    };
+    let ids: Vec<String> = apps.iter().map(|a| a.adam_id.clone()).collect();
+    let mut found: HashMap<String, JsonValue> = HashMap::new();
+    for chunk in ids.chunks(150) {
+        for country in ["ru", "us"] {
+            let missing: Vec<&String> = chunk.iter().filter(|id| !found.contains_key(*id)).collect();
+            if missing.is_empty() {
+                break;
+            }
+            let joined = missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",");
+            let Ok(resp) = client
+                .get("https://itunes.apple.com/lookup")
+                .query(&[("id", joined.as_str()), ("country", country), ("entity", "software")])
+                .send()
+                .await
+            else {
+                continue;
+            };
+            let Ok(value) = resp.json::<JsonValue>().await else {
+                continue;
+            };
+            for item in value.get("results").and_then(|v| v.as_array()).into_iter().flatten() {
+                if let Some(id) = item.get("trackId").and_then(|v| v.as_i64()) {
+                    found.insert(id.to_string(), item.clone());
+                }
+            }
+        }
+    }
+    for app in apps.iter_mut() {
+        let Some(item) = found.get(&app.adam_id) else {
+            continue;
+        };
+        let text = |key: &str| {
+            item.get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        if app.artwork.is_empty() {
+            if let Some(art) = text("artworkUrl100").or_else(|| text("artworkUrl60")) {
+                app.artwork = art;
+            }
+        }
+        if app.artist.is_empty() {
+            if let Some(artist) = text("artistName") {
+                app.artist = artist;
+            }
+        }
+        if app.name == "Приложение" || app.name.contains('.') && !app.name.contains(' ') {
+            if let Some(name) = text("trackName") {
+                app.name = name;
+            }
+        }
+        if let Some(price) = text("formattedPrice") {
+            app.price = price;
+        }
+    }
+}
+
 async fn finalize_purchase_history_result(
     email: String,
     success: apple_history::HistorySuccess,
     detailed: bool,
     append: bool,
-    _unused: bool,
+    source: &str,
 ) -> Result<PurchaseHistoryResult, String> {
     let mut page_apps: Vec<PurchaseHistoryApp> =
         success.apps.into_iter().map(history_app_from_raw).collect();
@@ -9943,7 +10029,7 @@ async fn finalize_purchase_history_result(
     let next_id = success.next_batch_id.clone();
     let page_has_more =
         success.has_more && next_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
-    let cache = history_secrets::merge_history_apps_cache_with_rap(
+    let mut cache = history_secrets::merge_history_apps_cache_with_rap(
         &email,
         &cached_page,
         next_id.clone(),
@@ -9952,6 +10038,7 @@ async fn finalize_purchase_history_result(
         success.rap_dsid.clone(),
         success.rap_xsrf.clone(),
     );
+    history_secrets::set_history_cache_source(&mut cache, source);
 
     let apps: Vec<PurchaseHistoryApp> = cache
         .apps
@@ -9978,6 +10065,7 @@ async fn finalize_purchase_history_result(
         } else {
             None
         },
+        source: source.to_string(),
     })
 }
 
@@ -20423,6 +20511,67 @@ fn open_media_feature_pack() -> Result<(), String> {
     }
 }
 
+/// Домены, которые страница «О приложении» может открыть во внешнем браузере.
+/// Список закрытый: фронтенд не должен уметь запускать произвольные адреса.
+const EXTERNAL_LINK_HOSTS: &[&str] = &[
+    "t.me",
+    "appbank.pw",
+    "www.appbank.pw",
+    "github.com",
+];
+
+fn external_link_allowed(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest
+        .split(|c| c == '/' || c == '?' || c == '#')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    !url.chars().any(|c| c.is_control() || c == '"' || c == ' ')
+        && EXTERNAL_LINK_HOSTS.iter().any(|allowed| *allowed == host)
+}
+
+/// Открывает ссылку в системном браузере (Telegram-канал, сайт, репозитории).
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let url = url.trim().to_string();
+    if !external_link_allowed(&url) {
+        return Err("Эту ссылку нельзя открыть из Signum.".into());
+    }
+    #[cfg(target_os = "windows")]
+    let status = StdCommand::new("cmd")
+        .args(["/C", "start", "", &url])
+        .creation_flags(0x0800_0000)
+        .status();
+    #[cfg(target_os = "macos")]
+    let status = StdCommand::new("open").arg(&url).status();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = StdCommand::new("xdg-open").arg(&url).status();
+    match status {
+        Ok(code) if code.success() => Ok(()),
+        Ok(_) | Err(_) => Err(format!("Не удалось открыть браузер. Ссылка: {url}")),
+    }
+}
+
+#[cfg(test)]
+mod external_link_tests {
+    use super::external_link_allowed;
+
+    #[test]
+    fn allows_only_listed_https_hosts() {
+        assert!(external_link_allowed("https://t.me/appbankRU"));
+        assert!(external_link_allowed("https://appbank.pw"));
+        assert!(external_link_allowed("https://github.com/kda2495/IPA_Downloader"));
+        assert!(!external_link_allowed("http://t.me/appbankRU"));
+        assert!(!external_link_allowed("https://t.me.evil.com/x"));
+        assert!(!external_link_allowed("https://evil.com/?https://t.me"));
+        assert!(!external_link_allowed("https://github.com/a\" & calc"));
+        assert!(!external_link_allowed("file:///etc/passwd"));
+    }
+}
+
 /// Opens Windows Settings → Optional features (where Media Feature Pack is installed).
 #[tauri::command]
 fn open_optional_features() -> Result<(), String> {
@@ -22949,6 +23098,7 @@ fn main() {
             open_icloud_manual_install,
             open_media_feature_pack,
             open_optional_features,
+            open_external_url,
         diag_log::get_diag_status,
             diag_log::log_ui_action,
         diag_log::start_diag_recording,

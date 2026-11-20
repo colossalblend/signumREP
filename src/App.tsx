@@ -1,5 +1,6 @@
 import { createHashRouter, Navigate, RouterProvider } from "react-router-dom";
 import Layout from "./components/Layout";
+import About from "./pages/About";
 import Account from "./pages/Account";
 import Catalog from "./pages/Catalog";
 import Devices from "./pages/Devices";
@@ -16,6 +17,7 @@ const router = createHashRouter([{ path: "/", element: <Layout />, children: [
   { path: "installs", element: <Installs /> },
   { path: "ipa-signing", element: <IpaSigning /> },
   { path: "settings", element: <Settings /> },
+  { path: "settings/about", element: <About /> },
   { path: "*", element: <Navigate to="/" replace /> },
 ] }]);
 export default function App() { return <RouterProvider router={router} />; }
