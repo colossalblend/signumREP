@@ -11,9 +11,22 @@ name: Build Windows
       - "website-appbank/**"
       - "backend/**"
       - "**.md"
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "android/**"
+      - "website/**"
+      - "website-appbank/**"
+      - "backend/**"
+      - "**.md"
 
 permissions:
   contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   windows:
@@ -21,10 +34,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: npm
