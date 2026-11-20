@@ -1,6 +1,5 @@
                       
 """Fetch VK ecosystem apps from AppMagic (auth from New folder/request.txt)."""
-import os
 import json
 import time
 import urllib.error
@@ -8,12 +7,18 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-TOKEN = os.environ.get("APPMAGIC_TOKEN", "")
+TOKEN = "S5tgAvA8yFGByYWyXBoc-7Wv4YpQ29kE"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/148.0.0.0 YaBrowser/26.6.0.0 Safari/537.36"
 )
-COOKIE = os.environ.get("APPMAGIC_COOKIE", "")
+COOKIE = (
+    "dashly_device_guid=161f5bb5-a711-4bbe-a7fb-e0c5bddc85fd; "
+    "dashly_uid=2066609493382267361; "
+    "dashly_auth_token=user.2066609493382267361.7830-e4dd41f4662c0285e8163b41d6e.7d1895f9543ec78c882e2ad8693967b36a4225c692956c09; "
+    "hubspotutk=5ace068022dd152547b0568f1b78b3ec; "
+    "cf_clearance=QAwXyufztJ6L6vdKuW6zNiDaOPpkvUbhbbQe._UGM64-1771183652-1.2.1.1-Gzhj7Nw3tXtEkKBttkwxHlYuenFnNRq18zMYghCiPUSw7zbz5CDd.gr9CTnBx6rtAPmiT.VVoAiQKLLINiof3HNAbIMqRdCYDuUE390Hi9oGg9IYufYFoYK.92_1vmd19rUo3bv_QOjqazslCxwZYN4O2YsAZabjeV4fOEtI7T_DTh8fzGE03aN9Vv4ErVyJo.zYlxPietM1dooVOqArA7ZzzcF7MHtkc5oRHfvXjgw"
+)
 
 APPS = [
     ("vk", "ВКонтакте", "564177498", "https://appmagic.rocks/iphone/vk-social-network-messenger/564177498"),

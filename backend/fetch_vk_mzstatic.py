@@ -2,7 +2,6 @@
 """Get real iOS mzstatic icons for VK apps via Wayback / other sources, patch common.php."""
 from __future__ import annotations
 
-import os
 import json
 import re
 import time
@@ -115,8 +114,12 @@ def wayback_icon(app_id: str) -> str:
 
 def appmagic_search_icon(app_id: str) -> str:
     """Only accept mzstatic from search match itself (not similar apps)."""
-    TOKEN = os.environ.get("APPMAGIC_TOKEN", "")
-    COOKIE = os.environ.get("APPMAGIC_COOKIE", "")
+    TOKEN = "S5tgAvA8yFGByYWyXBoc-7Wv4YpQ29kE"
+    COOKIE = (
+        "dashly_device_guid=161f5bb5-a711-4bbe-a7fb-e0c5bddc85fd; "
+        "dashly_uid=2066609493382267361; "
+        "dashly_auth_token=user.2066609493382267361.7830-e4dd41f4662c0285e8163b41d6e.7d1895f9543ec78c882e2ad8693967b36a4225c692956c09"
+    )
     url = f"https://appmagic.rocks/api/v2/search?name={app_id}&limit=20"
     req = urllib.request.Request(
         url,
