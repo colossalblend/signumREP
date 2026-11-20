@@ -38,6 +38,8 @@ import pw.appbank.signum.data.models.DeviceInfo
 import pw.appbank.signum.data.models.InstalledApp
 import pw.appbank.signum.data.models.JobStatus
 import pw.appbank.signum.data.models.PurchaseHistoryApp
+import pw.appbank.signum.data.models.HISTORY_SOURCE_LIBRARY
+import pw.appbank.signum.data.models.HISTORY_SOURCE_REPORTPROBLEM
 import pw.appbank.signum.data.models.SignOptions
 
 data class UiState(
@@ -93,6 +95,9 @@ data class UiState(
     val historyMessage: String = "",
     val historySelected: Set<String> = emptySet(),
     val historyBusy: Boolean = false,
+    /** `reportproblem` или `library` (без кода, список может быть неполным). */
+    val historySource: String = HISTORY_SOURCE_REPORTPROBLEM,
+    val historyLibraryLoading: Boolean = false,
     val devices: List<DeviceInfo> = emptyList(),
     val selectedDevice: DeviceInfo? = null,
     val installed: List<InstalledApp> = emptyList(),
@@ -1025,13 +1030,17 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         viewModelScope.launch {
             _state.update { it.copy(historyLoading = true, historyMessage = "") }
             engine.cachedHistory()?.let { cached ->
-                if (!force) _state.update { it.copy(history = cached.apps) }
+                if (!force) _state.update { it.copy(history = cached.apps, historySource = cached.source) }
             }
             runCatching { engine.fetchHistory(_state.value.history2fa.takeIf { it.length >= 6 }, false, null, force) }
                 .onSuccess { r ->
                     _state.update {
+                        // Запрос кода приходит с пустым списком — уже показанную
+                        // историю при этом не стираем.
+                        val keepShown = r.needs2fa && r.apps.isEmpty()
                         it.copy(
-                            history = r.apps,
+                            history = if (keepShown) it.history else r.apps,
+                            historySource = if (keepShown) it.historySource else r.source,
                             historyLoading = false,
                             historyNeeds2fa = r.needs2fa,
                             historyMessage = r.message.orEmpty(),
@@ -1046,6 +1055,40 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                 }
         }
     }
+
+    /**
+     * «Попробовать без кода»: история через уже сохранённую сессию App Store
+     * (commerce-API, как ipatool list-purchases). Список может быть неполным —
+     * экран показывает плашку и кнопку «Повторить с кодом».
+     */
+    fun loadHistoryViaLibrary() {
+        if (_state.value.historyLibraryLoading) return
+        viewModelScope.launch {
+            _state.update { it.copy(historyLibraryLoading = true, historyMessage = "") }
+            runCatching { engine.fetchHistoryViaLibrary() }
+                .onSuccess { r ->
+                    _state.update {
+                        it.copy(
+                            history = r.apps,
+                            historySource = r.source,
+                            historyLibraryLoading = false,
+                            historyNeeds2fa = false,
+                            history2fa = "",
+                            historySelected = emptySet(),
+                            historyMessage = "",
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(historyLibraryLoading = false, historyMessage = Errors.localize(e.message ?: ""))
+                    }
+                }
+        }
+    }
+
+    /** Полная история с reportaproblem — Apple при необходимости попросит код. */
+    fun retryHistoryWithCode() = loadHistory(true)
 
     fun setHistorySearch(q: String) = _state.update { it.copy(historySearch = q) }
     fun setHistory2fa(q: String) = _state.update { it.copy(history2fa = q.filter { it.isDigit() }.take(6)) }
