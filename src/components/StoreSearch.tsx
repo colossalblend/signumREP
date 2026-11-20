@@ -1,8 +1,7 @@
-import { ArrowLeft, BadgeCheck, Check, ChevronRight, Download, LoaderCircle, Search, ShoppingBag, Smartphone, Store, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, Download, LoaderCircle, Search, ShoppingBag, Smartphone, Store, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
-import PageHeader from "../components/PageHeader";
-import Checkbox from "../components/Checkbox";
+import { useNavigate } from "react-router-dom";
+import Checkbox from "./Checkbox";
 import { isTwoFactorError } from "../lib/auth";
 import { formatMinIos, formatVersionWithIos } from "../lib/format";
 import {
@@ -11,6 +10,7 @@ import {
 } from "../lib/tauri";
 import type {
   AppStoreVersion,
+  CatalogApp,
   CatalogInstallOffer,
   StoreDeveloper,
   StoreRegionPlan,
@@ -45,10 +45,9 @@ function pluralApps(count: number): string {
   }
 }
 
-import { tourSearchHits, useTourDemo, useTourSignal } from "../lib/tourStore";
+import { tourSearchHits, useTourDemo } from "../lib/tourStore";
 
 const VERSIONS_PAGE = 12;
-const TOUR_QUERY = "Тест приложение";
 
 function versionMatchesSearch(version: string, externalVersionId: string, query: string): boolean {
   const q = query.trim().toLowerCase();
@@ -101,9 +100,29 @@ function formatAppStoreVersionLabel(version: string, externalVersionId: string):
   return v.startsWith("v") || v.startsWith("V") ? v : `v${v}`;
 }
 
-export default function Find() {
+type StoreSearchProps = {
+  /** Текст из общей строки поиска Каталога. Владеет им страница, а не этот блок. */
+  query: string;
+  /** Обучение показывает демо-результаты вместо запроса к Apple. */
+  tourShowHits: boolean;
+  /** Совпадения в каталоге Signum по тому же запросу — показываем отдельной полкой. */
+  catalogMatches: CatalogApp[];
+  onOpenCatalogApp: (app: CatalogApp) => void;
+  /** Сообщаем странице, идёт ли сетевой поиск, — для спиннера в строке ввода. */
+  onSearchingChange?: (searching: boolean) => void;
+};
+
+/**
+ * App Store-часть Каталога: поиск по AppMagic + iTunes, разработчики и окно
+ * установки найденного. У неё своё состояние и свои номера запросов, поэтому
+ * она никогда не пересекается с локальным фильтром каталога Signum: каталог
+ * фильтруется мгновенно в памяти, а сюда запрос уходит только когда открыта
+ * вкладка «App Store» и введено от двух символов.
+ */
+export default function StoreSearch({
+  query, tourShowHits, catalogMatches, onOpenCatalogApp, onSearchingChange,
+}: StoreSearchProps) {
   const navigate = useNavigate();
-  const [query, setQuery] = useState("");
   const [storeHits, setStoreHits] = useState<StoreSearchApp[]>([]);
   const [storeSearching, setStoreSearching] = useState(false);
   const [storeError, setStoreError] = useState("");
@@ -185,13 +204,6 @@ export default function Find() {
     }, 280);
     return () => window.clearTimeout(timer);
   }, [query]);
-
-  // Пришли из каталога, где ничего не нашлось — ищем сразу то же самое.
-  const location = useLocation();
-  useEffect(() => {
-    const handed = (location.state as { query?: string } | null)?.query?.trim();
-    if (handed) setQuery(handed);
-  }, [location.state]);
 
   useEffect(() => {
     if (!offer) setRegionPlan(null);
@@ -415,32 +427,7 @@ export default function Find() {
     }
   }
 
-  // The walkthrough types into this field and shows demo hits, so it can
-  // explain search without sending a query to the App Store.
   const tourDemo = useTourDemo();
-  const tourSignal = useTourSignal();
-  const [tourTyped, setTourTyped] = useState("");
-  const [tourShowHits, setTourShowHits] = useState(false);
-
-  useEffect(() => {
-    if (!tourDemo) {
-      setTourTyped("");
-      setTourShowHits(false);
-      return;
-    }
-    if (tourSignal.name === "find-results") {
-      setTourTyped(TOUR_QUERY);
-      setTourShowHits(true);
-      return;
-    }
-    if (tourSignal.name !== "find-typing") return;
-    setTourShowHits(false);
-    setTourTyped("");
-    const timers = TOUR_QUERY.split("").map((_, i) =>
-      window.setTimeout(() => setTourTyped(TOUR_QUERY.slice(0, i + 1)), 55 * (i + 1)),
-    );
-    return () => timers.forEach(window.clearTimeout);
-  }, [tourDemo, tourSignal]);
 
   // Поиск разработчиков идёт по тому же вводу, что и поиск приложений.
   //
@@ -590,47 +577,44 @@ export default function Find() {
     }
   }
 
+  useEffect(() => {
+    onSearchingChange?.(storeSearching || devSearching);
+  }, [storeSearching, devSearching, onSearchingChange]);
+  useEffect(() => () => onSearchingChange?.(false), [onSearchingChange]);
+
   const shownHits = tourShowHits ? tourSearchHits : storeHits;
-  const shownQuery = tourDemo && tourTyped ? tourTyped : query;
   const typed = query.trim().length >= 2;
   const showEmpty = typed && !storeSearching && storeHits.length === 0 && !storeError && !tourDemo;
 
   return (
-    <div className="mx-auto max-w-[1100px] p-7 lg:p-9">
-      <PageHeader
-        title="Поиск"
-        subtitle="Название, ссылка, номер или имя разработчика"
-      />
-
-      <div className="mt-5">
-        <div data-tour="find-input" className="panel flex items-center gap-3 px-4 py-3 transition focus-within:border-brand-400/40 focus-within:bg-white/[0.055]">
-          <Search className="shrink-0 text-brand-300" size={19} />
-          <input
-            type="text"
-            value={shownQuery}
-            readOnly={tourDemo}
-            onChange={event => setQuery(event.target.value)}
-            placeholder="Название, ссылка, номер или разработчик"
-            aria-label="Поиск"
-            className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-600"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          {(storeSearching || devSearching) && (
-            <LoaderCircle className="shrink-0 animate-spin text-brand-300" size={16} />
-          )}
-          {query && (
-            <button
-              type="button"
-              onClick={() => setQuery("")}
-              className="rounded-lg p-1.5 text-slate-500 transition hover:bg-white/[0.06] hover:text-white"
-              aria-label="Очистить поиск"
-            >
-              <X size={16} />
-            </button>
-          )}
-        </div>
-      </div>
+    <div>
+      {catalogMatches.length > 0 && !openDev && (
+        <section className="mt-6">
+          <div className="flex items-baseline gap-2">
+            <h2 className="text-sm font-bold text-slate-200">В каталоге Signum</h2>
+            <span className="text-xs text-slate-500">проверенные сборки, которых может не быть в App Store</span>
+          </div>
+          <div className="mt-3 grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2">
+            {catalogMatches.slice(0, 6).map(app => (
+              <button
+                key={app.id}
+                type="button"
+                onClick={() => onOpenCatalogApp(app)}
+                className="panel flex items-center gap-3 p-3 text-left transition hover:border-white/[0.12] hover:bg-white/[0.04]"
+              >
+                <ResultIcon url={app.icon_url || ""} name={app.title} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold text-slate-100">{app.title}</div>
+                  <div className="mt-0.5 truncate text-xs text-slate-500">{app.version ? `v${app.version}` : "Каталог Signum"}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="mt-6 flex items-baseline gap-2">
+            <h2 className="text-sm font-bold text-slate-200">В App Store</h2>
+          </div>
+        </section>
+      )}
 
       {storeError && (
         <p className="mt-4 rounded-xl border border-rose-400/15 bg-rose-400/5 px-4 py-3 text-xs text-rose-300">
@@ -783,7 +767,7 @@ export default function Find() {
       ) : (
         <>
           {/* ── Приложения ─────────────────────────────────────────────── */}
-          <div className="mt-6 space-y-2">
+          <div className={`${catalogMatches.length > 0 ? "mt-3" : "mt-6"} space-y-2`}>
             {shownHits.map((hit, i) => (
               <button
                 key={hit.appStoreId}

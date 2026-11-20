@@ -1,5 +1,5 @@
 import {
-  CheckCircle2, Download, Eye, EyeOff, Globe, History, KeyRound, LoaderCircle, LogOut,
+  AlertTriangle, CheckCircle2, Download, Eye, EyeOff, Globe, History, KeyRound, Library, LoaderCircle, LogOut,
   Plus, RefreshCw, Search, Smartphone, Trash2, UserRound, X,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -87,6 +87,9 @@ export default function Account() {
   const [historySearch, setHistorySearch] = useState("");
   const [historyMessage, setHistoryMessage] = useState("");
   const [historyError, setHistoryError] = useState("");
+  /** Откуда текущий список: полная история reportaproblem или библиотека ipatool без кода. */
+  const [historySource, setHistorySource] = useState<"reportproblem" | "library" | null>(null);
+  const [historyLibraryLoading, setHistoryLibraryLoading] = useState(false);
   const [historyActionId, setHistoryActionId] = useState<string | null>(null);
   const [selectedHistoryIds, setSelectedHistoryIds] = useState<string[]>([]);
   const [historyBatchBusy, setHistoryBatchBusy] = useState<"install" | "export" | null>(null);
@@ -346,6 +349,7 @@ export default function Account() {
                                                                                    
     if (!opts?.keepList) {
       setHistoryItems([]);
+      setHistorySource(null);
       setHistoryLoaded(false);
     }
     setHistoryError("");
@@ -378,6 +382,7 @@ export default function Account() {
     setHistoryNeeds2fa(false);
     setHistory2fa("");
     setHistoryItems(apps);
+    setHistorySource(result.source ?? "reportproblem");
     setHistoryLoaded(true);
     setHistoryError("");
     setHistoryPasswordSaved(true);
@@ -507,6 +512,34 @@ export default function Account() {
     applyHistoryResult,
   ]);
 
+  /**
+   * «Попробовать без кода»: история через библиотеку ipatool (list-purchases) по
+   * уже сохранённой сессии App Store. Код не нужен, но Apple отдаёт так не все
+   * покупки — поэтому список помечается плашкой и предлагается повтор с кодом.
+   */
+  const loadHistoryViaLibrary = useCallback(async () => {
+    if (historyLibraryLoading || historyLoading || busy || !activeEmail) return;
+    setHistoryLibraryLoading(true);
+    setHistoryError("");
+    setHistoryMessage("");
+    try {
+      const result = await command<PurchaseHistoryResult>("fetch_purchase_history", {
+        input: { email: activeEmail, viaLibrary: true },
+      });
+      applyHistoryResult({ ...result, source: result.source ?? "library" });
+    } catch (e) {
+      // Форму кода не закрываем: вход с кодом остаётся основным путём.
+      setHistoryError(errorMessage(e));
+    } finally {
+      setHistoryLibraryLoading(false);
+    }
+  }, [historyLibraryLoading, historyLoading, busy, activeEmail, applyHistoryResult]);
+
+  /** Полная история с reportaproblem: при необходимости Apple попросит код. */
+  const retryHistoryWithCode = useCallback(() => {
+    void loadPurchaseHistory(undefined, { forceRefresh: true });
+  }, [loadPurchaseHistory]);
+
   const loadAllPurchaseHistory = useCallback(async () => {
     if (historyLoadingAll || historyLoading || historyLoadingMore || busy || !historyHasMore) return;
     setHistoryLoadingAll(true);
@@ -524,6 +557,7 @@ export default function Account() {
                                                                                     
     if (!hasAccountProfile) {
       setHistoryItems([]);
+      setHistorySource(null);
       setHistoryLoaded(false);
       setHistoryMessage("");
       setHistoryError("");
@@ -557,6 +591,7 @@ export default function Account() {
 
     historyAccountEmail.current = currentEmail;
     setHistoryItems([]);
+      setHistorySource(null);
     setHistoryLoaded(false);
     setHistoryMessage("");
     setHistoryError("");
@@ -904,6 +939,7 @@ export default function Account() {
       if (!result.needs2fa && (result.apps?.length || 0) > 0) {
         setHistoryNeeds2fa(false);
         setHistoryItems(result.apps || []);
+        setHistorySource(result.source ?? "reportproblem");
         setHistoryLoaded(true);
         setStep("credentials");
         setMessage(result.message || "История покупок готова.");
@@ -1587,7 +1623,9 @@ export default function Account() {
               >
                 <div className="text-sm font-semibold text-amber-100">Код для истории</div>
                 <p className="mt-1 text-[11px] text-amber-100/70">
-                  Для {activeEmail || "текущего Apple ID"} · 6 цифр с iPhone
+                  Для {activeEmail || "текущего Apple ID"} · 6 цифр с iPhone.
+                  Полная история берётся с reportaproblem.apple.com. Нет кода под рукой —
+                  нажмите «Попробовать без кода».
                 </p>
                 {(busy || historyLoading) && (
                   <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
@@ -1641,6 +1679,16 @@ export default function Account() {
                   <button
                     type="button"
                     className="btn-secondary text-xs"
+                    disabled={historyLoading || historyLibraryLoading || busy}
+                    onClick={() => void loadHistoryViaLibrary()}
+                    title="Через библиотеку ipatool по сохранённому входу в App Store"
+                  >
+                    {historyLibraryLoading ? <LoaderCircle size={14} className="animate-spin" /> : <Library size={14} />}
+                    Попробовать без кода
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary text-xs"
                     disabled={historyLoading || busy}
                     onClick={() => {
                       setHistoryNeeds2fa(false);
@@ -1665,9 +1713,49 @@ export default function Account() {
         )}
 
         {!historyLoading && !historyLoadingMore && historyError && (
-          <p className="mt-5 rounded-xl border border-rose-400/15 bg-rose-400/5 px-4 py-3 text-xs text-rose-300">
-            {historyError}
-          </p>
+          <div className="mt-5 rounded-xl border border-rose-400/15 bg-rose-400/5 px-4 py-3">
+            <p className="whitespace-pre-line text-xs text-rose-300">{historyError}</p>
+            {!historyNeeds2fa && historySource !== "library" && hasAccountProfile && (
+              <button
+                type="button"
+                className="btn-secondary mt-3 px-3 py-2 text-xs"
+                disabled={historyLibraryLoading || busy}
+                onClick={() => void loadHistoryViaLibrary()}
+              >
+                {historyLibraryLoading ? <LoaderCircle size={14} className="animate-spin" /> : <Library size={14} />}
+                Попробовать без кода
+              </button>
+            )}
+          </div>
+        )}
+
+        {historyLibraryLoading && !historyLoaded && (
+          <div className="mt-5 flex items-center gap-2 text-xs text-slate-500">
+            <LoaderCircle size={14} className="animate-spin text-brand-400" />
+            Спрашиваем историю через библиотеку ipatool…
+          </div>
+        )}
+
+        {!historyNeeds2fa && historyLoaded && historySource === "library" && historyItems.length > 0 && (
+          <div role="status" className="mt-5 flex flex-wrap items-start gap-3 rounded-xl border border-amber-400/25 bg-amber-400/[0.07] p-4">
+            <AlertTriangle size={18} className="mt-0.5 shrink-0 text-amber-300" />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-amber-100">Не все приложения могут отображаться в истории покупок</div>
+              <p className="mt-1 text-xs leading-5 text-amber-100/70">
+                Список получен через библиотеку ipatool без кода подтверждения. Им можно пользоваться —
+                ставить и скачивать отсюда, — но полную историю лучше посмотреть с кодом.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn-secondary shrink-0 px-3 py-2 text-xs"
+              disabled={historyLoading || busy}
+              onClick={retryHistoryWithCode}
+            >
+              {historyLoading ? <LoaderCircle size={14} className="animate-spin" /> : <KeyRound size={14} />}
+              Повторить с кодом
+            </button>
+          </div>
         )}
 
         {!historyNeeds2fa && shownHistoryLoaded && shownHistory.length === 0 && !historyError && hasAccountProfile && (

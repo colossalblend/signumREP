@@ -441,6 +441,134 @@ class AppStoreClient(
     }
 
     /**
+     * История покупок «без кода» — как `ipatool list-purchases` (ipatool-cpp).
+     *
+     * GET p<pod>-buy.itunes.apple.com/commerce/account/purchases — тот же
+     * commerce-API, что у окна «История покупок» в iTunes. Авторизует его уже
+     * сохранённая сессия App Store (cookies + X-Dsid + X-Token), поэтому
+     * reportaproblem и код 2FA не нужны. Apple отдаёт так не всё (скрытые и
+     * семейные покупки, часть старых), поэтому интерфейс помечает список как
+     * неполный. Окна по годам — у эндпоинта нет диапазона «всё сразу».
+     */
+    fun listPurchasesViaLibrary(): List<pw.appbank.signum.data.models.PurchaseHistoryApp> {
+        restoreTokens()
+        if (!isReady()) {
+            error("Нет входа в App Store. Войдите в Apple ID на этой странице или откройте историю с кодом.")
+        }
+        val dsid = dsPersonId.orEmpty()
+        val seenItems = LinkedHashMap<String, pw.appbank.signum.data.models.PurchaseHistoryApp>()
+        val thisYear = java.time.Year.now().value
+        var anyOk = false
+        for (year in thisYear downTo 2008) {
+            val seenOrders = HashSet<String>()
+            for (page in 1..200) {
+                val (code, body) = getPurchasesPage(dsid, page, "$year-all")
+                if (code == 401 || code == 403) {
+                    error("App Store не принял сохранённую сессию. Откройте историю с кодом или войдите в Apple ID заново.")
+                }
+                if (code != 200) {
+                    Log.w("SignumStore", "list-purchases $year p$page HTTP $code")
+                    break
+                }
+                val attr = runCatching {
+                    SignumJson.parseToJsonElement(body).jsonObject["data"]?.jsonObject?.get("attributes")?.jsonObject
+                }.getOrNull() ?: break
+                anyOk = true
+                var added = 0
+                for (inv in attr["purchases"]?.jsonArray.orEmpty()) {
+                    val invoice = inv.jsonObject
+                    val orderId = invoice.str("order-id")
+                    if (!orderId.isNullOrBlank() && !seenOrders.add(orderId)) continue
+                    added++
+                    val invDate = invoice.str("invoice-date")
+                    for (it in invoice["items"]?.jsonArray.orEmpty()) {
+                        val item = it.jsonObject
+                        val id = item.str("item-id")?.trim()?.takeIf { v -> v.all(Char::isDigit) && v.isNotEmpty() } ?: continue
+                        val kind = item.str("kind").orEmpty().lowercase()
+                        if (kind.isNotEmpty() && (!kind.contains("app") || kind.contains("in-app"))) continue
+                        if (seenItems.containsKey(id)) continue
+                        seenItems[id] = pw.appbank.signum.data.models.PurchaseHistoryApp(
+                            adamId = id,
+                            name = item.str("item-name") ?: item.str("item-title") ?: "Приложение",
+                            price = item.str("price"),
+                            date = item.str("purchase-date") ?: invDate,
+                        )
+                    }
+                }
+                val complete = attr.str("is-complete")?.toBooleanStrictOrNull() ?: true
+                if (complete || added == 0) break
+            }
+        }
+        if (!anyOk) error("Через библиотеку историю получить не удалось. Откройте историю с кодом подтверждения.")
+        return enrichFromItunes(seenItems.values.toList())
+    }
+
+    /** Одна страница commerce-истории; 302 (pod / cookie handshake) идём по Location как есть. */
+    private fun getPurchasesPage(dsid: String, page: Int, range: String): Pair<Int, String> {
+        var url = "https://p$pod-buy.itunes.apple.com/commerce/account/purchases" +
+            "?isDeepLink=false&isJsonApiFormat=true&page=$page&range=${java.net.URLEncoder.encode(range, "UTF-8")}"
+        repeat(5) {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", STORE_UA)
+                .header("Accept-Language", "en-us")
+                .header("X-Apple-Store-Front", storeFront)
+                .header("X-Dsid", dsid)
+                .apply {
+                    passwordToken?.takeIf { it.isNotBlank() }?.let { header("X-Token", it) }
+                    if (cookies.isNotEmpty()) header("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
+                }
+                .get()
+                .build()
+            Http.apple.newCall(req).execute().use { resp ->
+                ingestCookies(resp.headers("Set-Cookie"), resp.headers)
+                if (resp.code in 301..303 || resp.code == 307) {
+                    val loc = resp.header("Location").orEmpty()
+                    if (loc.isBlank()) return resp.code to ""
+                    url = StorePodRouting.redirectUrl(url, loc)
+                    rememberPod(url)
+                    return@repeat
+                }
+                return resp.code to resp.body?.string().orEmpty()
+            }
+        }
+        return 310 to ""
+    }
+
+    /** Значки, разработчик и имя — пачками через публичный iTunes lookup. */
+    private fun enrichFromItunes(
+        apps: List<pw.appbank.signum.data.models.PurchaseHistoryApp>,
+    ): List<pw.appbank.signum.data.models.PurchaseHistoryApp> {
+        val found = HashMap<String, kotlinx.serialization.json.JsonObject>()
+        for (chunk in apps.map { it.adamId }.chunked(150)) {
+            for (country in listOf("ru", "us")) {
+                val missing = chunk.filterNot(found::containsKey)
+                if (missing.isEmpty()) break
+                val url = "https://itunes.apple.com/lookup?id=${missing.joinToString(",")}&entity=software&country=$country"
+                runCatching {
+                    Http.itunes.newCall(Request.Builder().url(url).get().build()).execute().use { resp ->
+                        val root = SignumJson.parseToJsonElement(resp.body?.string().orEmpty()).jsonObject
+                        for (el in root["results"]?.jsonArray.orEmpty()) {
+                            val o = el.jsonObject
+                            o.str("trackId")?.let { found[it] = o }
+                        }
+                    }
+                }
+            }
+        }
+        return apps.map { app ->
+            val o = found[app.adamId] ?: return@map app
+            app.copy(
+                name = o.str("trackName") ?: app.name,
+                artist = o.str("artistName") ?: app.artist,
+                artwork = o.str("artworkUrl100") ?: o.str("artworkUrl60") ?: app.artwork,
+                bundleId = o.str("bundleId") ?: app.bundleId,
+                price = o.str("formattedPrice") ?: app.price,
+            )
+        }
+    }
+
+    /**
      * Приложения одного разработчика.
      *
      * Отдельный запрос lookup: обычный поиск по названию их не соберёт, а

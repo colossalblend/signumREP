@@ -41,6 +41,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import pw.appbank.signum.ui.SignumViewModel
+import pw.appbank.signum.data.models.HISTORY_SOURCE_LIBRARY
+import coil.compose.AsyncImage
 import pw.appbank.signum.ui.components.PageHeader
 import pw.appbank.signum.ui.components.Panel
 import pw.appbank.signum.ui.components.PrimaryButton
@@ -173,14 +175,43 @@ fun AccountScreen(vm: SignumViewModel, goInstalls: () -> Unit) {
                 item {
                     Panel {
                         Text("Код для истории покупок", color = c.text, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Полная история берётся с reportaproblem.apple.com. Нет кода под рукой — попробуйте без кода.",
+                            color = c.muted,
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp,
+                        )
                         Spacer(Modifier.height(8.dp))
                         SignumField(s.history2fa, vm::setHistory2fa, placeholder = "6 цифр", keyboard = KeyboardOptions(keyboardType = KeyboardType.Number))
                         Spacer(Modifier.height(8.dp))
                         PrimaryButton("Загрузить историю", onClick = { vm.loadHistory(true) }, loading = s.historyLoading, modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(8.dp))
+                        SecondaryButton(
+                            if (s.historyLibraryLoading) "Спрашиваем App Store…" else "Попробовать без кода",
+                            onClick = vm::loadHistoryViaLibrary,
+                            enabled = !s.historyLibraryLoading && !s.historyLoading,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
             }
             item { StatusLine(s.historyMessage) }
+            if (!s.historyNeeds2fa && s.historyMessage.isNotBlank() && s.history.isEmpty() &&
+                s.historySource != HISTORY_SOURCE_LIBRARY
+            ) {
+                item {
+                    SecondaryButton(
+                        if (s.historyLibraryLoading) "Спрашиваем App Store…" else "Попробовать без кода",
+                        onClick = vm::loadHistoryViaLibrary,
+                        enabled = !s.historyLibraryLoading,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            if (!s.historyNeeds2fa && s.historySource == HISTORY_SOURCE_LIBRARY && s.history.isNotEmpty()) {
+                item { LibraryHistoryNotice(loading = s.historyLoading, onRetry = vm::retryHistoryWithCode) }
+            }
             val q = s.historySearch.lowercase()
             val rows = s.history.filter {
                 q.isBlank() || it.name.lowercase().contains(q) || it.adamId.contains(q) || (it.bundleId?.lowercase()?.contains(q) == true)
@@ -222,6 +253,13 @@ fun AccountScreen(vm: SignumViewModel, goInstalls: () -> Unit) {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             HistoryCheck(selected, c.brand)
+                            if (!item.artwork.isNullOrBlank()) {
+                                AsyncImage(
+                                    model = item.artwork,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)),
+                                )
+                            }
                             Column(Modifier.weight(1f)) {
                                 Text(item.name, color = c.text, fontWeight = FontWeight.SemiBold)
                                 Text(item.artist ?: item.adamId, color = c.muted, fontSize = 12.sp)
@@ -236,6 +274,42 @@ fun AccountScreen(vm: SignumViewModel, goInstalls: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+/** Плашка над списком, полученным без кода: им можно пользоваться, но он может быть неполным. */
+@Composable
+private fun LibraryHistoryNotice(loading: Boolean, onRetry: () -> Unit) {
+    val c = signumColors
+    val amber = Color(0xFFF5B72F)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(amber.copy(alpha = 0.08f))
+            .border(1.dp, amber.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
+            .padding(14.dp),
+    ) {
+        Text(
+            "Не все приложения могут отображаться в истории покупок",
+            color = amber,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 14.sp,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Список получен без кода подтверждения. Им можно пользоваться — ставить и скачивать отсюда, — но полную историю лучше посмотреть с кодом.",
+            color = c.muted,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+        )
+        Spacer(Modifier.height(10.dp))
+        SecondaryButton(
+            if (loading) "Загружаем…" else "Повторить с кодом",
+            onClick = onRetry,
+            enabled = !loading,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

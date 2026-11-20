@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import pw.appbank.signum.ui.components.SegmentedControl
 import pw.appbank.signum.data.catalog.CatalogResolve
 import pw.appbank.signum.data.catalog.CatalogSearch
 import pw.appbank.signum.data.catalog.detectBankAlt
@@ -102,6 +103,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
         }
     }
     val displayedSections = if (catalogSort == "default" && compatibility == "all") sections else null
+    val storeScope = s.catalogScope == "store"
     // Android 10+ exports to Downloads/Signum through MediaStore. Older
     // versions need a user-selected folder before the first export.
     var exportPending by remember { mutableStateOf(false) }
@@ -167,8 +169,18 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                     text = "Подключите кабель, разблокируйте iPhone и нажмите «Доверять».",
                 )
                 Spacer(Modifier.height(12.dp))
-                SignumField(s.search, vm::setSearch, placeholder = "Поиск в каталоге и App Store")
-                if (s.groups.isNotEmpty()) {
+                SegmentedControl(
+                    options = listOf("catalog" to "Каталог Signum", "store" to "App Store"),
+                    selected = s.catalogScope,
+                    onSelect = vm::setCatalogScope,
+                )
+                Spacer(Modifier.height(10.dp))
+                SignumField(
+                    s.search,
+                    vm::setSearch,
+                    placeholder = if (storeScope) "Название, ссылка, номер или разработчик" else "Поиск по каталогу Signum",
+                )
+                if (!storeScope && s.groups.isNotEmpty()) {
                     Spacer(Modifier.height(10.dp))
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip("Все", s.groupFilter == "all") { vm.setGroup("all") }
@@ -177,22 +189,29 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                         }
                     }
                 }
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (!storeScope) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Сортировка", color = c.muted, fontSize = 11.sp)
                     FilterChip("По каталогу", catalogSort == "default") { catalogSort = "default" }
                     FilterChip("По названию", catalogSort == "name") { catalogSort = "name" }
                     FilterChip("По iOS", catalogSort == "ios") { catalogSort = "ios" }
                 }
-                if (deviceIos != null) {
+                if (!storeScope && deviceIos != null) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip("Любая совместимость", compatibility == "all") { compatibility = "all" }
                         FilterChip("Подходит · iOS $deviceIos", compatibility == "yes") { compatibility = "yes" }
                         FilterChip("Не подходит", compatibility == "no") { compatibility = "no" }
                     }
                 }
-                if (s.search.isNotBlank()) {
+                if (!storeScope && s.search.isNotBlank()) {
                     Text(
-                        "Найдено: ${apps.size}",
+                        "Искать «${s.search.trim()}» в App Store →",
+                        color = Brand300,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 8.dp).clickable { vm.setCatalogScope("store") },
+                    )
+                    Text(
+                        "Найдено в каталоге: ${apps.size}",
                         color = c.muted,
                         fontSize = 11.sp,
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -220,7 +239,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                if (!storeScope) Row(verticalAlignment = Alignment.CenterVertically) {
                     if (s.selectMode) {
                         Text(
                             if (s.bulkBusy) "Ставим…"
@@ -265,7 +284,30 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                 }
             }
         }
-        if (!s.catalogLoading && !s.storeSearching && s.storeSearchError.isBlank() && s.storeHits.isEmpty() && s.catalog.isNotEmpty() && apps.isEmpty()) {
+        if (storeScope && s.search.trim().length >= 2 && apps.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Text("В каталоге Signum", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+            items(apps.take(6), key = { "shelf-${it.id}" }) { app ->
+                AppCard(
+                    app = app,
+                    favorite = app.id in s.settings.favoriteAppIds,
+                    selectable = false,
+                    selected = false,
+                    onToggleFavorite = { vm.toggleFavorite(app.id) },
+                ) { vm.openOffer(app) }
+            }
+        }
+        if (storeScope && s.search.trim().length < 2) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Panel {
+                    Text("Что найти", color = c.text, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(6.dp))
+                    Text("Название, ссылка из App Store, номер приложения или имя разработчика.", color = c.muted, fontSize = 13.sp, lineHeight = 18.sp)
+                }
+            }
+        }
+        if (!storeScope && !s.catalogLoading && s.catalog.isNotEmpty() && apps.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 val bank = detectBankAlt(s.search)
                 Panel {
@@ -288,12 +330,14 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                         Spacer(Modifier.height(10.dp))
                         SecondaryButton("Альтернативный способ установки", onClick = vm::openBankAlt, modifier = Modifier.fillMaxWidth())
                     }
+                    Spacer(Modifier.height(10.dp))
+                    SecondaryButton("Искать в App Store", onClick = { vm.setCatalogScope("store") }, modifier = Modifier.fillMaxWidth())
                 }
             }
         }
-        if (s.storeHits.isNotEmpty()) {
+        if (storeScope && s.storeHits.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Text("Результаты поиска", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text("В App Store", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
             }
             items(s.storeHits, key = { "s${it.adamId}" }) { hit ->
                 Panel(onClick = { vm.openStoreHit(hit) }) {
@@ -323,7 +367,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
         }
         // Разработчики — под приложениями, как на ПК: сначала то, что искали,
         // потом «а кто это сделал и что ещё у него есть».
-        if (s.devHits.isNotEmpty()) {
+        if (storeScope && s.devHits.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Column {
                     Spacer(Modifier.height(6.dp))
@@ -356,7 +400,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
             }
         }
         val favorites = s.settings.favoriteAppIds.toSet()
-        val favoriteApps = if (s.search.isBlank() && catalogSort == "default" && compatibility == "all") apps.filter { it.id in favorites } else emptyList()
+        val favoriteApps = if (!storeScope && s.search.isBlank() && catalogSort == "default" && compatibility == "all") apps.filter { it.id in favorites } else emptyList()
         if (favoriteApps.isNotEmpty()) {
             item(key = "g-favorites", span = { GridItemSpan(maxLineSpan) }) {
                 Row(
@@ -378,7 +422,9 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                 ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
             }
         }
-        if (displayedSections != null) {
+        if (storeScope) {
+            // Каталог показан полкой выше; сетка каталога на вкладке App Store не нужна.
+        } else if (displayedSections != null) {
             displayedSections.forEach { section ->
                 item(key = "g-${section.id}", span = { GridItemSpan(maxLineSpan) }) {
                     Row(

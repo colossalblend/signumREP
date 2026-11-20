@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  BadgeCheck, LayoutGrid, Maximize2, Minus, MonitorSmartphone, Search, Settings,
+  BadgeCheck, LayoutGrid, Maximize2, Minus, MonitorSmartphone, Settings,
   Smartphone, UserRound, X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -21,7 +21,6 @@ import UpdateBanners from "./UpdateBanners";
 
 const nav = [
   ["/", "Каталог", LayoutGrid, "nav-catalog"],
-  ["/find", "Поиск", Search, "nav-find"],
   ["/ipa-signing", "IPA-файл", BadgeCheck, "nav-ipa"],
   ["/devices", "Устройства", Smartphone, "nav-devices"],
   ["/account", "Аккаунт", UserRound, "nav-account"],

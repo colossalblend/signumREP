@@ -118,29 +118,29 @@ export const STEPS: TourStep[] = [
   {
     anchor: "nav-find",
     eyebrow: "Нет в каталоге?",
-    title: "Переходите в «Поиск»",
-    text: "Если нужного приложения нет в Каталоге — его можно найти в App Store по названию, ссылке или номеру.",
+    title: "Вкладка «App Store»",
+    text: "Если нужного приложения нет в каталоге Signum — переключитесь на App Store прямо здесь и ищите по названию, ссылке или номеру.",
     pad: 6,
     radius: 14,
     prefer: "right",
     state: ({ navigate, signal }) => {
-      navigate("/installs");
-      signal("job-done");
+      navigate("/");
+      signal("offer-close");
     },
   },
   {
     anchor: "find-input",
-    eyebrow: "Поиск",
+    eyebrow: "Поиск в App Store",
     title: "Введите название",
     text: "Поиск идёт на лету — кнопку нажимать не нужно. Подойдёт и ссылка из App Store, и числовой ID.",
     prefer: "below",
     state: ({ navigate, signal }) => {
-      navigate("/find");
+      navigate("/?scope=store");
       signal("find-results");
     },
     async anim(ctx) {
       await ctx.ghostTo("nav-find");
-      ctx.navigate("/find");
+      ctx.navigate("/?scope=store");
       ctx.signal("find-typing");
       await ctx.wait(1500);
       ctx.signal("find-results");
@@ -154,7 +154,7 @@ export const STEPS: TourStep[] = [
     text: "Карточка из поиска открывает то же окно установки — с выбором версии и теми же кнопками.",
     prefer: "below",
     state: ({ navigate, signal }) => {
-      navigate("/find");
+      navigate("/?scope=store");
       signal("find-results");
     },
   },

@@ -38,6 +38,8 @@ import pw.appbank.signum.data.models.DeviceInfo
 import pw.appbank.signum.data.models.InstalledApp
 import pw.appbank.signum.data.models.JobStatus
 import pw.appbank.signum.data.models.PurchaseHistoryApp
+import pw.appbank.signum.data.models.HISTORY_SOURCE_LIBRARY
+import pw.appbank.signum.data.models.HISTORY_SOURCE_REPORTPROBLEM
 import pw.appbank.signum.data.models.SignOptions
 
 data class UiState(
@@ -48,6 +50,8 @@ data class UiState(
     val catalogLoading: Boolean = false,
     val catalogError: String = "",
     val search: String = "",
+    /** Где искать: `catalog` — каталог Signum (в памяти), `store` — App Store (AppMagic + iTunes). */
+    val catalogScope: String = "catalog",
     val storeHits: List<AppStoreSearchHit> = emptyList(),
     val storeSearching: Boolean = false,
     val storeSearchError: String = "",
@@ -93,6 +97,9 @@ data class UiState(
     val historyMessage: String = "",
     val historySelected: Set<String> = emptySet(),
     val historyBusy: Boolean = false,
+    /** `reportproblem` или `library` (без кода, список может быть неполным). */
+    val historySource: String = HISTORY_SOURCE_REPORTPROBLEM,
+    val historyLibraryLoading: Boolean = false,
     val devices: List<DeviceInfo> = emptyList(),
     val selectedDevice: DeviceInfo? = null,
     val installed: List<InstalledApp> = emptyList(),
@@ -237,10 +244,26 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
      */
     private var searchJob: Job? = null
 
+    /**
+     * Переключатель «Каталог Signum / App Store», как на ПК. Текст поиска общий,
+     * но в сеть запрос уходит только на вкладке App Store — каталог фильтруется
+     * в памяти и с поиском Apple не пересекается.
+     */
+    fun setCatalogScope(scope: String) {
+        if (_state.value.catalogScope == scope) return
+        _state.update { it.copy(catalogScope = scope, selectMode = false, selectedAppIds = emptySet()) }
+        setSearch(_state.value.search)
+    }
+
     fun setSearch(q: String) {
-        _state.update { it.copy(search = q, storeHits = emptyList(), devHits = emptyList(), storeSearchError = "", storeSearching = q.trim().length >= 2) }
+        // Ссылка или номер из App Store в каталоге Signum не встречаются — сразу ищем в App Store.
+        if (_state.value.catalogScope != "store" && looksLikeStoreReference(q)) {
+            _state.update { it.copy(catalogScope = "store", selectMode = false, selectedAppIds = emptySet()) }
+        }
+        val storeScope = _state.value.catalogScope == "store"
+        _state.update { it.copy(search = q, storeHits = emptyList(), devHits = emptyList(), storeSearchError = "", storeSearching = storeScope && q.trim().length >= 2) }
         searchJob?.cancel()
-        if (q.trim().length < 2) {
+        if (!storeScope || q.trim().length < 2) {
             _state.update { it.copy(storeHits = emptyList(), devHits = emptyList(), storeSearching = false) }
             return
         }
@@ -289,6 +312,13 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         _state.update { it.copy(openedDeveloper = null, developerApps = emptyList(), developerLoading = false) }
 
     fun setGroup(id: String) = _state.update { it.copy(groupFilter = id) }
+
+    private fun looksLikeStoreReference(text: String): Boolean {
+        val v = text.trim()
+        return Regex("""apps\.apple\.com|itunes\.apple\.com""", RegexOption.IGNORE_CASE).containsMatchIn(v) ||
+            Regex("""(?:^|/)id\d{6,}""", RegexOption.IGNORE_CASE).containsMatchIn(v) ||
+            Regex("""^\d{6,}$""").matches(v)
+    }
 
     fun visibleApps(): List<CatalogApp> {
         val s = _state.value
@@ -1025,13 +1055,17 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         viewModelScope.launch {
             _state.update { it.copy(historyLoading = true, historyMessage = "") }
             engine.cachedHistory()?.let { cached ->
-                if (!force) _state.update { it.copy(history = cached.apps) }
+                if (!force) _state.update { it.copy(history = cached.apps, historySource = cached.source) }
             }
             runCatching { engine.fetchHistory(_state.value.history2fa.takeIf { it.length >= 6 }, false, null, force) }
                 .onSuccess { r ->
                     _state.update {
+                        // Запрос кода приходит с пустым списком — уже показанную
+                        // историю при этом не стираем.
+                        val keepShown = r.needs2fa && r.apps.isEmpty()
                         it.copy(
-                            history = r.apps,
+                            history = if (keepShown) it.history else r.apps,
+                            historySource = if (keepShown) it.historySource else r.source,
                             historyLoading = false,
                             historyNeeds2fa = r.needs2fa,
                             historyMessage = r.message.orEmpty(),
@@ -1046,6 +1080,40 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                 }
         }
     }
+
+    /**
+     * «Попробовать без кода»: история через уже сохранённую сессию App Store
+     * (commerce-API, как ipatool list-purchases). Список может быть неполным —
+     * экран показывает плашку и кнопку «Повторить с кодом».
+     */
+    fun loadHistoryViaLibrary() {
+        if (_state.value.historyLibraryLoading) return
+        viewModelScope.launch {
+            _state.update { it.copy(historyLibraryLoading = true, historyMessage = "") }
+            runCatching { engine.fetchHistoryViaLibrary() }
+                .onSuccess { r ->
+                    _state.update {
+                        it.copy(
+                            history = r.apps,
+                            historySource = r.source,
+                            historyLibraryLoading = false,
+                            historyNeeds2fa = false,
+                            history2fa = "",
+                            historySelected = emptySet(),
+                            historyMessage = "",
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(historyLibraryLoading = false, historyMessage = Errors.localize(e.message ?: ""))
+                    }
+                }
+        }
+    }
+
+    /** Полная история с reportaproblem — Apple при необходимости попросит код. */
+    fun retryHistoryWithCode() = loadHistory(true)
 
     fun setHistorySearch(q: String) = _state.update { it.copy(historySearch = q) }
     fun setHistory2fa(q: String) = _state.update { it.copy(history2fa = q.filter { it.isDigit() }.take(6)) }
