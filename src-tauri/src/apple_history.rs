@@ -2949,11 +2949,25 @@ fn parse_ipatool_purchases_output(raw: &str) -> Option<Vec<HistoryApp>> {
             let Some(object) = item.as_object() else {
                 continue;
             };
+            // Go-ipatool отдаёт id числом, ipatool-cpp — строкой.
             let id = object
                 .get("id")
-                .and_then(|v| v.as_i64())
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+                })
                 .unwrap_or_default();
             if id <= 0 {
+                continue;
+            }
+            // ipatool-cpp читает commerce-историю целиком: там же книги, музыка
+            // и встроенные покупки. Оставляем только сами приложения.
+            let kind = object
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !kind.is_empty() && (!kind.contains("app") || kind.contains("in-app")) {
                 continue;
             }
             // Дата приходит как RFC3339 или unix-число.
@@ -2966,6 +2980,13 @@ fn parse_ipatool_purchases_output(raw: &str) -> Option<Vec<HistoryApp>> {
                         .unwrap_or_default()
                 })
                 .unwrap_or_default();
+            let price = object
+                .get("price")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .unwrap_or("Бесплатно")
+                .to_string();
             let name = object
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -2992,7 +3013,7 @@ fn parse_ipatool_purchases_output(raw: &str) -> Option<Vec<HistoryApp>> {
                 },
                 artist: String::new(),
                 artwork: String::new(),
-                price: "Бесплатно".into(),
+                price,
                 date: raw_date,
             });
         }
@@ -3013,6 +3034,21 @@ pub async fn fetch_history_via_ipatool(
     keychain: &crate::IpatoolKeychain,
     debug: &(dyn Fn(&str) + Send + Sync),
 ) -> Option<Vec<HistoryApp>> {
+    // ipatool-cpp (движок v5) читает commerce-историю сам: `--all` обходит
+    // все годы с 2008-го за один запуск, страниц и --max-results у него нет.
+    if crate::is_cpp_ipatool(program) {
+        let mut args = crate::ipatool_args(keychain);
+        args.extend(["--format".into(), "json".into(), "list-purchases".into(), "--all".into()]);
+        let raw = crate::run_process_raw_error(program, &args, Duration::from_secs(300), None)
+            .await
+            .ok()?;
+        let apps = parse_ipatool_purchases_output(&raw);
+        debug(&format!(
+            "history-ipatool cpp apps={}",
+            apps.as_ref().map(|a| a.len() as i64).unwrap_or(-1)
+        ));
+        return apps.filter(|apps| !apps.is_empty());
+    }
     let mut all: Vec<HistoryApp> = Vec::new();
     for page in 1..=IPATOOL_HISTORY_MAX_PAGES {
         let mut args = crate::ipatool_args(keychain);
@@ -3101,6 +3137,16 @@ mod ipatool_history_tests {
         )
         .is_none());
         assert!(parse_ipatool_purchases_output("plain text").is_none());
+    }
+
+    #[test]
+    fn parses_cpp_commerce_output_and_skips_non_apps() {
+        // ipatool-cpp: id строкой, без bundleID, с kind из commerce-истории.
+        let raw = r#"{"count":3,"apps":[{"id":"686449807","name":"Telegram","price":"Free","purchaseDate":"2024-01-02","kind":"iOS App"},{"id":"1","name":"Coins","kind":"In-App Purchase"},{"id":"2","name":"A Book","kind":"Book"}]}"#;
+        let apps = parse_ipatool_purchases_output(raw).expect("apps");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].adam_id, "686449807");
+        assert_eq!(apps[0].price, "Free");
     }
 
     #[test]
