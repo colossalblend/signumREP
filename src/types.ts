@@ -196,8 +196,6 @@ export interface PurchaseHistoryResult {
   fromCache?: boolean;
                                        
   debugLogPath?: string | null;
-  /** `reportproblem` — полная история; `library` — ipatool без кода, может быть неполной. */
-  source?: "reportproblem" | "library";
 }
 
 export interface AppVersion {

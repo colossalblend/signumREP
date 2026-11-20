@@ -259,14 +259,6 @@ class SignumEngine(context: Context) {
         history.fetch(email, settings.loadPassword(email), code, loadMore, batchId, force)
     }
 
-    /** «Попробовать без кода»: история через сессию App Store, без reportaproblem и 2FA. */
-    suspend fun fetchHistoryViaLibrary(): PurchaseHistoryResult = withContext(Dispatchers.IO) {
-        val email = settings.activeEmail() ?: error("Сначала войдите в Apple ID.")
-        val apps = store.listPurchasesViaLibrary()
-        if (apps.isEmpty()) error("Через библиотеку покупок не нашлось. Откройте историю с кодом подтверждения.")
-        history.storeLibraryResult(email, apps)
-    }
-
     fun cachedHistory(): PurchaseHistoryResult? {
         val email = settings.activeEmail() ?: return null
         return history.loadCached(email)

@@ -275,12 +275,7 @@ data class PurchaseHistoryResult(
     val nextBatchId: String? = null,
     val sessionSaved: Boolean = false,
     val fromCache: Boolean = false,
-    /** `reportproblem` — полная история; `library` — без кода через App Store, может быть неполной. */
-    val source: String = HISTORY_SOURCE_REPORTPROBLEM,
 )
-
-const val HISTORY_SOURCE_REPORTPROBLEM = "reportproblem"
-const val HISTORY_SOURCE_LIBRARY = "library"
 
 /** Разработчик из App Store. */
 data class StoreDeveloper(

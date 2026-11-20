@@ -1,8 +1,8 @@
 import { listen } from "@tauri-apps/api/event";
 import { open, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronRight, ClipboardCopy, Cloud, Database, FileText, FolderOpen, GraduationCap, Info, KeyRound, LoaderCircle, Monitor, Moon, PackageOpen, Play, RefreshCw, Save, Square, Sun, Trash2, Wrench, Zap } from "lucide-react";
+import { ClipboardCopy, Cloud, Database, FileText, FolderOpen, GraduationCap, Info, KeyRound, LoaderCircle, Monitor, Moon, PackageOpen, Play, RefreshCw, Save, Square, Sun, Trash2, Wrench, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useBlocker, useNavigate } from "react-router-dom";
+import { useBlocker } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import ToggleSwitch from "../components/ToggleSwitch";
 import { applyAppearance } from "../lib/appearance";
@@ -120,7 +120,6 @@ function settingsSnapshot(s: AppSettings): string {
 }
 
 export default function Settings() {
-  const navigate = useNavigate();
   const [settings, setSettings] = useState<AppSettings>(empty);
   const [savedSettings, setSavedSettings] = useState<AppSettings | null>(null);
   const [busy, setBusy] = useState(true);
@@ -955,29 +954,27 @@ export default function Settings() {
         </div>
       </section>
 
-      <section className="panel mt-5 overflow-hidden p-0">
+      <section className="panel mt-5 p-6">
+        <SectionTitle icon={<Info />} title="О приложении" />
+        <p className="mt-4 text-xs leading-6 text-slate-500">
+          Приложение сделано на основе IPA DOWNLOADER —{" "}
+          <a
+            href="https://github.com/kda2495/IPA_Downloader"
+            target="_blank"
+            rel="noreferrer"
+            className="font-semibold text-brand-300 underline decoration-brand-400/40 underline-offset-4 transition hover:text-brand-200"
+          >
+            kda2495/IPA_Downloader
+          </a>
+        </p>
         <button
           type="button"
-          onClick={() => navigate("/settings/about")}
-          className="flex w-full items-center gap-4 p-6 text-left transition hover:bg-white/[0.03]"
+          onClick={handleVersionClick}
+          className="mt-3 cursor-default text-[10px] text-slate-700"
+          tabIndex={-1}
         >
-          <span className="text-brand-300"><Info size={18} /></span>
-          <span className="min-w-0 flex-1">
-            <span className="block text-sm font-bold text-slate-200">О приложении</span>
-            <span className="mt-0.5 block text-xs text-slate-500">Telegram-канал, сайт, IPA Downloader и библиотеки</span>
-          </span>
-          <ChevronRight size={18} className="shrink-0 text-slate-600" />
+          Signum {appVersion.version} · build {appVersion.build}
         </button>
-        <div className="border-t border-white/[0.05] px-6 py-2.5">
-          <button
-            type="button"
-            onClick={handleVersionClick}
-            className="cursor-default text-[10px] text-slate-600"
-            tabIndex={-1}
-          >
-            Signum {appVersion.version} · build {appVersion.build}
-          </button>
-        </div>
       </section>
 
       {devMenuUnlocked && (

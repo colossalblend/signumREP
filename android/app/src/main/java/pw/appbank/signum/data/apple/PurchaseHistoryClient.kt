@@ -20,8 +20,6 @@ import pw.appbank.signum.data.api.obj
 import pw.appbank.signum.data.api.str
 import pw.appbank.signum.data.models.PurchaseHistoryApp
 import pw.appbank.signum.data.models.PurchaseHistoryResult
-import pw.appbank.signum.data.models.HISTORY_SOURCE_LIBRARY
-import pw.appbank.signum.data.models.HISTORY_SOURCE_REPORTPROBLEM
 import pw.appbank.signum.data.settings.SettingsStore
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -58,7 +56,6 @@ class PurchaseHistoryClient(
                 apps = apps,
                 fromCache = true,
                 sessionSaved = !store.loadHistoryCookies(email).isNullOrBlank(),
-                source = root["source"]?.jsonPrimitive?.contentOrNull ?: HISTORY_SOURCE_REPORTPROBLEM,
             )
         }.getOrNull()
     }
@@ -302,8 +299,6 @@ class PurchaseHistoryClient(
             artist = o["artist"]?.jsonPrimitive?.contentOrNull,
             artwork = o["artwork"]?.jsonPrimitive?.contentOrNull,
             bundleId = o["bundleId"]?.jsonPrimitive?.contentOrNull,
-            price = o["price"]?.jsonPrimitive?.contentOrNull,
-            date = o["date"]?.jsonPrimitive?.contentOrNull,
         )
     }
 
@@ -367,22 +362,9 @@ class PurchaseHistoryClient(
         store.storeHistoryCookies(email, keep.entries.joinToString(";") { "${it.key}=${it.value}" })
     }
 
-    /** Сохраняет список, полученный без кода, и помечает его источником `library`. */
-    fun storeLibraryResult(email: String, apps: List<PurchaseHistoryApp>): PurchaseHistoryResult {
-        val mail = email.trim().lowercase()
-        persistCache(mail, apps, HISTORY_SOURCE_LIBRARY)
-        return PurchaseHistoryResult(
-            email = mail,
-            count = apps.size,
-            apps = apps,
-            sessionSaved = !store.loadHistoryCookies(mail).isNullOrBlank(),
-            source = HISTORY_SOURCE_LIBRARY,
-        )
-    }
-
-    private fun persistCache(email: String, apps: List<PurchaseHistoryApp>, source: String = HISTORY_SOURCE_REPORTPROBLEM) {
+    private fun persistCache(email: String, apps: List<PurchaseHistoryApp>) {
         val json = buildString {
-            append("{\"source\":").append(jsonStr(source)).append(",\"apps\":[")
+            append("{\"apps\":[")
             apps.forEachIndexed { i, a ->
                 if (i > 0) append(',')
                 append("{\"adamId\":").append(jsonStr(a.adamId))
@@ -390,8 +372,6 @@ class PurchaseHistoryClient(
                 a.artist?.let { append(",\"artist\":").append(jsonStr(it)) }
                 a.artwork?.let { append(",\"artwork\":").append(jsonStr(it)) }
                 a.bundleId?.let { append(",\"bundleId\":").append(jsonStr(it)) }
-                a.price?.let { append(",\"price\":").append(jsonStr(it)) }
-                a.date?.let { append(",\"date\":").append(jsonStr(it)) }
                 append('}')
             }
             append("]}")

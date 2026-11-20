@@ -594,15 +594,6 @@ pub struct HistoryAppsCache {
                                                                                      
     #[serde(default)]
     pub rap_xsrf: Option<String>,
-    /// `reportproblem` или `library` (ipatool без кода). Старые кэши — reportproblem.
-    #[serde(default)]
-    pub source: Option<String>,
-}
-
-/// Помечает кэш истории источником, из которого он собран.
-pub fn set_history_cache_source(cache: &mut HistoryAppsCache, source: &str) {
-    cache.source = Some(source.to_string());
-    let _ = store_history_apps_cache(cache);
 }
 
 fn history_cache_path(email: &str) -> Result<PathBuf, String> {
@@ -685,7 +676,6 @@ pub fn merge_history_apps_cache_with_rap(
             updated_unix: 0,
             rap_dsid: None,
             rap_xsrf: None,
-            source: None,
         }
     } else {
         load_history_apps_cache(&email).unwrap_or(HistoryAppsCache {
@@ -696,7 +686,6 @@ pub fn merge_history_apps_cache_with_rap(
             updated_unix: 0,
             rap_dsid: None,
             rap_xsrf: None,
-            source: None,
         })
     };
     let mut seen: std::collections::HashSet<String> =
