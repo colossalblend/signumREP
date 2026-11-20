@@ -40,10 +40,10 @@ jobs:
           mkdir -p apple-tools/macos-arm64/support apple-tools/macos-x64/support
           # v5 = ipatool-cpp straight from upstream, pinned by sha256: the tools
           # tarball above may still carry an older build.
-          GH_TOKEN=${{ github.token }} gh release download 1.1.4 -R Sorvigolova/ipatool -p 'macOS_*_ipatool-cpp.zip' -D /tmp/ipatool-cpp
+          GH_TOKEN=${{ github.token }} gh release download 1.3.2 -R Sorvigolova/ipatool -p 'macOS_*_ipatool-cpp.zip' -D /tmp/ipatool-cpp
           printf '%s  %s\n' \
-            d088f8e47ecf055207d197a98ee8d883d013443ebcc204b4cbca269d9777c08f /tmp/ipatool-cpp/macOS_arm64_ipatool-cpp.zip \
-            187364a99af6270756dc219c8a1064a3fc556395de33d7838e518b7d649e842b /tmp/ipatool-cpp/macOS_amd64_ipatool-cpp.zip \
+            87d4d4189c3d71cc97e1896fadb4bae62877ba3cc3b2a5f9ddf0df3bbb4b0fe0 /tmp/ipatool-cpp/macOS_arm64_ipatool-cpp.zip \
+            9e52e14559a772d2e5d3a2379973c34e5d3d1c99cac5451a44ab8ab796fb13b3 /tmp/ipatool-cpp/macOS_amd64_ipatool-cpp.zip \
             | shasum -a 256 -c
           unzip -p /tmp/ipatool-cpp/macOS_arm64_ipatool-cpp.zip ipatool-cpp-macOS-arm64 > apple-tools/macos-arm64/v5/ipatool
           unzip -p /tmp/ipatool-cpp/macOS_amd64_ipatool-cpp.zip ipatool-cpp-macOS-amd64 > apple-tools/macos-x64/v5/ipatool

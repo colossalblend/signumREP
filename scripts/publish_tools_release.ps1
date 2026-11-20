@@ -8,10 +8,10 @@ param(
 
     # ipatool-cpp (Sorvigolova) — engine v5, SAP signer compiled in.
     [ValidatePattern('^\d+(\.\d+){0,3}([+-][A-Za-z0-9.]+)?$')]
-    [string]$IpatoolCppVersion = '1.2.0',
+    [string]$IpatoolCppVersion = '1.3.2',
 
     [ValidatePattern('^\d+(\.\d+){0,3}([+-][A-Za-z0-9.]+)?$')]
-    [string]$IpatoolWindowsCppVersion = '1.3.0',
+    [string]$IpatoolWindowsCppVersion = '1.3.2',
 
     [string]$MacOsAnisetteX64,
     [string]$MacOsAnisetteArm64,

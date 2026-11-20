@@ -1,0 +1,58 @@
+[
+  {
+    "id": "sn",
+    "name": "СтройНадзор",
+    "deeplink": "constructvisionapp",
+    "app_store_id": "6752483592",
+    "bundle_id": "com.construction-supervision",
+    "appstore_link": "https://apps.apple.com/ru/app/id6752483592"
+  },
+  {
+    "id": "vm",
+    "name": "Карта Настроения",
+    "deeplink": "vibemapapp",
+    "app_store_id": "6749269336",
+    "bundle_id": "com.moodmap.app",
+    "appstore_link": "https://apps.apple.com/ru/app/id6749269336"
+  },
+  {
+    "id": "itp",
+    "name": "ИТ-Предсказания",
+    "deeplink": "itpredictions",
+    "app_store_id": "",
+    "bundle_id": "",
+    "appstore_link": ""
+  },
+  {
+    "id": "dd",
+    "name": "Dispute Diary",
+    "deeplink": "disputediary",
+    "app_store_id": "",
+    "bundle_id": "",
+    "appstore_link": ""
+  },
+  {
+    "id": "ioa",
+    "name": "InsideOutApplication",
+    "deeplink": "businessinsideout",
+    "app_store_id": "",
+    "bundle_id": "",
+    "appstore_link": ""
+  },
+  {
+    "id": "md",
+    "name": "MushroomDiary",
+    "deeplink": "mushroomdiaryapp",
+    "app_store_id": "",
+    "bundle_id": "",
+    "appstore_link": ""
+  },
+  {
+    "id": "yg",
+    "name": "YourGarden",
+    "deeplink": "yourgardenapp",
+    "app_store_id": "",
+    "bundle_id": "",
+    "appstore_link": ""
+  }
+]

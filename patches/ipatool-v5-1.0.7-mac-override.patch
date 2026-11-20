@@ -1,0 +1,101 @@
+diff --git a/device_mac.cpp b/device_mac.cpp
+index a4fc8e2..8bef327 100644
+--- a/device_mac.cpp
++++ b/device_mac.cpp
+@@ -2,9 +2,11 @@
+ #include "ipatool.h"   // IpaError
+ 
+ #include <algorithm>
++#include <cctype>
+ #include <cstdio>
+ #include <cstring>
+ #include <mutex>
++#include <cstdlib>
+ 
+ #ifdef _WIN32
+ #  ifndef WIN32_LEAN_AND_MEAN
+@@ -27,6 +29,8 @@
+ #  include <fstream>
+ #endif
+ 
++bool is_placeholder_mac(const uint8_t* mac, size_t len);
++
+ namespace {
+ 
+ bool g_debug = false;
+@@ -37,6 +41,35 @@ struct Detected {
+     std::string          error;   // non-empty when detection failed
+ };
+ 
++bool env_mac(std::vector<uint8_t>& out) {
++    const char* raw = std::getenv("IPATOOL_MAC");
++    if (!raw || !*raw) return false;
++
++    std::string value;
++    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(raw); *p; ++p) {
++        if (*p == ':' || *p == '-' || std::isspace(*p)) continue;
++        if (!std::isxdigit(*p)) return false;
++        value.push_back(static_cast<char>(*p));
++    }
++    if (value.size() != 12) return false;
++
++    out.resize(6);
++    for (size_t i = 0; i < out.size(); ++i) {
++        auto hex = [](char c) -> uint8_t {
++            if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
++            if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
++            return static_cast<uint8_t>(c - 'A' + 10);
++        };
++        out[i] = static_cast<uint8_t>((hex(value[i * 2]) << 4) | hex(value[i * 2 + 1]));
++    }
++    return !is_placeholder_mac(out.data(), out.size());
++}
++
++bool env_mac_requested() {
++    const char* raw = std::getenv("IPATOOL_MAC");
++    return raw && *raw;
++}
++
+ void debug_log(const char* fmt, const std::string& a = {}, const std::string& b = {}) {
+     if (!g_debug) return;
+     fprintf(stderr, "[DEBUG] device ID: ");
+@@ -225,6 +258,15 @@ Detected detect() {
+     namespace fs = std::filesystem;
+     Detected d;
+ 
++    if (env_mac_requested() && !env_mac(d.mac)) {
++        d.error = "IPATOOL_MAC is invalid; expected a 6-byte unicast MAC address";
++        return d;
++    }
++    if (!d.mac.empty()) {
++        d.source = "IPATOOL_MAC override";
++        return d;
++    }
++
+     struct Candidate { int prio; std::string name; std::vector<uint8_t> mac; };
+     std::vector<Candidate> cands;
+ 
+diff --git a/device_mac.h b/device_mac.h
+index 1293e34..1c79a8d 100644
+--- a/device_mac.h
++++ b/device_mac.h
+@@ -3,7 +3,8 @@
+ //
+ // Every App Store request carries a GUID derived from this address, and the
+ // SAP / StoreAgent emulation is seeded with the same bytes. It must therefore be:
+-//   * the REAL address of a PHYSICAL network adapter — never a placeholder
++//   * the REAL address of a PHYSICAL network adapter — never a placeholder,
++//     unless Signum supplies the validated per-account IPATOOL_MAC override
+ //     (macOS 27 hands 02:00:00:00:00:00 to getifaddrs() callers launched from
+ //     pwsh, so every such user would share GUID 020000000000);
+ //   * chosen deterministically — adding a VPN / virtual adapter or toggling
+@@ -20,7 +21,8 @@
+ //             PermanentPhysicalAddress (factory MAC, unaffected by Windows
+ //             random hardware addresses). Ethernet before Wi-Fi, then lowest MAC.
+ //   Linux   : /sys/class/net/<if> with a backing device (physical only),
+-//             wired before wireless, then interface name.
++//             wired before wireless, then interface name. IPATOOL_MAC is used
++//             first for WSL and other environments without physical adapters.
+ //
+ // Strict mode: if no valid address is found, device_mac_address() throws
+ // IpaError and no request must be sent to Apple.

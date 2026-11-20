@@ -1,4 +1,4 @@
-﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod apple_history;
 mod apple_region;
@@ -10,7 +10,9 @@ mod bank_otp;
 mod diag_log;
 mod history_secrets;
 mod ipa_inspect;
+mod pty_login;
 mod store_search;
+mod system_proxy;
 mod uninstall;
 
 use futures_util::{stream, StreamExt};
@@ -150,6 +152,50 @@ fn current_proxy_url() -> Option<String> {
     proxy_cache().lock().ok().and_then(|value| value.clone())
 }
 
+/// Прокси для дочернего процесса (ipatool и прочих).
+///
+/// Порядок: свой прокси из настроек Signum, затем прокси, с которым Signum
+/// запустили (переменные окружения ребёнок и так унаследует), и только потом
+/// системный — тот, что выставил VPN-клиент. Без последнего вход через
+/// ipatool-cpp шёл к Apple мимо VPN, хотя IPA_Downloader на той же машине
+/// входил: он системный прокси подхватывает сам.
+fn child_proxy_url() -> Option<ChildProxy> {
+    if let Some(url) = current_proxy_url() {
+        return Some(ChildProxy { url, system: false });
+    }
+    if launch_env_has_proxy() {
+        return None;
+    }
+    system_proxy::system_proxy_url().map(|url| ChildProxy { url, system: true })
+}
+
+struct ChildProxy {
+    url: String,
+    /// Взят из системных настроек, а не задан человеком.
+    system: bool,
+}
+
+const PROXY_ENV_KEYS: [&str; 3] = ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"];
+
+/// Переменные прокси, с которыми Signum запустили, — до того, как
+/// `remember_proxy` их переписал.
+fn launch_proxy_env() -> &'static Vec<(&'static str, Option<std::ffi::OsString>)> {
+    static ORIGINAL: OnceLock<Vec<(&'static str, Option<std::ffi::OsString>)>> = OnceLock::new();
+    ORIGINAL.get_or_init(|| {
+        PROXY_ENV_KEYS
+            .iter()
+            .map(|key| (*key, std::env::var_os(key).filter(|value| !value.is_empty())))
+            .collect()
+    })
+}
+
+fn launch_env_has_proxy() -> bool {
+    launch_proxy_env().iter().any(|(_, value)| value.is_some())
+        || ["all_proxy", "https_proxy"]
+            .iter()
+            .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+}
+
 fn proxy_cache() -> &'static StdMutex<Option<String>> {
     static CACHE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
     CACHE.get_or_init(|| StdMutex::new(None))
@@ -159,16 +205,21 @@ fn proxy_cache() -> &'static StdMutex<Option<String>> {
 /// дочерние процессы и фоновые задачи.
 fn remember_proxy(settings: &AppSettings) {
     let url = proxy_url(settings);
+    let original = launch_proxy_env();
     if let Ok(mut cache) = proxy_cache().lock() {
         *cache = url.clone();
     }
     // Свои HTTP-клиенты строятся один раз за запуск и читают прокси из
     // окружения, поэтому переменные ставим и себе. Уже созданные клиенты
     // переключатся только после перезапуска — об этом сказано в настройках.
-    for key in ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"] {
-        match url.as_deref() {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
+    // Без своего прокси возвращаем то, с чем Signum запустили. Раньше
+    // переменные просто стирались, и прокси, заданный человеком в системе
+    // через HTTPS_PROXY, до ipatool не доходил.
+    for (key, launched) in original {
+        match (url.as_deref(), launched) {
+            (Some(value), _) => std::env::set_var(key, value),
+            (None, Some(value)) => std::env::set_var(key, value),
+            (None, None) => std::env::remove_var(key),
         }
     }
 }
@@ -2361,7 +2412,7 @@ fn normalize_ipatool_engine(engine: &str) -> String {
     }
 }
 
-fn windows_plain_path(path: &Path) -> PathBuf {
+pub(crate) fn windows_plain_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     let stripped = raw
         .strip_prefix(r"\\?\")
@@ -2398,7 +2449,7 @@ fn windows_sap_engine_ready(v2: &str) -> bool {
 /// delivered by the tool updater as `ipatool-v5-<version>`. It parses flags
 /// itself and has no `--non-interactive`: passing it swallows the subcommand
 /// and prints "Unknown command" with exit code 0.
-fn is_cpp_ipatool(program: &str) -> bool {
+pub(crate) fn is_cpp_ipatool(program: &str) -> bool {
     let path = Path::new(program);
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -2420,7 +2471,7 @@ fn store_session_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("Signum").join("store-session"))
 }
 
-fn ipatool_debug_log(msg: &str) {
+pub(crate) fn ipatool_debug_log(msg: &str) {
     diag_log::note("app", msg);
 }
 
@@ -2664,23 +2715,12 @@ fn auth_stage(stage: &str, email: &str, detail: &str) {
     ));
 }
 
-/// Текст ошибки входа без служебной метки в начале.
-///
-/// Метки нужны коду (`SIGNUM_APPLE_UNAVAILABLE:` останавливает переход на
-/// второй движок), а на странице аккаунта сохранённая ошибка показывается как
-/// есть — человеку метка ни к чему.
-fn without_login_marker(msg: &str) -> &str {
-    let msg = msg.trim();
-    for marker in [APPLE_UNAVAILABLE_MARKER, "SIGNUM_LOGIN_OPAQUE:"] {
-        if let Some(rest) = msg.strip_prefix(marker) {
-            return rest.trim_start();
-        }
-    }
-    msg
-}
-
 fn save_last_catalog_error(msg: &str) {
-    let msg = without_login_marker(msg);
+    let msg = msg
+        .strip_prefix("SIGNUM_APPLE_UNAVAILABLE:")
+        .or_else(|| msg.strip_prefix("SIGNUM_LOGIN_OPAQUE:"))
+        .map(str::trim_start)
+        .unwrap_or(msg);
     let Some(dir) = store_session_dir() else {
         return;
     };
@@ -2707,7 +2747,7 @@ fn load_last_catalog_error() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn technical_excerpt(text: &str, max_chars: usize) -> String {
+pub(crate) fn technical_excerpt(text: &str, max_chars: usize) -> String {
     let excerpt = strip_ansi(text)
         .lines()
         .map(str::trim)
@@ -2759,7 +2799,7 @@ fn with_technical_detail(friendly: &str, raw: &str) -> String {
     }
 }
 
-fn redact_cmd_args(args: &[String]) -> String {
+pub(crate) fn redact_cmd_args(args: &[String]) -> String {
     let mut out = Vec::with_capacity(args.len());
     let mut hide_next = false;
     for arg in args {
@@ -2782,7 +2822,7 @@ fn redact_cmd_args(args: &[String]) -> String {
     out.join(" ")
 }
 
-fn ipatool_session_diag() -> String {
+pub(crate) fn ipatool_session_diag() -> String {
     match ipatool_data_dir() {
         Some(dir) => {
             let account = dir.join("account");
@@ -3532,10 +3572,7 @@ fn start_background_refresh(app: &AppHandle) {
     });
 }
 
-#[cfg(target_os = "windows")]
-const KBSYNC_UPSTREAM_VERSION: &str = "1.3.0";
-#[cfg(not(target_os = "windows"))]
-const KBSYNC_UPSTREAM_VERSION: &str = "1.2.0";
+const KBSYNC_UPSTREAM_VERSION: &str = "1.3.2";
 const KBSYNC_REFRESH_AFTER_SECS: u64 = 3600;
 /// Сколько команд сейчас просят остановить KBSync.
 ///
@@ -7718,31 +7755,16 @@ async fn available_catalog_versions_on_account(
     // truncating writers cannot corrupt the session between requests.
     let probe_concurrency = ACCOUNT_VERSION_PROBE_CONCURRENCY;
 
-    // Один раз до серии опросов убеждаемся, что у аккаунта есть KBSync.
-    // Пересоздавать готовый blob здесь нельзя (это и подвешивало каталог раз в
-    // час), а вот пустой файл аккаунта надо заполнить заранее: иначе каждый
-    // list-versions порождает blob сам и на медленной машине не успевает.
+    // Prepare the embedded KBSync blob once before the version probes. Without
+    // this, a slow device can spend the whole probe timeout generating it and
+    // the catalog is queried again from scratch on every attempt.
     if !candidates.is_empty() {
         ensure_kbsync_present(app).await;
     }
 
     let mut owned: Vec<JsonValue> = Vec::new();
     let mut unchecked = 0usize;
-    let mut probed = 0usize;
     for chunk in candidates.chunks(probe_concurrency) {
-        // Человек нажал «Выйти» или входит в другой Apple ID. Команда ждёт
-        // общий замок, который держит эта проверка, а ответы про прежний
-        // аккаунт уже никому не нужны: остаток помечаем непроверенным и
-        // отпускаем замок, не доходя до конца списка (по 75 с на строку).
-        if kbsync_cancel_requested() {
-            unchecked += candidates.len() - probed;
-            ipatool_debug_log(&format!(
-                "version-probe остановлен: меняется вход в Apple ID, не проверено {}",
-                candidates.len() - probed
-            ));
-            break;
-        }
-        probed += chunk.len();
     let chunk_concurrency = probe_concurrency;
     let results = stream::iter(chunk.to_vec().into_iter().enumerate())
         .map(|(index, version)| async move {
@@ -10603,6 +10625,9 @@ fn ipatool_data_dir() -> Option<PathBuf> {
 }
 
 fn reset_ipatool_local_store() {
+    // Живая ConPTY-сессия входа после сброса не должна дописать аккаунт:
+    // процесс умрёт, пока не записал ничего.
+    pty_login::cancel_parked("local store reset");
     let Some(dir) = ipatool_data_dir() else {
         return;
     };
@@ -10740,7 +10765,7 @@ fn is_keychain_passphrase_required_error(output: &str) -> bool {
         || lowered.contains("use the --keychain-passphrase")
 }
 
-fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     static ANSI: OnceLock<Regex> = OnceLock::new();
     ANSI.get_or_init(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap())
         .replace_all(text, "")
@@ -11309,7 +11334,7 @@ fn apple_unreachable_message() -> &'static str {
      попробуйте без них или с другим сервером, затем повторите."
 }
 
-fn format_login_error(output: &str, password: &str) -> String {
+pub(crate) fn format_login_error(output: &str, password: &str) -> String {
     let sanitized = strip_ansi(&output.replace(password, "********"));
     if is_two_factor_error(&sanitized) {
         let channel_hint = match two_factor_channel(&sanitized) {
@@ -11449,16 +11474,10 @@ fn format_login_error(output: &str, password: &str) -> String {
             &sanitized,
         );
     }
-    // Apple ответила на вход не решением, а служебным кодом: 301, 204, 403,
-    // 404 или 500. Пароль тут ни при чём, и второй движок с теми же данными
-    // получит то же самое. Метку SIGNUM_APPLE_UNAVAILABLE читает
-    // login_catalog_with_fallback: технический хвост с кодом ответа в обычном
-    // режиме отрезается, и без метки отличить этот отказ было бы не по чему.
     if let Some(status) = apple_opaque_auth_status(&lowered) {
         return with_technical_detail(
             &format!(
-                "{APPLE_UNAVAILABLE_MARKER} Apple сейчас не принимает вход (ответ сервера {status}). \
-                 Пароль менять не нужно — подождите несколько минут и повторите."
+                "{APPLE_UNAVAILABLE_MARKER} Apple сейчас не принимает вход (ответ сервера {status}). Пароль менять не нужно — подождите несколько минут и повторите."
             ),
             &sanitized,
         );
@@ -11731,7 +11750,7 @@ async fn ensure_active_ipatool_session(app: &AppHandle) -> Result<String, String
     }
 }
 
-fn login_output_indicates_failure(output: &str) -> bool {
+pub(crate) fn login_output_indicates_failure(output: &str) -> bool {
     let lowered = output.to_ascii_lowercase();
     if is_two_factor_error(output) {
         return false;
@@ -12075,7 +12094,25 @@ async fn login_catalog_with_fallback(
         if let Some(code) = two_factor_code {
             args.extend(["--auth-code".into(), code.to_string()]);
         }
-        match run_ipatool_login(&tools.ipatool, &args, password).await {
+        // Движок v5 (cpp) идёт через ConPTY: первый запуск живёт на подсказке
+        // «Enter 2FA code», код дописывается в ту же сессию. Второй парольный
+        // шаг Apple не получает. None — псевдотерминал недоступен (не Windows,
+        // не движок cpp, сессия не дожила) — классическая двухпроцессная схема.
+        let login_result = match pty_login::catalog_login_pty(
+            &tools.ipatool,
+            &args,
+            password,
+            email,
+            engine,
+            two_factor_code,
+            resending,
+        )
+        .await
+        {
+            Some(result) => result,
+            None => run_ipatool_login(&tools.ipatool, &args, password).await,
+        };
+        match login_result {
             Ok(()) => {
                 if !current_ipatool_session_exists() {
                     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -12293,9 +12330,6 @@ async fn login_apple(
         Err(error)
             if providing_2fa
                 && !is_invalid_2fa_code_error(&error)
-                // Служебный ответ Apple — не сбой связи: повтор стал бы ещё
-                // одной засчитанной попыткой входа.
-                && !is_apple_opaque_auth_response(&error)
                 && is_transient_2fa_check_error(&error) =>
         {
             ipatool_debug_log("login 2fa transient retry");
@@ -12380,9 +12414,9 @@ async fn login_apple(
             ),
             catalog_error: Some(error),
         }),
-        // Код отправлен, а Apple ответила служебным кодом. «Введите тот же код
-        // ещё раз» звало бы сразу сделать ещё одну засчитанную попытку —
-        // показываем как есть: подождать. Состояние 2FA не трогаем.
+        // ╨Ъ╨╛╨┤ ╨╛╤В╨┐╤А╨░╨▓╨╗╨╡╨╜, ╨░ Apple ╨╛╤В╨▓╨╡╤В╨╕╨╗╨░ ╤Б╨╗╤Г╨╢╨╡╨▒╨╜╤Л╨╝ ╨║╨╛╨┤╨╛╨╝. ┬л╨Т╨▓╨╡╨┤╨╕╤В╨╡ ╤В╨╛╤В ╨╢╨╡ ╨║╨╛╨┤
+        // ╨╡╤Й╤С ╤А╨░╨╖┬╗ ╨╖╨▓╨░╨╗╨╛ ╨▒╤Л ╤Б╤А╨░╨╖╤Г ╤Б╨┤╨╡╨╗╨░╤В╤М ╨╡╤Й╤С ╨╛╨┤╨╜╤Г ╨╖╨░╤Б╤З╨╕╤В╨░╨╜╨╜╤Г╤О ╨┐╨╛╨┐╤Л╤В╨║╤Г тАФ
+        // ╨┐╨╛╨║╨░╨╖╤Л╨▓╨░╨╡╨╝ ╨║╨░╨║ ╨╡╤Б╤В╤М: ╨┐╨╛╨┤╨╛╨╢╨┤╨░╤В╤М. ╨б╨╛╤Б╤В╨╛╤П╨╜╨╕╨╡ 2FA ╨╜╨╡ ╤В╤А╨╛╨│╨░╨╡╨╝.
         Err(error) if providing_2fa && is_apple_opaque_auth_response(&error) => {
             auth_stage("catalog-2fa-submit", &email, "apple-unavailable");
             Err(error)
@@ -12949,17 +12983,9 @@ async fn logout_apple(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
     remove_apple_account_inner(&app, &email).await
 }
 
-/// Метка «Apple ответила служебным кодом, а не решением по входу».
 const APPLE_UNAVAILABLE_MARKER: &str = "SIGNUM_APPLE_UNAVAILABLE:";
-
-/// Коды, которыми Apple отвечает на вход, когда не говорит ни «да», ни «нет».
 const APPLE_OPAQUE_AUTH_STATUSES: [u16; 5] = [301, 204, 403, 404, 500];
 
-/// Служебный код ответа Apple из сырого вывода движка, если он из «немых».
-///
-/// Движки пишут его по-разному: ipatool-cpp — «something went wrong
-/// (status=403)», Go-движок — «authentication request failed after 3 attempts
-/// (HTTP 204, 404, 404): …». Ждёт текст в нижнем регистре.
 fn apple_opaque_auth_status(lowered: &str) -> Option<u16> {
     let about_sign_in = lowered.contains("login error")
         || lowered.contains("something went wrong")
@@ -12972,27 +12998,25 @@ fn apple_opaque_auth_status(lowered: &str) -> Option<u16> {
     static STATUS: OnceLock<Regex> = OnceLock::new();
     static HTTP_LIST: OnceLock<Regex> = OnceLock::new();
     let status = STATUS.get_or_init(|| Regex::new(r"status\s*=\s*(\d{3})\b").unwrap());
-    let http_list =
-        HTTP_LIST.get_or_init(|| Regex::new(r"http\s+(\d{3}(?:\s*,\s*\d{3})*)").unwrap());
+    let http_list = HTTP_LIST
+        .get_or_init(|| Regex::new(r"http\s+(\d{3}(?:\s*,\s*\d{3})*)").unwrap());
     let mut codes: Vec<u16> = status
         .captures_iter(lowered)
         .filter_map(|found| found[1].parse::<u16>().ok())
         .collect();
     for found in http_list.captures_iter(lowered) {
-        codes.extend(found[1].split(',').filter_map(|code| code.trim().parse::<u16>().ok()));
+        codes.extend(
+            found[1]
+                .split(',')
+                .filter_map(|code| code.trim().parse::<u16>().ok()),
+        );
     }
-    // Последний код — тот, на котором движок сдался.
     codes
         .into_iter()
         .rev()
         .find(|code| APPLE_OPAQUE_AUTH_STATUSES.contains(code))
 }
 
-/// Apple ответила на вход служебным кодом — второй движок не поможет.
-///
-/// Принимает и сырой вывод движка, и уже готовое сообщение из
-/// `format_login_error`: в обычном режиме (без подробных ошибок) от вывода
-/// остаётся только метка, кода ответа в тексте уже нет.
 fn is_apple_opaque_auth_response(error: &str) -> bool {
     error.contains(APPLE_UNAVAILABLE_MARKER)
         || apple_opaque_auth_status(&error.to_ascii_lowercase()).is_some()
@@ -13084,9 +13108,9 @@ fn is_sinf_warning_only_install_output(text: &str) -> bool {
     if clean.trim().is_empty() {
         return false;
     }
-    // Таймаут — не «одни предупреждения». С подробными ошибками к нему
-    // приклеен вывод процесса, где у переподписанного IPA всегда есть строки
-    // про .sinf; без этой проверки зависшая установка считалась удачной.
+    // ╨в╨░╨╣╨╝╨░╤Г╤В тАФ ╨╜╨╡ ┬л╨╛╨┤╨╜╨╕ ╨┐╤А╨╡╨┤╤Г╨┐╤А╨╡╨╢╨┤╨╡╨╜╨╕╤П┬╗. ╨б ╨┐╨╛╨┤╤А╨╛╨▒╨╜╤Л╨╝╨╕ ╨╛╤И╨╕╨▒╨║╨░╨╝╨╕ ╨║ ╨╜╨╡╨╝╤Г
+    // ╨┐╤А╨╕╨║╨╗╨╡╨╡╨╜ ╨▓╤Л╨▓╨╛╨┤ ╨┐╤А╨╛╤Ж╨╡╤Б╤Б╨░, ╨│╨┤╨╡ ╤Г ╨┐╨╡╤А╨╡╨┐╨╛╨┤╨┐╨╕╤Б╨░╨╜╨╜╨╛╨│╨╛ IPA ╨▓╤Б╨╡╨│╨┤╨░ ╨╡╤Б╤В╤М ╤Б╤В╤А╨╛╨║╨╕
+    // ╨┐╤А╨╛ .sinf; ╨▒╨╡╨╖ ╤Н╤В╨╛╨╣ ╨┐╤А╨╛╨▓╨╡╤А╨║╨╕ ╨╖╨░╨▓╨╕╤Б╤И╨░╤П ╤Г╤Б╤В╨░╨╜╨╛╨▓╨║╨░ ╤Б╤З╨╕╤В╨░╨╗╨░╤Б╤М ╤Г╨┤╨░╤З╨╜╨╛╨╣.
     if is_process_timeout_error(clean.trim_start()) {
         return false;
     }
@@ -13117,13 +13141,14 @@ fn is_sinf_warning_only_install_output(text: &str) -> bool {
     true
 }
 
-/// Сколько ждать, пока ideviceinstaller сам выйдет после «Complete».
+const PROCESS_TIMEOUT_PREFIX: &str = "Компонент не ответил вовремя";
 const IDEVICEINSTALLER_EXIT_GRACE: Duration = Duration::from_secs(5);
 
-/// Запуск ideviceinstaller на установку или обновление приложения.
+fn is_process_timeout_error(text: &str) -> bool {
+    text.starts_with(PROCESS_TIMEOUT_PREFIX)
+}
+
 fn is_ideviceinstaller_install_command(program: &str, args: &[String]) -> bool {
-    // Делим по обоим разделителям: путь из Windows приходит с «\», а проверки
-    // гоняются и на Linux, где `Path::file_name` такую строку не разбирает.
     let name = program
         .rsplit(['/', '\\'])
         .next()
@@ -13133,27 +13158,17 @@ fn is_ideviceinstaller_install_command(program: &str, args: &[String]) -> bool {
         && args.iter().any(|arg| matches!(arg.as_str(), "install" | "upgrade"))
 }
 
-/// Телефон подтвердил установку: в выводе есть «Install: Complete».
-///
-/// Это единственная строка, которую ideviceinstaller печатает ПОСЛЕ того, как
-/// installd закончил работу (статус `Complete` в status_cb). Строки
-/// «DONE.» и «Installing '<bundle>'» печатаются раньше: первая — когда IPA
-/// залит на телефон, вторая — перед самой отправкой команды установки. Считать
-/// их успехом нельзя: приложение в этот момент ещё не ставилось, и отказ
-/// телефона («ERROR: Install failed. Got error …») приходит позже.
 fn ideviceinstaller_install_completed(lines: &[String]) -> bool {
     let mut completed = false;
-    for line in lines {
-        let line = strip_ansi(line).trim().to_ascii_lowercase();
+    for raw in lines {
+        let line = strip_ansi(raw).trim().to_ascii_lowercase();
         if line.starts_with("error:") || line.contains("apiinternalerror") {
-            // Отказ: пусть процесс выйдет сам и вернёт свой код.
             return false;
         }
         let status = line
             .strip_prefix("install")
             .or_else(|| line.strip_prefix("upgrade"))
             .map(|rest| rest.trim_start_matches([' ', ':', '-']));
-        // Новые сборки пишут «Install: Complete», старые — «Install - Complete».
         if status == Some("complete") {
             completed = true;
         }
@@ -13161,13 +13176,6 @@ fn ideviceinstaller_install_completed(lines: &[String]) -> bool {
     completed
 }
 
-/// Стоит ли после отказа `install` пробовать `upgrade`, как это делает
-/// IPA_Downloader.
-///
-/// Не стоит, когда второй заход заведомо ничего не изменит: человек отменил
-/// задание, телефон пропал (для этого есть свой повтор по Wi‑Fi), процесс не
-/// ответил за шесть минут (ещё шесть минут ожидания никому не нужны) или сам
-/// ideviceinstaller не запустился.
 fn install_failure_allows_upgrade_retry(error: &str, cancelled: bool) -> bool {
     !cancelled
         && !is_process_timeout_error(error)
@@ -13175,14 +13183,10 @@ fn install_failure_allows_upgrade_retry(error: &str, cancelled: bool) -> bool {
         && !error.starts_with("Не удалось запустить")
 }
 
-/// Какую из двух ошибок показать, когда не помогли ни install, ни upgrade.
 fn pick_install_error(install_error: String, upgrade_error: String) -> String {
     if is_device_missing_error(&upgrade_error) {
         return device_not_found_message();
     }
-    // Общая фраза ничего не объясняет — если upgrade назвал причину точнее,
-    // показываем её. Во всех остальных случаях важнее первый отказ: это ответ
-    // на то действие, о котором человек просил.
     let install_is_generic = install_error.starts_with("Не удалось выполнить операцию");
     if install_is_generic && !is_process_timeout_error(&upgrade_error) {
         upgrade_error
@@ -13191,10 +13195,6 @@ fn pick_install_error(install_error: String, upgrade_error: String) -> String {
     }
 }
 
-/// Стоит ли на телефоне та самая сборка, что лежит в IPA.
-///
-/// Совпадения одного идентификатора мало: приложение могло стоять и раньше.
-/// Нужна ещё и та же версия; если её не узнать с любой из сторон — «нет».
 fn installed_app_matches_ipa(
     installed: &HashMap<String, InstalledApp>,
     bundle_id: &str,
@@ -13211,12 +13211,6 @@ fn installed_app_matches_ipa(
     }
 }
 
-/// Встало ли приложение за время установки, которая кончилась таймаутом.
-///
-/// Одного «на телефоне стоит эта версия» мало: ту же версию переставляют
-/// постоянно (перевыпуск подписи раз в неделю), и старая копия выглядела бы
-/// как удачная установка. Поэтому нужен снимок ДО: успех — только когда этой
-/// сборки на телефоне не было, а теперь она есть. Нет снимка — не гадаем.
 fn timed_out_install_landed(
     before: Option<&HashMap<String, InstalledApp>>,
     after: &HashMap<String, InstalledApp>,
@@ -13228,6 +13222,21 @@ fn timed_out_install_landed(
     };
     !installed_app_matches_ipa(before, bundle_id, ipa_version)
         && installed_app_matches_ipa(after, bundle_id, ipa_version)
+}
+
+async fn drain_killed_child_output(
+    out_task: &mut tokio::task::JoinHandle<()>,
+    err_task: &mut tokio::task::JoinHandle<()>,
+) {
+    let drained = tokio::time::timeout(Duration::from_secs(2), async {
+        let _ = (&mut *out_task).await;
+        let _ = (&mut *err_task).await;
+    })
+    .await;
+    if drained.is_err() {
+        out_task.abort();
+        err_task.abort();
+    }
 }
 
 fn is_usable_device_udid(value: &str) -> bool {
@@ -14612,10 +14621,9 @@ fn prepend_tool_dir_to_path(program: &str) -> Option<String> {
 
 /// No-op when PATH already prepared by [`prepend_tool_dir_to_path`].
 #[cfg(target_os = "macos")]
-fn ensure_unix_tool_path_env(command: &mut Command) {
+pub(crate) fn ensure_unix_tool_path_env(command: &mut StdCommand) {
     // prepend_tool_dir_to_path already injects Homebrew on macOS; only fill if PATH missing.
     let already = command
-        .as_std()
         .get_envs()
         .any(|(k, _)| k == std::ffi::OsStr::new("PATH"));
     if already {
@@ -14627,9 +14635,9 @@ fn ensure_unix_tool_path_env(command: &mut Command) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn ensure_unix_tool_path_env(_command: &mut Command) {}
+pub(crate) fn ensure_unix_tool_path_env(_command: &mut StdCommand) {}
 
-fn apply_windows_ipatool_helper_env(command: &mut Command, program: &str) {
+pub(crate) fn apply_windows_ipatool_helper_env(command: &mut StdCommand, program: &str) {
     #[cfg(target_os = "windows")]
     ensure_windows_sap_sidecars(program);
     ensure_macos_sap_sidecar(program);
@@ -14656,41 +14664,6 @@ fn apply_windows_ipatool_helper_env(command: &mut Command, program: &str) {
             command.env("IPATOOL_ANISETTE", ani);
             break;
         }
-    }
-}
-
-/// Начало сообщения о превышенном времени ожидания.
-///
-/// Вынесено, чтобы установка могла отличить «не дождались» от настоящего
-/// отказа, не сравнивая русский текст в двух местах.
-const PROCESS_TIMEOUT_PREFIX: &str = "Компонент не ответил вовремя";
-
-fn is_process_timeout_error(error: &str) -> bool {
-    error.starts_with(PROCESS_TIMEOUT_PREFIX)
-}
-
-/// Сколько ждать, пока убитый процесс закроет свои потоки вывода.
-const KILLED_CHILD_DRAIN: Duration = Duration::from_secs(2);
-
-/// Дочитать вывод убитого процесса, но не ждать его вечно.
-///
-/// Каналы stdout/stderr закрываются, только когда их отпустят ВСЕ владельцы.
-/// Если движок успел запустить соседний процесс (kbsync на macOS и Linux
-/// собирается отдельным файлом), тот наследует канал и держит его открытым
-/// ещё минуты после смерти родителя. Ждать тут без предела — значит вернуть
-/// ту самую задержку, ради снятия которой процесс убивали.
-async fn drain_killed_child_output(
-    out_task: &mut tokio::task::JoinHandle<()>,
-    err_task: &mut tokio::task::JoinHandle<()>,
-) {
-    let drained = tokio::time::timeout(KILLED_CHILD_DRAIN, async {
-        let _ = (&mut *out_task).await;
-        let _ = (&mut *err_task).await;
-    })
-    .await;
-    if drained.is_err() {
-        out_task.abort();
-        err_task.abort();
     }
 }
 
@@ -14754,6 +14727,109 @@ fn ipatool_home_for_child() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Окружение и рабочая папка для дочернего ipatool/утилит.
+///
+/// Одна и та же подготовка для классического запуска (run_process_inner) и для
+/// запуска в псевдотерминале (pty_login): прокси, ключ FairPlay, MAC-адреса
+/// сессии, PATH с папкой инструментов, единый HOME для ~/.ipatool.
+pub(crate) fn apply_ipatool_child_env(
+    command: &mut StdCommand,
+    program: &str,
+    program_path: &Path,
+) {
+    // Прокси для дочернего процесса. Движок v5 построен на libcurl, а тот
+    // читает ALL_PROXY — поэтому одна переменная накрывает и socks5, и http,
+    // и отдельной настройки внутри ipatool не требуется.
+    if let Some(proxy) = child_proxy_url() {
+        command.env("ALL_PROXY", &proxy.url);
+        command.env("HTTPS_PROXY", &proxy.url);
+        command.env("HTTP_PROXY", &proxy.url);
+        // Системный прокси VPN-клиента не должен перехватывать локальные
+        // обращения, как не перехватывает их и сама Windows.
+        if proxy.system && std::env::var_os("NO_PROXY").is_none() {
+            command.env("NO_PROXY", "localhost,127.0.0.1,::1");
+        }
+    }
+    // Ключ к запечатанным артефактам FairPlay. Утилита kbsync без него
+    // отказывается работать, поэтому унесённая из ресурсов в чужой проект она
+    // бесполезна. Ключ живёт только в окружении дочернего процесса и никогда
+    // не попадает ни в аргументы, ни на диск.
+    command.env(SEALED_ASSET_KEY_ENV, sealed_asset_key());
+    if let Ok(guard) = v6_slot().lock() {
+        if let Some(id) = guard.as_ref() {
+            command.env("IPATOOL_UA", apple_store::CONFIGURATOR_UA);
+            command.env("SAPSIGNER_MAC", &id.mac);
+        }
+    }
+    if let Ok(guard) = process_account_mac().lock() {
+        if let Some(mac) = guard.as_ref() {
+            command.env("IPATOOL_MAC", mac);
+            command.env("SAPSIGNER_MAC", mac);
+        }
+    }
+    // ipatool 2.6.0 и новее, увидев XDG_STATE_HOME или XDG_DATA_HOME, молча
+    // ПЕРЕНОСИТ туда всю папку ~/.ipatool целиком. Движок v5 хранит сессию там
+    // же — и у человека с такой переменной вход уехал бы неизвестно куда прямо
+    // во время обычной операции. Снимаем их у потомка: место хранения должно
+    // определять приложение, а не случайная переменная окружения.
+    command.env_remove("XDG_STATE_HOME");
+    command.env_remove("XDG_DATA_HOME");
+    if let Some(parent) = program_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        // ipatool-cpp starts its companion as `anisette.exe`. Running from the
+        // tool directory makes that lookup reliable in development, portable
+        // builds and installed Tauri bundles.
+        command.current_dir(parent);
+        #[cfg(target_os = "macos")]
+        {
+            // Bundled libimobiledevice dylibs live next to the CLI.
+            command.env("DYLD_FALLBACK_LIBRARY_PATH", parent);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let lib = parent.join("lib");
+            if lib.is_dir() {
+                let mut paths = vec![lib];
+                if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+                    paths.extend(std::env::split_paths(&existing));
+                }
+                if let Ok(joined) = std::env::join_paths(paths) {
+                    command.env("LD_LIBRARY_PATH", joined);
+                }
+            }
+        }
+    }
+    if let Some(path) = prepend_tool_dir_to_path(program) {
+        command.env("PATH", path);
+    }
+    apply_windows_ipatool_helper_env(
+        command,
+        program_path.to_str().unwrap_or(program),
+    );
+    sanitize_ipatool_cookies();
+    // macOS GUI apps: inject Homebrew/system bins so idevice* resolve.
+    ensure_unix_tool_path_env(command);
+    // Force a consistent home for ipatool-cpp. On Windows HOME is often unset;
+    // if some parent process sets a broken HOME, account files land elsewhere
+    // than USERPROFILE\.ipatool and auth info reports "Not logged in".
+    if let Some(profile) = ipatool_home_for_child() {
+        command.env("USERPROFILE", &profile);
+        command.env("HOME", &profile);
+        #[cfg(target_os = "windows")]
+        {
+            let profile_path = PathBuf::from(&profile);
+            if let Some(raw) = profile_path.to_str() {
+                if raw.len() >= 2 && raw.as_bytes().get(1) == Some(&b':') {
+                    command.env("HOMEDRIVE", &raw[..2]);
+                    command.env("HOMEPATH", &raw[2..]);
+                }
+            }
+        }
+    }
+}
+
 async fn run_process_inner(
     program: &str,
     args: &[String],
@@ -14786,103 +14862,15 @@ async fn run_process_inner(
     };
     #[cfg(not(unix))]
     let mut command = Command::new(&program_path);
-    // Прокси для дочернего процесса. Движок v5 построен на libcurl, а тот
-    // читает ALL_PROXY — поэтому одна переменная накрывает и socks5, и http,
-    // и отдельной настройки внутри ipatool не требуется.
-    if let Some(url) = current_proxy_url() {
-        command.env("ALL_PROXY", &url);
-        command.env("HTTPS_PROXY", &url);
-        command.env("HTTP_PROXY", &url);
-    }
-    // Ключ к запечатанным артефактам FairPlay. Утилита kbsync без него
-    // отказывается работать, поэтому унесённая из ресурсов в чужой проект она
-    // бесполезна. Ключ живёт только в окружении дочернего процесса и никогда
-    // не попадает ни в аргументы, ни на диск.
-    command.env(SEALED_ASSET_KEY_ENV, sealed_asset_key());
-    if let Ok(guard) = v6_slot().lock() {
-        if let Some(id) = guard.as_ref() {
-            command.env("IPATOOL_UA", apple_store::CONFIGURATOR_UA);
-            command.env("SAPSIGNER_MAC", &id.mac);
-        }
-    }
-    if let Ok(guard) = process_account_mac().lock() {
-        if let Some(mac) = guard.as_ref() {
-            command.env("IPATOOL_MAC", mac);
-            command.env("SAPSIGNER_MAC", mac);
-        }
-    }
-    // ipatool 2.6.0 и новее, увидев XDG_STATE_HOME или XDG_DATA_HOME, молча
-    // ПЕРЕНОСИТ туда всю папку ~/.ipatool целиком. Движок v5 хранит сессию там
-    // же — и у человека с такой переменной вход уехал бы неизвестно куда прямо
-    // во время обычной операции. Снимаем их у потомка: место хранения должно
-    // определять приложение, а не случайная переменная окружения.
-    command.env_remove("XDG_STATE_HOME");
-    command.env_remove("XDG_DATA_HOME");
+    apply_ipatool_child_env(command.as_std_mut(), program, &program_path);
+    // If the Tauri task is cancelled or the application closes, do not
+    // leave ipatool/anisette running and locking bundled executables.
     command
         .args(args)
-        // Signum supplies credentials and 2FA through command-line arguments.
-        // Never let ipatool-cpp wait for its own console prompt: the desktop
-        // app has no visible stdin and must receive the 2FA-required response.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // If the Tauri task is cancelled or the application closes, do not
-        // leave ipatool/anisette running and locking bundled executables.
         .kill_on_drop(true);
-    if let Some(parent) = program_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        // ipatool-cpp starts its companion as `anisette.exe`. Running from the
-        // tool directory makes that lookup reliable in development, portable
-        // builds and installed Tauri bundles.
-        command.current_dir(parent);
-        #[cfg(target_os = "macos")]
-        {
-            // Bundled libimobiledevice dylibs live next to the CLI.
-            command.env("DYLD_FALLBACK_LIBRARY_PATH", parent);
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let lib = parent.join("lib");
-            if lib.is_dir() {
-                let mut paths = vec![lib];
-                if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
-                    paths.extend(std::env::split_paths(&existing));
-                }
-                if let Ok(joined) = std::env::join_paths(paths) {
-                    command.env("LD_LIBRARY_PATH", joined);
-                }
-            }
-        }
-    }
-    if let Some(path) = prepend_tool_dir_to_path(program) {
-        command.env("PATH", path);
-    }
-    apply_windows_ipatool_helper_env(
-        &mut command,
-        program_path.to_str().unwrap_or(program),
-    );
-    sanitize_ipatool_cookies();
-    // macOS GUI apps: inject Homebrew/system bins so idevice* resolve.
-    ensure_unix_tool_path_env(&mut command);
-    // Force a consistent home for ipatool-cpp. On Windows HOME is often unset;
-    // if some parent process sets a broken HOME, account files land elsewhere
-    // than USERPROFILE\.ipatool and auth info reports "Not logged in".
-    if let Some(profile) = ipatool_home_for_child() {
-        command.env("USERPROFILE", &profile);
-        command.env("HOME", &profile);
-        #[cfg(target_os = "windows")]
-        {
-            let profile_path = PathBuf::from(&profile);
-            if let Some(raw) = profile_path.to_str() {
-                if raw.len() >= 2 && raw.as_bytes().get(1) == Some(&b':') {
-                    command.env("HOMEDRIVE", &raw[..2]);
-                    command.env("HOMEPATH", &raw[2..]);
-                }
-            }
-        }
-    }
     #[cfg(target_os = "windows")]
     {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -14921,18 +14909,13 @@ async fn run_process_inner(
     let mut out_task = tokio::spawn(consume_stream(stdout, output.clone(), progress.clone()));
     let mut err_task = tokio::spawn(consume_stream(stderr, output.clone(), progress.clone()));
     let started = Instant::now();
-    let is_kbsync_run = args.iter().any(|arg| arg == "kbsync");
     let watch_install_complete = is_ideviceinstaller_install_command(program, args);
     let mut install_complete_since: Option<Instant> = None;
     let status = loop {
-        if is_kbsync_run && kbsync_cancel_requested() {
+        if args.iter().any(|arg| arg == "kbsync") && kbsync_cancel_requested() {
             let _ = child.kill().await;
             drain_killed_child_output(&mut out_task, &mut err_task).await;
-            ipatool_debug_log(&format!(
-                "kbsync остановлен: меняется вход в Apple ID elapsed_ms={}",
-                started.elapsed().as_millis()
-            ));
-            return Err(KBSYNC_CANCELLED.into());
+            return Err("KBSYNC_CANCELLED".into());
         }
         if let Some(progress) = progress.as_ref() {
             let state = progress.app.state::<AppState>();
@@ -14946,9 +14929,6 @@ async fn run_process_inner(
         })? {
             break status;
         }
-        // ideviceinstaller уже напечатал «Install: Complete», но не выходит
-        // (ждёт уведомление от телефона или отписку от usbmuxd). Установка
-        // состоялась — даём ему несколько секунд выйти самому и завершаем.
         if watch_install_complete {
             if install_complete_since.is_none()
                 && ideviceinstaller_install_completed(&output.lock().unwrap())
@@ -14958,17 +14938,11 @@ async fn run_process_inner(
             if install_complete_since
                 .is_some_and(|since| since.elapsed() >= IDEVICEINSTALLER_EXIT_GRACE)
             {
-                ipatool_debug_log(&format!(
-                    "ideviceinstaller reported Complete but did not exit; stopping it elapsed_ms={}",
-                    started.elapsed().as_millis()
-                ));
                 let _ = child.kill().await;
                 drain_killed_child_output(&mut out_task, &mut err_task).await;
                 return Ok(output.lock().unwrap().join("\n"));
             }
         }
-        // Телефон уже подтвердил установку — общий предел её не отменяет,
-        // процесс доживает свои секунды и завершается веткой выше.
         if started.elapsed() >= duration && install_complete_since.is_none() {
             let _ = child.kill().await;
             drain_killed_child_output(&mut out_task, &mut err_task).await;
@@ -14977,7 +14951,7 @@ async fn run_process_inner(
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("Компонент");
-            let timeout_text = if is_kbsync_run {
+            let timeout_text = if args.iter().any(|arg| arg == "kbsync") {
                 redact_kbsync_output(&text)
             } else {
                 text
@@ -14989,7 +14963,7 @@ async fn run_process_inner(
             ));
             return Err(with_technical_detail(
                 &format!(
-                    "{PROCESS_TIMEOUT_PREFIX} ({} с). Проверьте подключение и повторите попытку.",
+                    "Компонент не ответил вовремя ({} с). Проверьте подключение и повторите попытку.",
                     duration.as_secs()
                 ),
                 &excerpt,
@@ -14999,7 +14973,7 @@ async fn run_process_inner(
     };
     let _ = tokio::join!(out_task, err_task);
     let text = output.lock().unwrap().join("\n");
-    let diagnostic_text = if is_kbsync_run {
+    let diagnostic_text = if args.iter().any(|arg| arg == "kbsync") {
         redact_kbsync_output(&text)
     } else {
         text.clone()
@@ -15021,14 +14995,7 @@ async fn run_process_inner(
     if status.success() {
         return Ok(text);
     }
-    // Телефон ответил «Complete» и ни одной ошибки не было, а процесс вышел с
-    // ненулевым кодом (сбой уже на разъединении). Приложение установлено;
-    // считать это отказом — значит заливать IPA заново через upgrade.
     if watch_install_complete && ideviceinstaller_install_completed(&output.lock().unwrap()) {
-        ipatool_debug_log(&format!(
-            "ideviceinstaller exit={:?} after Complete — treating as installed",
-            status.code()
-        ));
         return Ok(text);
     }
     // Keep the untouched output for the automatic report. The friendly Russian
@@ -22074,204 +22041,6 @@ Download error: storefront blocked";
         ));
         assert!(!is_apple_opaque_auth_response("incorrect password"));
         assert!(!is_apple_opaque_auth_response("2FA code is required"));
-        // Код из «немых» должен относиться ко входу, а не встретиться где попало.
-        assert!(!is_apple_opaque_auth_response("download failed: HTTP 404"));
-        // Обычный отказ со статусом 200 — прежнее поведение: пробуем второй движок.
-        assert!(!is_apple_opaque_auth_response(
-            "Login error: something went wrong (status=200)"
-        ));
-    }
-
-    #[test]
-    fn opaque_apple_login_is_recognised_without_detailed_errors() {
-        // Обычный режим: технический хвост отрезан, от вывода движка остаётся
-        // только готовая фраза. Именно её видит login_catalog_with_fallback —
-        // по ней он и должен остановить переход на второй движок.
-        let _detailed = with_detailed_errors(false);
-        for raw in [
-            "Login error: something went wrong (status=403)",
-            "Login error: something went wrong (status=500)",
-            "authentication request failed after 3 attempts (HTTP 204, 404, 404): Apple returned no usable authentication response",
-        ] {
-            let shown = format_login_error(raw, "secret-password");
-            assert!(shown.starts_with(APPLE_UNAVAILABLE_MARKER), "{shown}");
-            assert!(is_apple_opaque_auth_response(&shown), "{shown}");
-            assert!(!shown.contains("status="), "технический хвост попал в обычный режим");
-            // Пароль не обвиняем и к коду 2FA не отсылаем.
-            assert!(shown.contains("Пароль менять не нужно"), "{shown}");
-            assert!(!is_fatal_account_error(&shown), "{shown}");
-            assert!(!is_two_factor_error(&shown), "{shown}");
-        }
-        let plain = format_login_error("Login error: something went wrong (status=200)", "x");
-        assert!(plain.starts_with("SIGNUM_LOGIN_OPAQUE:"), "{plain}");
-        assert!(!is_apple_opaque_auth_response(&plain));
-        let wrong = format_login_error("Login error: Your Apple ID or password is incorrect.", "x");
-        assert!(!is_apple_opaque_auth_response(&wrong), "{wrong}");
-    }
-
-    #[test]
-    fn saved_login_error_carries_no_internal_marker() {
-        assert_eq!(
-            without_login_marker(&format!("{APPLE_UNAVAILABLE_MARKER} Apple сейчас не принимает вход.")),
-            "Apple сейчас не принимает вход."
-        );
-        assert_eq!(without_login_marker("SIGNUM_LOGIN_OPAQUE: Apple отклонил вход."), "Apple отклонил вход.");
-        assert_eq!(without_login_marker("Неверный Apple ID или пароль."), "Неверный Apple ID или пароль.");
-    }
-
-    #[test]
-    fn opaque_apple_status_reports_the_code_the_engine_gave_up_on() {
-        assert_eq!(apple_opaque_auth_status("login error: something went wrong (status=301)"), Some(301));
-        assert_eq!(
-            apple_opaque_auth_status("authentication request failed after 3 attempts (http 500, 204, 404)"),
-            Some(404)
-        );
-        assert_eq!(apple_opaque_auth_status("login error: rate limited by apple (http 429): <html>"), None);
-        assert_eq!(apple_opaque_auth_status("list-versions error: http 500"), None);
-    }
-
-    /// Счётчик отмены KBSync общий на процесс — тесты с ним идут по одному.
-    static KBSYNC_CANCEL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[test]
-    fn kbsync_cancel_survives_overlapping_commands() {
-        let _serial = KBSYNC_CANCEL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert!(!kbsync_cancel_requested());
-        let logout = KbsyncCancelGuard::new();
-        assert!(kbsync_cancel_requested());
-        // Вторая команда (вход во время выхода, двойной щелчок).
-        let login = KbsyncCancelGuard::new();
-        drop(logout);
-        // Первая закончилась, вторая ещё работает — отмена обязана держаться.
-        assert!(kbsync_cancel_requested(), "отмена снята раньше времени");
-        drop(login);
-        assert!(!kbsync_cancel_requested());
-    }
-
-    #[test]
-    fn kbsync_cancel_guard_forgets_presence_check() {
-        let _serial = KBSYNC_CANCEL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *kbsync_presence_memo().lock().unwrap() = Some(KbsyncPresence {
-            email: "user@example.com".into(),
-            ready: true,
-            checked_at: Instant::now(),
-        });
-        drop(KbsyncCancelGuard::new());
-        assert!(kbsync_presence_memo().lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn kbsync_presence_is_asked_once_per_account() {
-        let checked_at = Instant::now();
-        let known = |ready: bool| KbsyncPresence {
-            email: "user@example.com".into(),
-            ready,
-            checked_at,
-        };
-        let soon = checked_at + Duration::from_secs(5);
-        let later = checked_at + KBSYNC_PRESENCE_RETRY + Duration::from_secs(1);
-        assert!(kbsync_presence_needs_check(None, "user@example.com", soon));
-        // Blob на месте — больше не спрашиваем, сколько бы ни прошло.
-        assert!(!kbsync_presence_needs_check(Some(&known(true)), "user@example.com", later));
-        // Другой аккаунт — спрашиваем заново.
-        assert!(kbsync_presence_needs_check(Some(&known(true)), "other@example.com", soon));
-        // Отказ помним недолго.
-        assert!(!kbsync_presence_needs_check(Some(&known(false)), "user@example.com", soon));
-        assert!(kbsync_presence_needs_check(Some(&known(false)), "user@example.com", later));
-    }
-
-    #[test]
-    fn kbsync_stamp_is_touched_only_by_a_real_generation() {
-        // Фон зовёт движок с --refresh: blob порождён заново при любом ответе.
-        assert!(kbsync_result_is_fresh_generation(KbsyncWarm::RefreshIfStale, "generated"));
-        assert!(kbsync_result_is_fresh_generation(KbsyncWarm::RefreshIfStale, "cache"));
-        // Перед опросом версий --refresh нет: «cache» — blob просто прочитан.
-        assert!(kbsync_result_is_fresh_generation(KbsyncWarm::OnlyIfMissing, "generated"));
-        assert!(!kbsync_result_is_fresh_generation(KbsyncWarm::OnlyIfMissing, "cache"));
-    }
-
-    /// Убитый процесс оставил потомка, который держит канал вывода открытым.
-    /// Раньше чтение ждало конца потомка — на KBSync это минуты.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn killed_child_output_is_not_awaited_forever() {
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "echo started; sleep 30 & wait"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let output = Arc::new(StdMutex::new(Vec::<String>::new()));
-        let mut out_task =
-            tokio::spawn(consume_stream(child.stdout.take().unwrap(), output.clone(), None));
-        let mut err_task =
-            tokio::spawn(consume_stream(child.stderr.take().unwrap(), output.clone(), None));
-        // Дождаться первой строки: оболочка запущена и уже породила sleep.
-        for _ in 0..50 {
-            if !output.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert_eq!(output.lock().unwrap().as_slice(), ["started"]);
-        let started = Instant::now();
-        child.kill().await.unwrap();
-        drain_killed_child_output(&mut out_task, &mut err_task).await;
-        assert!(
-            started.elapsed() < KILLED_CHILD_DRAIN + Duration::from_secs(3),
-            "ждали осиротевшего потомка {:?}",
-            started.elapsed()
-        );
-    }
-
-    /// Отмена должна остановить уже запущенный процесс KBSync, а не только
-    /// не дать стартовать новому. Вместо движка — оболочка с потомком, который
-    /// живёт ещё полминуты и держит канал вывода: так ведёт себя kbsync,
-    /// собранный отдельным файлом.
-    ///
-    /// Запускается вручную: `run_process_inner` перед запуском приводит в
-    /// порядок настоящую папку сессии ipatool, а обычным тестам чужие файлы
-    /// трогать незачем.  `cargo test -- --ignored kbsync_cancel_stops`
-    #[cfg(unix)]
-    #[tokio::test]
-    #[ignore = "трогает настоящую папку сессии ipatool; запускать вручную"]
-    async fn kbsync_cancel_stops_a_running_process() {
-        let _serial = KBSYNC_CANCEL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Последний аргумент достаётся оболочке как $0 — по нему
-        // run_process_inner и узнаёт запуск KBSync.
-        let args: Vec<String> = ["-c", "sleep 30 & wait", "kbsync"]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        let started = Instant::now();
-        let run = tokio::spawn(async move {
-            run_process_inner("/bin/sh", &args, Duration::from_secs(60), None, true, false).await
-        });
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(!run.is_finished(), "без отмены процесс должен работать");
-        let logout = KbsyncCancelGuard::new();
-        let result = run.await.unwrap();
-        drop(logout);
-        assert_eq!(result, Err(KBSYNC_CANCELLED.to_string()));
-        assert!(
-            started.elapsed() < Duration::from_secs(6),
-            "отмена заняла {:?}",
-            started.elapsed()
-        );
-        // Отмена снята — следующий запуск идёт до конца.
-        let quick: Vec<String> = ["-c", "echo ok", "kbsync"].into_iter().map(str::to_string).collect();
-        let output = run_process_inner("/bin/sh", &quick, Duration::from_secs(10), None, true, false)
-            .await
-            .unwrap();
-        assert_eq!(output.trim(), "ok");
     }
 
     #[test]
@@ -22292,7 +22061,7 @@ Download error: storefront blocked";
         assert_eq!(std::fs::read(&staged).unwrap(), b"engine-one");
         assert_eq!(std::fs::read(stage.join("sapsigner")).unwrap(), b"signer");
         assert_eq!(std::fs::read(stage.join("libhelper.dylib")).unwrap(), b"library");
-        // Движок в новой папке — по-прежнему Go-движок, и подписчик у него рядом.
+        // Рядом с движком лежит подписчик — это всё ещё Go-движок.
         let staged_text = staged.to_string_lossy().into_owned();
         assert!(!is_cpp_ipatool(&staged_text));
         assert_eq!(
@@ -22304,165 +22073,46 @@ Download error: storefront blocked";
             use std::os::unix::fs::PermissionsExt;
             for name in ["ipatool", "sapsigner"] {
                 let mode = std::fs::metadata(stage.join(name)).unwrap().permissions().mode();
-                assert_eq!(mode & 0o111, 0o111, "{name} должен запускаться");
+                assert_eq!(mode & 0o111, 0o111, "{name} должен быть исполняемым");
             }
         }
 
-        // Второй вызов ничего не переписывает: метка того же размера на месте.
+        // Повторный вызов ничего не перезаписывает: видим ту же копию.
         std::fs::write(&staged, b"engine-XXX").unwrap();
         stage_engine_with_signer(&v4.join("ipatool"), &v2.join("sapsigner"), &stage).unwrap();
         assert_eq!(std::fs::read(&staged).unwrap(), b"engine-XXX");
 
-        // Приложение обновилось — движок другой, папка обновляется.
+        // Изменился исходный движок — копия обновляется.
         std::fs::write(v4.join("ipatool"), b"engine-two-longer").unwrap();
         stage_engine_with_signer(&v4.join("ipatool"), &v2.join("sapsigner"), &stage).unwrap();
         assert_eq!(std::fs::read(&staged).unwrap(), b"engine-two-longer");
 
-        // Пропавший из папки файл возвращается.
+        // Пропавший файл копии возвращается.
         std::fs::remove_file(stage.join("sapsigner")).unwrap();
         stage_engine_with_signer(&v4.join("ipatool"), &v2.join("sapsigner"), &stage).unwrap();
         assert_eq!(std::fs::read(stage.join("sapsigner")).unwrap(), b"signer");
 
-        // Нет подписчика — честная ошибка, а не полупустая папка.
+        // Без подписчика — честная ошибка, а не пустая папка.
         assert!(stage_engine_with_signer(&v4.join("ipatool"), &v2.join("missing"), &stage).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn ideviceinstaller_install_command_is_recognised_on_any_path_style() {
-        let install = ["-u".to_string(), "00008030-000000000000002E".into(), "install".into(), "app.ipa".into()];
-        assert!(is_ideviceinstaller_install_command(r"C:\Signum\support\ideviceinstaller.exe", &install));
-        assert!(is_ideviceinstaller_install_command("/opt/signum/support/ideviceinstaller", &install));
-        assert!(is_ideviceinstaller_install_command("ideviceinstaller", &["upgrade".into(), "app.ipa".into()]));
-        assert!(!is_ideviceinstaller_install_command("ideviceinstaller.exe", &["list".into(), "--user".into()]));
-        assert!(!is_ideviceinstaller_install_command(r"C:\Signum\v5\ipatool.exe", &install));
-    }
-
-    #[test]
-    fn ideviceinstaller_upload_done_is_not_a_finished_install() {
-        fn lines(text: &str) -> Vec<String> {
-            text.lines().map(str::to_string).collect()
-        }
-        // Вывод из отчёта пользователя: IPA залит, команда установки ушла,
-        // ответа телефона ещё нет. Это НЕ успех.
-        let uploaded = "WARNING: could not locate iTunesMetadata.plist in archive!\n\
-                        WARNING: could not locate Payload/App.app/SC_Info/App.sinf in archive!\n\
-                        DONE.\nInstalling 'com.example.app'";
-        assert!(!ideviceinstaller_install_completed(&lines(uploaded)));
-        assert!(!ideviceinstaller_install_completed(&lines(
-            "Copying 'app.ipa' to device... DONE.\nInstalling 'com.example.app'\nInstall: CreatingStagingDirectory (5%)\nInstall: InstallingApplication (60%)"
-        )));
-        // Отказ телефона приходит после «Installing» — успехом он не станет.
-        assert!(!ideviceinstaller_install_completed(&lines(&format!(
-            "{uploaded}\nERROR: Install failed. Got error \"APIInternalError\" with code 0xe8008001: verification failed"
-        ))));
-        assert!(!ideviceinstaller_install_completed(&lines(&format!(
-            "{uploaded}\nInstall: Complete\nERROR: Install failed. Got error \"ApplicationVerificationFailed\"."
-        ))));
-        // Настоящее окончание: статус Complete от installd.
-        assert!(ideviceinstaller_install_completed(&lines(&format!(
-            "{uploaded}\nInstall: CreatingStagingDirectory (5%)\nInstall: GeneratingApplicationMap (90%)\nInstall: Complete"
-        ))));
-        assert!(ideviceinstaller_install_completed(&lines("Upgrading 'com.example.app'\nUpgrade: Complete")));
-        assert!(ideviceinstaller_install_completed(&lines("Installing 'com.example.app'\nInstall - Complete")));
-        assert!(!ideviceinstaller_install_completed(&[]));
-    }
-
-    #[test]
-    fn upgrade_retry_follows_a_real_install_refusal_only() {
-        let _detailed = with_detailed_errors(false);
-        let refused = format_process_error(
-            "ideviceinstaller.exe",
-            128,
-            "Installing 'com.example.app'\nERROR: Install failed. Got error \"ApplicationAlreadyInstalled\".",
-        );
-        assert!(install_failure_allows_upgrade_retry(&refused, false));
-        // Отменённое задание, пропавший телефон, таймаут и незапустившийся
-        // инструмент второй заход не исправит.
-        assert!(!install_failure_allows_upgrade_retry(&refused, true));
-        assert!(!install_failure_allows_upgrade_retry(&device_not_found_message(), false));
-        let timeout = format!("{PROCESS_TIMEOUT_PREFIX} (360 с). Проверьте подключение и повторите попытку.");
-        assert!(is_process_timeout_error(&timeout));
-        assert!(!install_failure_allows_upgrade_retry(&timeout, false));
-        assert!(!install_failure_allows_upgrade_retry(
-            "Не удалось запустить ideviceinstaller.exe: отказано в доступе",
-            false
-        ));
-    }
-
-    #[test]
-    fn timed_out_install_is_not_excused_by_sinf_warnings() {
-        // Подробные ошибки включены: к таймауту приклеен вывод процесса.
-        let _detailed = with_detailed_errors(true);
+    fn ideviceinstaller_complete_marker_ends_successful_install() {
         let output = "WARNING: could not locate iTunesMetadata.plist in archive!\n\
                       WARNING: could not locate Payload/App.app/SC_Info/App.sinf in archive!\n\
-                      Copying 'app.ipa' to device... DONE.\nInstalling 'com.example.app'";
-        let timeout = with_technical_detail(
-            &format!("{PROCESS_TIMEOUT_PREFIX} (360 с). Проверьте подключение и повторите попытку."),
-            output,
-        );
-        assert!(timeout.contains(".sinf"), "в тексте должен быть вывод процесса");
-        assert!(is_process_timeout_error(&timeout));
-        assert!(!is_sinf_warning_only_install_output(&timeout));
-        // Сами по себе предупреждения по-прежнему безобидны.
-        assert!(is_sinf_warning_only_install_output(output));
-        DETAILED_ERRORS_ENABLED.store(false, Ordering::Relaxed);
-    }
-
-    #[test]
-    fn install_error_prefers_the_answer_that_names_a_cause() {
-        let generic = "Не удалось выполнить операцию. Проверьте Apple ID, подключение iPhone и повторите попытку.".to_string();
-        let specific = "iPhone отклонил приложение при проверке. Переподключите устройство и повторите установку.".to_string();
-        let timeout = format!("{PROCESS_TIMEOUT_PREFIX} (360 с). Проверьте подключение и повторите попытку.");
-        assert_eq!(pick_install_error(generic.clone(), specific.clone()), specific);
-        assert_eq!(pick_install_error(specific.clone(), generic.clone()), specific);
-        assert_eq!(pick_install_error(generic.clone(), timeout), generic);
-        assert_eq!(
-            pick_install_error(specific, device_not_found_message()),
-            device_not_found_message()
-        );
-    }
-
-    #[test]
-    fn timed_out_install_counts_only_when_the_same_build_is_on_the_phone() {
-        let on_phone = |version: Option<&str>| -> HashMap<String, InstalledApp> {
-            HashMap::from([(
-                "com.example.app".to_string(),
-                InstalledApp {
-                    bundle_id: "com.example.app".into(),
-                    name: Some("Example".into()),
-                    version: version.map(str::to_string),
-                    app_store_id: None,
-                    is_placeholder: false,
-                },
-            )])
-        };
-        assert!(installed_app_matches_ipa(&on_phone(Some("2.4.1")), "com.example.app", Some("2.4.1")));
-        // Стояла прежняя версия — значит, новая не встала.
-        assert!(!installed_app_matches_ipa(&on_phone(Some("2.3.0")), "com.example.app", Some("2.4.1")));
-        assert!(!installed_app_matches_ipa(&on_phone(Some("2.4.1")), "com.other.app", Some("2.4.1")));
-        // Версию не узнать — не гадаем.
-        assert!(!installed_app_matches_ipa(&on_phone(None), "com.example.app", Some("2.4.1")));
-        assert!(!installed_app_matches_ipa(&on_phone(Some("2.4.1")), "com.example.app", None));
-        assert!(!installed_app_matches_ipa(&HashMap::new(), "com.example.app", Some("2.4.1")));
-
-        let fresh = on_phone(Some("2.4.1"));
-        let old = on_phone(Some("2.3.0"));
-        let empty = HashMap::new();
-        let landed = |before: Option<&HashMap<String, InstalledApp>>, after| {
-            timed_out_install_landed(before, after, "com.example.app", Some("2.4.1"))
-        };
-        // Не было — появилось; стояла старая — обновилась.
-        assert!(landed(Some(&empty), &fresh));
-        assert!(landed(Some(&old), &fresh));
-        // Та же версия стояла и до установки (перевыпуск подписи): по списку
-        // не отличить новую копию от старой — успехом не считаем.
-        assert!(!landed(Some(&fresh), &fresh));
-        // Не встало.
-        assert!(!landed(Some(&empty), &empty));
-        assert!(!landed(Some(&old), &old));
-        // Снимка до установки нет — не гадаем.
-        assert!(!landed(None, &fresh));
+                      DONE.\nInstalling 'com.example.app'";
+        let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
+        assert!(!ideviceinstaller_install_completed(&lines(output)));
+        assert!(ideviceinstaller_install_completed(&lines(
+            "Installing 'com.example.app'\nInstall: Complete"
+        )));
+        assert!(ideviceinstaller_install_completed(&lines(
+            "Upgrading 'com.example.app'\nUpgrade - Complete"
+        )));
+        assert!(!ideviceinstaller_install_completed(&lines(
+            "Installing 'com.example.app'\nInstall: Complete\nERROR: APIInternalError"
+        )));
     }
 
     #[test]

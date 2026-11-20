@@ -129,6 +129,9 @@ function localizeError(message: string): string {
   if (raw.startsWith("SIGNUM_APPLE_UNAVAILABLE:")) {
     return raw.slice("SIGNUM_APPLE_UNAVAILABLE:".length).trim().replace(URL_PATTERN, "");
   }
+  if (raw.startsWith("SIGNUM_APPLE_UNAVAILABLE:")) {
+    return raw.slice("SIGNUM_APPLE_UNAVAILABLE:".length).trim().replace(URL_PATTERN, "");
+  }
 
                                                                              
   if (

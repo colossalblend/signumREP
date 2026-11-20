@@ -507,7 +507,8 @@ export default function Settings() {
               <div className="text-xs font-semibold text-slate-200">Прокси для Apple</div>
               <p className="mt-1 text-[11px] leading-4 text-slate-500">
                 Нужен там, где Apple недоступна напрямую. Работает и для загрузок — VPN
-                включать не требуется.
+                включать не требуется. Если выключено, Signum сам берёт системный прокси
+                (его выставляют VPN-клиенты), когда тот отвечает.
               </p>
             </div>
             <ToggleSwitch

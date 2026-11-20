@@ -1,0 +1,1 @@
+"""Signum desktop application package."""

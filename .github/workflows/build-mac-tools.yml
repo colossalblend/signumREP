@@ -1,0 +1,268 @@
+name: Build macOS tools
+
+# Собирает нативные инструменты для Apple Silicon.
+#
+# Зачем через Actions: своего мака на M-процессоре нет, а на Intel такие бинари
+# не собрать. Без них Signum на Apple Silicon запускает устройства и подпись
+# через Rosetta — а её Apple постепенно убирает, и без неё запуск падает с
+# «Bad CPU type in executable».
+#
+# Ничего закрытого сюда не попадает: всё строится из открытых исходников.
+# Запечатанный контейнер FairPlay (assets.bin) нужен только при работе и в
+# сборке не участвует.
+
+"on":
+  workflow_dispatch:
+    inputs:
+      what:
+        description: "Что собирать"
+        required: false
+        default: "all"
+        type: choice
+        options: ["all", "device-tools", "kbsync", "zsign"]
+
+permissions:
+  contents: read
+
+jobs:
+  tools:
+    name: Apple Silicon tools
+    runs-on: macos-15          # Apple Silicon (macos-14 retired)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Показать машину
+        run: |
+          uname -m
+          sw_vers
+
+      # ── Инструменты работы с устройством ──────────────────────────────────
+      # Ставим из Homebrew, затем переписываем ссылки на @executable_path и
+      # кладём библиотеки рядом — чтобы на маке пользователя не требовалось
+      # ни Homebrew, ни загрузок.
+      - name: Инструменты устройства
+        if: inputs.what == 'all' || inputs.what == 'device-tools'
+        run: |
+          set -eux
+          brew install libimobiledevice ideviceinstaller
+          OUT="$GITHUB_WORKSPACE/out/macos-arm64/support"
+          mkdir -p "$OUT"
+          for tool in ideviceinfo ideviceinstaller idevicepair; do
+            cp "$(brew --prefix)/bin/$tool" "$OUT/"
+          done
+          python3 - "$OUT" <<'PY'
+          import os, subprocess, sys, shutil
+
+          # Тянем зависимости рекурсивно: у ideviceinstaller их несколько
+          # уровней, и пропустить хоть одну значит получить у пользователя
+          # ошибку загрузки вместо приложения.
+          out = sys.argv[1]
+          brew = subprocess.run(["brew", "--prefix"], capture_output=True, text=True).stdout.strip()
+
+
+          def deps(path):
+              lines = subprocess.run(["otool", "-L", path], capture_output=True, text=True).stdout.splitlines()[1:]
+              return [l.split()[0] for l in lines if l.strip()]
+
+
+          pending = [os.path.join(out, f) for f in os.listdir(out)]
+          seen = set()
+          while pending:
+              item = pending.pop()
+              for dep in deps(item):
+                  if dep.startswith("/usr/lib") or dep.startswith("/System"):
+                      continue
+                  name = os.path.basename(dep)
+                  target = os.path.join(out, name)
+                  if name not in seen:
+                      seen.add(name)
+                      source = dep if os.path.isfile(dep) else os.path.join(brew, "lib", name)
+                      if os.path.isfile(source):
+                          shutil.copy(source, target)
+                          os.chmod(target, 0o755)
+                          pending.append(target)
+                  subprocess.run(["install_name_tool", "-change", dep,
+                                  "@executable_path/" + name, item], check=False)
+              if item.endswith(".dylib"):
+                  subprocess.run(["install_name_tool", "-id",
+                                  "@executable_path/" + os.path.basename(item), item], check=False)
+              subprocess.run(["codesign", "--force", "--sign", "-", item], check=False)
+          print("собрано файлов:", len(os.listdir(out)))
+          PY
+          ls -la "$OUT"
+
+      # ── kbsync ────────────────────────────────────────────────────────────
+      # Порождение подтверждения FairPlay. Исходник открытый; наша правка —
+      # снятие сторожевого хука памяти, из-за которого счёт шёл 138 секунд
+      # вместо 8.5 (хук в Unicorn отключает быстрый путь к памяти целиком).
+      - name: kbsync
+        if: inputs.what == 'all' || inputs.what == 'kbsync'
+        run: |
+          set -eux
+          brew install unicorn go
+          git clone --depth 1 https://github.com/t0rr3sp3dr0/sapsigner.git /tmp/sapsigner
+          cd /tmp/sapsigner/impl/emu
+
+          # Снимаем сторожевой хук: защита переделана на пустую страницу между
+          # мостами, а выход за границу ловит сам Unicorn — без потери скорости.
+          python3 - <<'PY'
+          import io
+          p = "mescal/emulator/bridge.go"
+          s = io.open(p, encoding="utf-8").read()
+          old = (
+              "\thookMT := unicorn.HOOK_MEM_READ | unicorn.HOOK_MEM_WRITE\n"
+              "\n"
+              "\thookCB := func(uc unicorn.Unicorn, access int, addr uint64, size int, value int64) {\n"
+              "\t\terr := fmt.Errorf(\"emulator bridge segmentation fault: 0x%016X\", addr)\n"
+              "\t\tpanic(err)\n"
+              "\t}\n"
+              "\n"
+              "\thookBA := addr + uint64(len(data))\n"
+              "\n"
+              "\thookEA := nextBridgeAddr - 1\n"
+              "\n"
+              "\thook, err := uc.HookAdd(hookMT, hookCB, hookBA, hookEA)\n"
+              "\tif err != nil {\n"
+              "\t\treturn nil, err\n"
+              "\t}\n"
+          )
+          if old not in s:
+              raise SystemExit("bridge.go: блок HookAdd не найден, патч не применить")
+          s = s.replace(old, "\tvar hook unicorn.Hook\n")
+          s = s.replace("nextBridgeAddr += size", "nextBridgeAddr += size + pageSize", 1)
+          s = s.replace(
+              "\tif err := b.uc.HookDel(b.hook); err != nil {\n\t\treturn err\n\t}\n",
+              "\t_ = b.hook\n",
+          )
+          if "fmt." not in s:
+              s = s.replace('\t"fmt"\n', "")
+          io.open(p, "w", encoding="utf-8", newline="").write(s)
+          print("сторож снят")
+          PY
+
+          # Привязки unicorn передают size_t там, где заголовки 2.1 ждут uint64_t.
+          go mod download github.com/unicorn-engine/unicorn
+          MOD=$(go env GOMODCACHE)/github.com/unicorn-engine/unicorn@*
+          LOCAL=/tmp/unicorn-go-patched
+          mkdir -p "$LOCAL" && cp -R $MOD/. "$LOCAL"/ && chmod -R u+w "$LOCAL"
+          python3 - "$LOCAL" <<'PY'
+          import io, os, sys
+          p = os.path.join(sys.argv[1], "bindings/go/unicorn/unicorn.go")
+          lines = io.open(p, encoding="utf-8").read().split("\n")
+          n = 0
+          for i, line in enumerate(lines):
+              if "C.uc_mem_" in line and "C.size_t(" in line:
+                  lines[i] = line.replace("C.size_t(", "C.uint64_t(")
+                  n += 1
+          io.open(p, "w", encoding="utf-8", newline="").write("\n".join(lines))
+          print("исправлено строк:", n)
+          PY
+          go mod edit -replace "github.com/unicorn-engine/unicorn=$LOCAL"
+
+          export CGO_LDFLAGS_ALLOW='.*'
+          UC=$(brew --prefix unicorn)
+          CGO_CFLAGS="-I$UC/include" CGO_LDFLAGS="-L$UC/lib -lunicorn" \
+            go build -trimpath -o /tmp/kbsync ./cmd/kbsync
+          CGO_CFLAGS="-I$UC/include" CGO_LDFLAGS="-L$UC/lib -lunicorn" \
+            go build -trimpath -o /tmp/sapsigner ./cmd/sapsigner
+
+          OUT="$GITHUB_WORKSPACE/out/macos-arm64/v5"
+          OUT_V2="$GITHUB_WORKSPACE/out/macos-arm64/v2"
+          mkdir -p "$OUT"
+          mkdir -p "$OUT_V2"
+          cp /tmp/kbsync "$OUT/"
+          cp /tmp/sapsigner "$OUT_V2/"
+          chmod +x "$OUT_V2/sapsigner"
+          codesign --force --sign - "$OUT_V2/sapsigner"
+          # Signum ищет рядом с kbsync ровно libunicorn.2.dylib — не сырое
+          # имя из Homebrew (там бывает libunicorn.2.1.2.dylib).
+          SRC_DY=$(ls $UC/lib/libunicorn.*.dylib | head -1)
+          cp "$SRC_DY" "$OUT/libunicorn.2.dylib"
+          cp "$SRC_DY" "$OUT_V2/libunicorn.2.dylib"
+          chmod u+w "$OUT/libunicorn.2.dylib"
+          chmod u+w "$OUT_V2/libunicorn.2.dylib"
+          install_name_tool -change "$SRC_DY" "@loader_path/libunicorn.2.dylib" "$OUT/kbsync"
+          install_name_tool -change "$SRC_DY" "@loader_path/libunicorn.2.dylib" "$OUT_V2/sapsigner"
+          install_name_tool -id "@loader_path/libunicorn.2.dylib" "$OUT/libunicorn.2.dylib"
+          install_name_tool -id "@loader_path/libunicorn.2.dylib" "$OUT_V2/libunicorn.2.dylib"
+          codesign --force --sign - "$OUT/libunicorn.2.dylib"
+          codesign --force --sign - "$OUT_V2/libunicorn.2.dylib"
+          codesign --force --sign - "$OUT/kbsync"
+          codesign --force --sign - "$OUT_V2/sapsigner"
+          otool -L "$OUT/kbsync" | head -5
+          lipo -archs "$OUT/kbsync"
+
+      # ── zsign ─────────────────────────────────────────────────────────────
+      # Подпись своим сертификатом. На macOS и Linux его вообще не было в
+      # пакете — код искал его в PATH, где у обычного человека его нет.
+      - name: zsign
+        if: always() && (inputs.what == 'all' || inputs.what == 'zsign')
+        run: |
+          set -eux
+          brew install openssl@3 minizip
+          git clone --depth 1 https://github.com/zhlynn/zsign.git /tmp/zsign
+          brew install pkg-config openssl@3
+          OPENSSL=$(brew --prefix openssl@3)
+          export PKG_CONFIG_PATH="$OPENSSL/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          make -C /tmp/zsign/build/macos -j4
+          BIN=$(find /tmp/zsign/build/macos /tmp/zsign -maxdepth 3 -type f -name zsign | head -1)
+          [ -n "$BIN" ] && [ -f "$BIN" ]
+          cp "$BIN" /tmp/zsign-bin
+          OUT="$GITHUB_WORKSPACE/out/macos-arm64/support"
+          mkdir -p "$OUT"
+          cp /tmp/zsign-bin "$OUT/zsign"
+          chmod +x "$OUT/zsign"
+          # openssl/minizip из Homebrew на машине пользователя нет — кладём
+          # рядом и переписываем ссылки, как у idevice*.
+          python3 - "$OUT" "$OUT/zsign" <<'PY'
+          import os, subprocess, sys, shutil
+          out, zsign = sys.argv[1], sys.argv[2]
+          brew = subprocess.run(["brew", "--prefix"], capture_output=True, text=True).stdout.strip()
+
+          def deps(path):
+              lines = subprocess.run(["otool", "-L", path], capture_output=True, text=True).stdout.splitlines()[1:]
+              return [l.split()[0] for l in lines if l.strip()]
+
+          pending = [zsign]
+          seen = set()
+          while pending:
+              item = pending.pop()
+              for dep in deps(item):
+                  if dep.startswith("/usr/lib") or dep.startswith("/System"):
+                      continue
+                  name = os.path.basename(dep)
+                  target = os.path.join(out, name)
+                  if name not in seen:
+                      seen.add(name)
+                      source = dep if os.path.isfile(dep) else os.path.join(brew, "lib", name)
+                      if os.path.isfile(source):
+                          shutil.copy(source, target)
+                          os.chmod(target, 0o755)
+                          pending.append(target)
+                  subprocess.run(["install_name_tool", "-change", dep,
+                                  "@executable_path/" + name, item], check=False)
+              if item.endswith(".dylib"):
+                  subprocess.run(["install_name_tool", "-id",
+                                  "@executable_path/" + os.path.basename(item), item], check=False)
+              subprocess.run(["codesign", "--force", "--sign", "-", item], check=False)
+          print("zsign deps:", sorted(os.listdir(out)))
+          PY
+          otool -L "$OUT/zsign" | head -8
+          lipo -archs "$OUT/zsign"
+
+      - name: Собрать сведения о сборке
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cd "$GITHUB_WORKSPACE/out"
+          find . -type f -exec shasum -a 256 {} \; > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Выложить результат
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signum-macos-arm64-tools
+          path: out/
+          if-no-files-found: error

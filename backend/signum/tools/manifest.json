@@ -1,0 +1,70 @@
+﻿{
+    "schema_version":  1,
+    "generated_at":  "2026-08-22T09:19:51.7294076Z",
+    "targets":  {
+                    "windows-x64":  {
+                                        "ipatool-v2":  {
+                                                           "version":  "3.9.9.2",
+                                                           "file":  "ipatool-v2-3.9.9.2.exe",
+                                                           "sha256":  "e941416052884e1ad06631f0dc5d16b12e9b25086c2e54bc1e024d195e4603fa",
+                                                           "size":  5697536
+                                                       },
+                                        "ipatool-v3":  {
+                                                           "version":  "3.0.0-legacy",
+                                                           "file":  "ipatool-v3-3.0.0-legacy.exe",
+                                                           "sha256":  "be7e2ca296c7ae96c530d1262bfb85892bc11094df6fe5303bbad8235f9f4f11",
+                                                           "size":  5722624
+                                                       },
+                                        "anisette":  {
+                                                         "version":  "3.0.0-legacy",
+                                                         "file":  "anisette-3.0.0-legacy.exe",
+                                                         "sha256":  "b1151e3fc1b550b1dfe07dd81f922203413ae45b3a05a2c592b875451f864712",
+                                                         "size":  261632
+                                                     }
+                                    },
+                    "macos-x64":  {
+                                      "ipatool-v2":  {
+                                                         "version":  "3.9.9.2",
+                                                         "file":  "ipatool-v2-3.9.9.2",
+                                                         "sha256":  "da94471f68bc2b6afa694aba8927a7f711a8a3882c68a453feed5230a134c7eb",
+                                                         "size":  6639160
+                                                     },
+                                      "ipatool-v3":  {
+                                                         "version":  "3.0.0-legacy",
+                                                         "file":  "ipatool-v3-3.0.0-legacy",
+                                                         "sha256":  "29143fe752e5c18b3957bfefd41594382430f1dcfb541e7ba900a07fbf0d7626",
+                                                         "size":  6693248
+                                                     }
+                                  },
+                    "macos-arm64":  {
+                                        "ipatool-v2":  {
+                                                           "version":  "3.9.9.2",
+                                                           "file":  "ipatool-v2-3.9.9.2",
+                                                           "sha256":  "2f9251a77c157daaeb63377887a7a0bbccf320efb0f3b39bfcaab5f244c9f552",
+                                                           "size":  6171304
+                                                       },
+                                        "ipatool-v3":  {
+                                                           "version":  "3.0.0-legacy",
+                                                           "file":  "ipatool-v3-3.0.0-legacy",
+                                                           "sha256":  "e7b023d463d210e88984252ce9f4f0fca75af4dcbcddecec2a974fdacea520a4",
+                                                           "size":  6241752
+                                                       }
+                                    },
+                    "linux-x64":  {
+                                      "ipatool-v2":  {
+                                                         "version":  "3.9.9.2",
+                                                         "file":  "ipatool-v2-3.9.9.2",
+                                                         "sha256":  "e515ed7cbe3df593fd62f53ac6b3588b5600eaa1449de84cb70218e707f7e246",
+                                                         "size":  6361344
+                                                     }
+                                  },
+                    "linux-arm64":  {
+                                        "ipatool-v2":  {
+                                                           "version":  "3.9.9.2",
+                                                           "file":  "ipatool-v2-3.9.9.2",
+                                                           "sha256":  "0908ab7536ae650ca19094082bab2ab2b1322e0feb3cbf9ec97622ff0ae2f786",
+                                                           "size":  5636144
+                                                       }
+                                    }
+                }
+}
