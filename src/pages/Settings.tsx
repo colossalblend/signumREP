@@ -128,7 +128,7 @@ export default function Settings() {
   const [cache, setCache] = useState("—");
   const [ota, setOta] = useState<OtaUpdateInfo | null>(null);
   const [otaPercent, setOtaPercent] = useState(0);
-  const [appVersion, setAppVersion] = useState<AppVersionInfo>({ version: "1.1.1", build: "17", beta: false });
+  const [appVersion, setAppVersion] = useState<AppVersionInfo>({ version: "1.2.3", build: "41", beta: false });
   const [randomPassphrase, setRandomPassphrase] = useState("");
   const [cachedIpas, setCachedIpas] = useState<CachedIpa[]>([]);
   const [devMenuUnlocked, setDevMenuUnlocked] = useState(() => sessionStorage.getItem("signum-dev-menu") === "1");

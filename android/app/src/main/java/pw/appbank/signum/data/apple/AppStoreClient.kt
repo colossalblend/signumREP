@@ -73,6 +73,7 @@ class AppStoreClient(
      * itself (empty failureType + MZFinance.BadLogin customer message), which
      * both sends the push and accepts the code on resubmit.
      */
+    @Synchronized
     fun login(email: String, password: String, code: String?): LoginResult {
         val em = email.trim().lowercase(Locale.US)
         if (em.isBlank() || password.isBlank()) error("Введите Apple ID и пароль")
@@ -111,6 +112,7 @@ class AppStoreClient(
      * saved password. Kept as `authenticate(force)` for the download/purchase
      * callers; throws (asking for re-login) if Apple now wants a fresh 2FA code.
      */
+    @Synchronized
     fun authenticate(force: Boolean = false): Boolean {
         if (!force) {
             restoreTokens()
@@ -450,6 +452,7 @@ class AppStoreClient(
      * семейные покупки, часть старых), поэтому интерфейс помечает список как
      * неполный. Окна по годам — у эндпоинта нет диапазона «всё сразу».
      */
+    @Synchronized
     fun listPurchasesViaLibrary(): List<pw.appbank.signum.data.models.PurchaseHistoryApp> {
         restoreTokens()
         if (!isReady()) {
@@ -605,6 +608,7 @@ class AppStoreClient(
         }
     }
 
+    @Synchronized
     fun listVersionIds(adamId: String, force: Boolean = false): List<String> {
         val key = adamId.trim()
         if (key.isEmpty()) return emptyList()
@@ -653,6 +657,7 @@ class AppStoreClient(
         return found
     }
 
+    @Synchronized
     fun versionDisplay(adamId: String, externalVersionId: String): String {
         val ext = externalVersionId.trim()
         if (ext.isEmpty() || ext == "latest") return ext
@@ -690,6 +695,7 @@ class AppStoreClient(
         return listVersionIds(adam, force).isNotEmpty()
     }
 
+    @Synchronized
     fun purchaseAndDownload(
         adamId: String,
         dest: File,
@@ -700,7 +706,14 @@ class AppStoreClient(
         ensureAuth()
         onProgress(8f, "Покупка в App Store…")
         if (!alreadyOwned) {
-            runCatching { buy(adamId) }
+            runCatching { buy(adamId) }.onFailure { error ->
+                val message = error.message.orEmpty().lowercase()
+                val alreadyOwnedResponse = "already" in message ||
+                    "уже" in message && ("куп" in message || "приобр" in message) ||
+                    "purchased" in message
+                if (!alreadyOwnedResponse) throw error
+                Log.i("SignumStore", "buy skipped: app is already owned")
+            }
         }
         onProgress(22f, "Запрашиваем IPA…")
         val plist = downloadPlist(adamId, purchase = true, externalVersionId = externalVersionId, acceptTerms = true)
@@ -834,11 +847,25 @@ class AppStoreClient(
                 val rangeTotal = range?.substringAfter('/')?.toLongOrNull()
                 val expected = rangeTotal
                     ?: if (bodyLen > 0) have + bodyLen else knownExpected
+                // Some CDN edges ignore Range and return a complete 200 body.
+                // Appending that body to the partial file would corrupt the IPA
+                // and make the retry loop believe the file is still incomplete.
                 val append = have > 0 && (code == 206 || range != null)
+                val effectiveHave = if (have > 0 && !append) {
+                    dest.delete()
+                    0L
+                } else {
+                    have
+                }
+                val effectiveExpected = if (effectiveHave == 0L && !append && bodyLen > 0) {
+                    bodyLen
+                } else {
+                    expected
+                }
                 java.io.FileOutputStream(dest, append).use { out ->
                     conn.inputStream.use { input ->
                         val buf = ByteArray(64 * 1024)
-                        var read = if (append) have else 0L
+                        var read = if (append) effectiveHave else 0L
                         var sinceFlush = 0
                         while (true) {
                             val n = input.read(buf)
@@ -851,18 +878,18 @@ class AppStoreClient(
                                 sinceFlush = 0
                             }
                             val mb = read / 1024 / 1024
-                            val totalMb = if (expected > 0) "/${expected / 1024 / 1024}" else ""
-                            val pct = if (expected > 0) {
-                                35f + (read.toFloat() / expected.toFloat()) * 34f
+                            val totalMb = if (effectiveExpected > 0) "/${effectiveExpected / 1024 / 1024}" else ""
+                            val pct = if (effectiveExpected > 0) {
+                                35f + (read.toFloat() / effectiveExpected.toFloat()) * 34f
                             } else {
                                 50f
                             }
                             onProgress(pct.coerceIn(35f, 69f), "Скачиваем IPA… $mb${totalMb} МБ")
-                            if (expected > 0 && read >= expected) break
+                            if (effectiveExpected > 0 && read >= effectiveExpected) break
                         }
                     }
                 }
-                return expected
+                return effectiveExpected
             } finally {
                 conn.disconnect()
             }

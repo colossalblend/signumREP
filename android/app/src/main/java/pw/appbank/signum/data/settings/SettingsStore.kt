@@ -50,10 +50,17 @@ class SettingsStore(context: Context) {
         downloadsDir = prefs.getString("downloads_dir", "") ?: "",
         exportsDir = prefs.getString("exports_dir", "") ?: "",
         favoriteAppIds = prefs.getStringSet("favorite_app_ids", emptySet())!!.toList().sorted(),
-        ipatoolEngine = prefs.getString("ipatool_engine", "auto") ?: "auto",
+        ipatoolEngine = normalizeIpatoolEngine(prefs.getString("ipatool_engine", "auto")),
+        proxyEnabled = prefs.getBoolean("proxy_enabled", false),
+        proxyKind = prefs.getString("proxy_kind", "socks5") ?: "socks5",
+        proxyHost = prefs.getString("proxy_host", "") ?: "",
+        proxyPort = prefs.getInt("proxy_port", 0),
+        proxyUser = prefs.getString("proxy_user", "") ?: "",
+        proxyPassword = prefs.getString("proxy_password", "") ?: "",
     )
 
     fun save(settings: AppSettings) {
+        val engine = normalizeIpatoolEngine(settings.ipatoolEngine)
         prefs.edit {
             putString("theme", settings.theme)
             putBoolean("auto_update", settings.autoUpdate)
@@ -69,9 +76,21 @@ class SettingsStore(context: Context) {
             putString("downloads_dir", settings.downloadsDir)
             putString("exports_dir", settings.exportsDir)
             putStringSet("favorite_app_ids", settings.favoriteAppIds.toSet())
-            putString("ipatool_engine", settings.ipatoolEngine)
+            putString("ipatool_engine", engine)
+            putBoolean("proxy_enabled", settings.proxyEnabled)
+            putString("proxy_kind", settings.proxyKind)
+            putString("proxy_host", settings.proxyHost)
+            putInt("proxy_port", settings.proxyPort)
+            putString("proxy_user", settings.proxyUser)
+            putString("proxy_password", settings.proxyPassword)
         }
     }
+
+    private fun normalizeIpatoolEngine(raw: String?): String =
+        when (raw?.trim()?.lowercase()) {
+            "v6" -> "v6"
+            else -> "auto"
+        }
 
     /**
      * Переключает закрепление приложения.
@@ -198,7 +217,7 @@ class SettingsStore(context: Context) {
     fun accountInfos(): List<AppleAccountInfo> {
         val active = activeEmail()
         return knownEmails().map { email ->
-            val session = !loadSessionBlob(email).isNullOrBlank()
+            val session = !loadSessionBlob("store_$email").isNullOrBlank()
             AppleAccountInfo(
                 email = email,
                 active = email == active,

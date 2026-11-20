@@ -42,6 +42,9 @@ function signum_site_releases(?string $manifestPath = null): array
             $debPath = preg_replace('~/([^/]+)\.AppImage$~', '/Signum_$1_amd64.deb', $path);
             if ($debPath !== $path && is_file(dirname($manifestPath) . $debPath)) {
                 $result[$platform]['deb_download_url'] = 'https://api.appbank.pw/signum' . $debPath;
+                $result[$platform]['deb_available'] = true;
+            } else {
+                $result[$platform]['deb_available'] = false;
             }
         }
     }

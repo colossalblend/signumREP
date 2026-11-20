@@ -73,9 +73,17 @@ class PurchaseHistoryClient(
     ): PurchaseHistoryResult {
         val mail = email.trim().lowercase()
         if (!forceRefresh && !loadMore && twoFactor.isNullOrBlank()) {
-            loadCached(mail)?.let { return it }
+            // A library result is deliberately only a fallback. Do not let its
+            // cache short-circuit the primary reportaproblem flow on the next
+            // launch; the UI can still show it while the full request runs.
+            loadCached(mail)
+                ?.takeUnless { it.source == HISTORY_SOURCE_LIBRARY }
+                ?.let { return it }
             val cookies = cookieMap(mail)
-            if (!cookies.containsKey("myacinfo")) {
+            // After the normal Apple ID login the password is already stored.
+            // In that case start the reportaproblem login instead of forcing the
+            // user to press Refresh merely because RAP has no cookie yet.
+            if (!cookies.containsKey("myacinfo") && store.loadPassword(mail).isNullOrBlank()) {
                 return PurchaseHistoryResult(
                     email = mail,
                     count = 0,

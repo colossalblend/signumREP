@@ -12,36 +12,36 @@
       id: "windows",
       label: "Скачать для Windows",
       shortLabel: "Windows",
-      hint: "Windows 10/11 · версия 1.2.2",
+      hint: "Windows 10/11 · версия 1.2.3",
       url: "download.php?platform=windows",
-      version: "1.2.2",
+      version: "1.2.3",
       available: true,
     },
     macos: {
       id: "macos",
       label: "Скачать для Mac",
       shortLabel: "Mac",
-      hint: "Mac · версия 1.2.2",
+      hint: "Mac · версия 1.2.3",
       url: "download.php?platform=macos",
-      version: "1.2.2",
+      version: "1.2.3",
       available: true,
     },
     linux: {
       id: "linux",
       label: "Скачать для Linux",
       shortLabel: "Linux",
-      hint: "Linux · AppImage · версия 1.2.2",
+      hint: "Linux · AppImage · версия 1.2.3",
       url: "download.php?platform=linux",
-      version: "1.2.2",
+      version: "1.2.3",
       available: true,
     },
     android: {
       id: "android",
       label: "Скачать для Android",
       shortLabel: "Android",
-      hint: "Android · APK · версия 1.2.2",
+      hint: "Android · APK · версия 1.2.3",
       url: "download.php?platform=android",
-      version: "1.2.2",
+      version: "1.2.3",
       available: true,
     },
   };
@@ -137,7 +137,43 @@
 
       var link = option.querySelector("[data-picker-download-link]");
       var soon = option.querySelector("[data-picker-soon]");
-      if (link) {
+      var isLinux = id === "linux";
+
+      if (isLinux) {
+
+        $all(option, "[data-picker-download-link]").forEach(function (formatLink) {
+          var isDeb = formatLink.hasAttribute("data-picker-format");
+        if (isDeb) {
+            if (conf.debAvailable && conf.debUrl) {
+              formatLink.setAttribute("href", conf.debUrl);
+              formatLink.removeAttribute("aria-disabled");
+              formatLink.onclick = null;
+            } else {
+              formatLink.removeAttribute("href");
+              formatLink.setAttribute("aria-disabled", "true");
+              formatLink.onclick = function (event) { event.preventDefault(); };
+            }
+            var status = formatLink.querySelector("[data-deb-status], [data-deb-picker-status]");
+            if (status && !conf.debAvailable) status.textContent = "Сейчас недоступен";
+          } else {
+            formatLink.setAttribute("href", conf.url);
+          }
+          var available = conf.available && (!isDeb || conf.debAvailable === true);
+
+          formatLink.hidden = false;
+
+          if (available) {
+            formatLink.removeAttribute("aria-disabled");
+            formatLink.onclick = null;
+          } else {
+            formatLink.setAttribute("aria-disabled", "true");
+            formatLink.onclick = function (event) { event.preventDefault(); };
+          }
+        });
+
+      }
+
+      if (link && !isLinux) {
         link.setAttribute("href", conf.url);
         link.hidden = !conf.available;
         if (conf.available) link.setAttribute("download", "");
@@ -298,8 +334,11 @@
     $all(document, "[data-download-link]").forEach(function (link) {
       var id = link.getAttribute("data-download-link");
       var conf = DOWNLOADS[id];
-      if (!conf) return;
-      link.setAttribute("href", conf.url);
+      if (!conf) return;
+
+      if (link.hasAttribute("data-download-format")) return;
+
+      link.setAttribute("href", conf.url);
       if (conf.available) {
         link.setAttribute("download", "");
         link.classList.remove("is-disabled");
@@ -574,18 +613,44 @@
       })
       .then(function (data) {
         if (!data || !data.ok || !data.platforms) return;
-        Object.keys(DOWNLOADS).forEach(function (key) {
+      Object.keys(DOWNLOADS).forEach(function (key) {
           var fresh = data.platforms[key];
           if (!fresh || !fresh.version) return;
           var pack = DOWNLOADS[key];
           pack.hint = pack.hint.replace(pack.version, fresh.version);
           pack.version = fresh.version;
-          if (fresh.download_url) pack.url = fresh.download_url;
+          if (fresh.download_url) pack.url = fresh.download_url;
+
+          if (key === "linux") {
+
+            pack.debAvailable = fresh.deb_available === true && !!fresh.deb_download_url;
+
+            pack.debUrl = pack.debAvailable ? fresh.deb_download_url : "";
+
+          }
         });
-        $all(document, "[data-version]").forEach(function (node) {
+        $all(document, "[data-version]").forEach(function (node) {
           var fresh = data.platforms[node.getAttribute("data-version")];
           if (fresh && fresh.version) node.textContent = fresh.version;
-        });
+        });
+
+        $all(document, "[data-download-format='deb'], [data-picker-format='deb']").forEach(function (link) {
+          var available = DOWNLOADS.linux.debAvailable === true;
+          var cardLink = link.hasAttribute("data-download-format");
+          link.hidden = !available && !cardLink;
+          link.classList.toggle("is-unavailable", !available);
+          if (available) {
+            link.href = DOWNLOADS.linux.debUrl;
+            link.removeAttribute("aria-disabled");
+            link.onclick = null;
+          } else {
+            link.removeAttribute("href");
+            link.setAttribute("aria-disabled", "true");
+            link.onclick = function (event) { event.preventDefault(); };
+          }
+          var status = link.querySelector("[data-deb-status], [data-deb-picker-status]");
+          if (status && !available) status.textContent = "Сейчас недоступен";
+        });
         applyDownloadUI(platform);
       })
       .catch(function () {

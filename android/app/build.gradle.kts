@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -16,15 +18,15 @@ android {
         applicationId = "com.appbank.signum"
         minSdk = 26
         targetSdk = 36
-        versionCode = 40
-        versionName = "1.2.0"
+        versionCode = 41
+        versionName = "1.2.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     val signingPropertiesFile = rootProject.file("keystore.properties")
     if (signingPropertiesFile.exists()) {
-        val signingProperties = java.util.Properties().apply {
-            signingPropertiesFile.inputStream().use(::load)
+        val signingProperties = Properties().apply {
+            signingPropertiesFile.inputStream().use { load(it) }
         }
         val keystoreFile = rootProject.file(signingProperties.getProperty("storeFile"))
         signingConfigs {

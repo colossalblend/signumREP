@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, Download, FolderOpen, GraduationCap, History, LayoutGrid, ListChecks, LoaderCircle, QrCode, RefreshCw, RotateCcw, Search, Smartphone, Star, Store, Wand2, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, Download, FolderOpen, GraduationCap, History, ListChecks, LoaderCircle, QrCode, RefreshCw, RotateCcw, Search, Smartphone, Star, Store, Wand2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import ActivationModal from "../components/ActivationModal";
@@ -31,18 +31,7 @@ import {
   useTourSignal,
 } from "../lib/tourStore";
 
-/** Откуда ищем: собственный каталог Signum или App Store (AppMagic + iTunes). */
-type CatalogScope = "catalog" | "store";
-
 const TOUR_STORE_QUERY = "Тест приложение";
-
-/** Ссылка App Store или числовой номер — в каталоге Signum такого не бывает. */
-function looksLikeStoreReference(text: string): boolean {
-  const value = text.trim();
-  return /apps\.apple\.com|itunes\.apple\.com/i.test(value)
-    || /(?:^|\/)id\d{6,}/i.test(value)
-    || /^\d{6,}$/.test(value);
-}
 import type {
   AccountRestoreScan,
   AccountRestoreVersion,
@@ -118,8 +107,11 @@ export default function Catalog() {
   const [groupFilter, setGroupFilter] = useState<string>("all");
   const [catalogSort, setCatalogSort] = useState<"default" | "name" | "ios">("default");
   const [compatibilityFilter, setCompatibilityFilter] = useState<"all" | "compatible" | "incompatible">("all");
-  const [searchParams, setSearchParams] = useSearchParams();
-  const scope: CatalogScope = searchParams.get("scope") === "store" ? "store" : "catalog";
+  const [searchParams] = useSearchParams();
+  // Источник выбирается автоматически: каталог фильтруется локально, а
+  // AppMagic/iTunes получают тот же запрос ниже отдельной полкой результатов.
+  // Старый параметр scope читается только для совместимости со ссылками.
+  const scope = "catalog" as const;
   const [searchQuery, setSearchQuery] = useState(() => searchParams.get("q") ?? "");
   const [storeSearching, setStoreSearching] = useState(false);
   const [favorites, setFavorites] = useState<string[]>([]);
@@ -169,19 +161,6 @@ export default function Catalog() {
   // В обучении телефон не подключён, поэтому совместимость показываем на демо-iOS.
   const deviceIosUi = tourDemo ? TOUR_DEVICE_IOS : deviceIos;
 
-  // Вкладка живёт в адресе (?scope=store), чтобы «Назад», обучение и старые
-  // ссылки на /find приводили в то же место. Текст поиска общий для обеих
-  // вкладок, но каждая ищет своим движком и со своими номерами запросов.
-  const setScope = useCallback((next: CatalogScope) => {
-    setSearchParams(prev => {
-      const params = new URLSearchParams(prev);
-      if (next === "store") params.set("scope", "store");
-      else params.delete("scope");
-      params.delete("q");
-      return params;
-    }, { replace: true });
-  }, [setSearchParams]);
-
   // Обучение печатает запрос в общую строку и показывает демо-результаты App Store.
   const [tourTyped, setTourTyped] = useState("");
   const [tourShowHits, setTourShowHits] = useState(false);
@@ -207,8 +186,6 @@ export default function Catalog() {
 
   function onSearchInput(value: string) {
     setSearchQuery(value);
-    // Вставили ссылку или номер из App Store — сразу ищем там.
-    if (scope === "catalog" && looksLikeStoreReference(value)) setScope("store");
   }
 
   // The walkthrough drives this page's real sheet instead of drawing a replica,
@@ -682,14 +659,6 @@ export default function Catalog() {
   );
 
                                                                                                             
-  // Совпадения каталога для полки «В каталоге Signum» на вкладке App Store.
-  const catalogMatchesForStore = useMemo(
-    () => (scope === "store" && searchQuery.trim().length >= 2 && !looksLikeStoreReference(searchQuery)
-      ? searchCatalogApps(apps, searchQuery)
-      : []),
-    [apps, scope, searchQuery],
-  );
-
   const searchBankAlt = useMemo(
     () => (searchQuery.trim() ? detectBankKey(searchQuery) : null),
     [searchQuery],
@@ -751,10 +720,12 @@ export default function Catalog() {
     }
   }
 
+  const effectiveSearchQuery = tourDemo && tourTyped ? tourTyped : searchQuery;
+
   return (
     <div className="mx-auto max-w-[1500px] p-7 lg:p-9">
-      <PageHeader title="Каталог" subtitle={scope === "store" ? "Любое приложение из App Store — по названию, ссылке, номеру или разработчику" : catalogSubtitle} actions={
-        scope === "store" ? undefined : <div className="flex flex-wrap gap-2">
+      <PageHeader title="Каталог" subtitle={catalogSubtitle} actions={
+        <div className="flex flex-wrap gap-2">
           {selectMode ? (
             <>
               <button
@@ -862,49 +833,23 @@ export default function Catalog() {
       )}
 
       <div className="mt-7">
-        <div className="scope-switch" role="tablist" aria-label="Где искать">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={scope === "catalog"}
-            className={scope === "catalog" ? "is-active" : ""}
-            onClick={() => setScope("catalog")}
-          >
-            <LayoutGrid size={15} aria-hidden="true" />
-            Каталог Signum
-            {apps.length > 0 && <span className="scope-count">{apps.length}</span>}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            data-tour="nav-find"
-            aria-selected={scope === "store"}
-            className={scope === "store" ? "is-active" : ""}
-            onClick={() => setScope("store")}
-          >
-            <Store size={15} aria-hidden="true" />
-            App Store
-          </button>
-        </div>
         <div
-          data-tour={scope === "store" ? "find-input" : undefined}
+          data-tour="find-input"
           className="panel mt-3 flex items-center gap-3 px-4 py-3 transition focus-within:border-brand-400/40 focus-within:bg-white/[0.055]"
         >
           <Search className="shrink-0 text-brand-300" size={19} />
           <input
             type="text"
-            value={tourDemo && scope === "store" && tourTyped ? tourTyped : searchQuery}
-            readOnly={tourDemo && scope === "store"}
+            value={effectiveSearchQuery}
+            readOnly={tourDemo && !!tourTyped}
             onChange={event => onSearchInput(event.target.value)}
-            placeholder={scope === "store"
-              ? "Название, ссылка из App Store, номер или разработчик"
-              : "Поиск по каталогу: название, сокращение, банк"}
-            aria-label={scope === "store" ? "Поиск в App Store" : "Поиск по каталогу Signum"}
+            placeholder="Название, сокращение, ссылка App Store, номер или разработчик"
+            aria-label="Поиск в каталоге"
             className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-600"
             autoComplete="off"
             spellCheck={false}
           />
-          {scope === "store" && storeSearching && (
+          {storeSearching && (
             <LoaderCircle className="shrink-0 animate-spin text-brand-300" size={16} />
           )}
           {searchQuery && (
@@ -918,7 +863,7 @@ export default function Catalog() {
             </button>
           )}
         </div>
-        {scope === "catalog" && <>
+        <>
         {groups.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-2">
             <button
@@ -983,49 +928,25 @@ export default function Catalog() {
         </div>
         {searchQuery.trim() && (
           <div className="mt-2 flex items-center justify-between gap-3 px-1 text-[11px] text-slate-600">
-            <button
-              type="button"
-              className="font-semibold text-brand-300 transition hover:text-white"
-              onClick={() => setScope("store")}
-            >
-              Искать «{searchQuery.trim()}» в App Store →
-            </button>
-            <span>Найдено в каталоге: {visibleApps.length}</span>
+            <span>В каталоге найдено: {visibleApps.length}. Ниже автоматически проверяем AppMagic и iTunes.</span>
           </div>
         )}
-        </>}
+        </>
       </div>
 
-      {scope === "store" ? (
-        <StoreSearch
-          query={searchQuery}
-          tourShowHits={tourShowHits}
-          catalogMatches={catalogMatchesForStore}
-          onOpenCatalogApp={app => void openInstallOffer(app)}
-          onSearchingChange={setStoreSearching}
-        />
-      ) : <div className="mt-8">
+      <div className="mt-8">
         {loading && !tourDemo ? <StatusMessage loading>Загрузка каталога…</StatusMessage> : error && !tourDemo ? <StatusMessage error={error} /> : apps.length === 0 && !tourDemo ? <StatusMessage error="Каталог пока пуст" /> :
           visibleApps.length === 0 ? (
             <div className="panel px-6 py-10 text-center">
               <Search className="mx-auto text-slate-600" size={28} />
               <p className="mt-3 text-sm font-semibold text-slate-300">Ничего не найдено</p>
-              <p className="mt-1 text-xs text-slate-600">Попробуйте полное название, сокращение или английский вариант.</p>
-              <div className="mx-auto mt-6 max-w-sm rounded-2xl border border-white/[0.08] bg-black/15 p-4">
-                <p className="text-xs leading-5 text-slate-400">
-                  В каталоге Signum лежат банки и сервисы, которых нет в App Store.
-                  Любое другое приложение найдётся на вкладке «App Store» — оттуда ставится всё,
-                  что доступно вашему Apple ID.
-                </p>
-                <button
-                  type="button"
-                  className="btn-secondary mt-3 w-full"
-                  onClick={() => setScope("store")}
-                >
-                  <Search size={15} />
-                  {searchQuery.trim() ? `Искать «${searchQuery.trim()}» в App Store` : "Открыть поиск по App Store"}
-                </button>
-              </div>
+                 <p className="mt-1 text-xs text-slate-600">Попробуйте полное название, сокращение или английский вариант.</p>
+               <div className="mx-auto mt-6 max-w-sm rounded-2xl border border-white/[0.08] bg-black/15 p-4">
+                 <p className="text-xs leading-5 text-slate-400">
+                   В каталоге собраны проверенные приложения и специальные сборки.
+                   Для остальных названий результаты AppMagic и iTunes появятся ниже автоматически.
+                 </p>
+               </div>
               {searchBankAlt && (
                 <div className="mx-auto mt-6 max-w-sm rounded-2xl border border-brand-400/25 bg-brand-500/10 p-4 text-left">
                   <div className="flex items-center gap-2.5 text-sm font-semibold text-brand-100">
@@ -1118,7 +1039,26 @@ export default function Catalog() {
             )}
             </>
           )}
-      </div>}
+      </div>
+
+      {effectiveSearchQuery.trim().length >= 2 && (
+        <section className="mt-12 border-t border-white/[0.06] pt-8">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div>
+              <h2 className="text-lg font-bold tracking-tight text-white">Результаты AppMagic и iTunes</h2>
+              <p className="mt-1 text-xs text-slate-500">Поиск по App Store выполняется автоматически и не смешивает результаты с локальным каталогом.</p>
+            </div>
+            {storeSearching && <span className="inline-flex items-center gap-2 text-xs text-slate-500"><LoaderCircle size={14} className="animate-spin text-brand-300" />Ищем…</span>}
+          </div>
+          <StoreSearch
+            query={effectiveSearchQuery}
+            tourShowHits={tourShowHits}
+            catalogMatches={[]}
+            onOpenCatalogApp={app => void openInstallOffer(app)}
+            onSearchingChange={setStoreSearching}
+          />
+        </section>
+      )}
 
       {detailLoading && !appRestoreOpen && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm">

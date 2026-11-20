@@ -104,7 +104,7 @@ cd android
 | **Unicorn Engine** | 2.1.4 | [unicorn-engine/unicorn](https://github.com/unicorn-engine/unicorn), `brew install unicorn` | эмуляция для `kbsync`/`sapsigner`; на Windows DLL кладётся в `%LOCALAPPDATA%\ipatool\unicorn\2.1.4` |
 | **zsign** | upstream | [zhlynn/zsign](https://github.com/zhlynn/zsign) (`build/macos`) | переподпись IPA |
 | **anisette** | 3.0.0-legacy | legacy-sidecar из ipatool 3.0.0 | только для старого движка v3 |
-| **IPA_Downloader** | 4.4.1 | [kda2495/IPA_Downloader](https://github.com/kda2495/IPA_Downloader) | `ideviceinfo`, `ideviceinstaller`, `idevice_id`, `idevicepair` для Windows/macOS |
+| **IPA_Downloader** | 4.5.0 | [kda2495/IPA_Downloader](https://github.com/kda2495/IPA_Downloader/releases/tag/4.5.0) | актуальные `ideviceinfo`, `ideviceinstaller`, `idevice_id`, `idevicepair`; Wi‑Fi-подключение с приоритетом USB |
 | **libimobiledevice / libplist / usbmuxd** | brew/apt | [libimobiledevice](https://github.com/libimobiledevice) | USB: pairing, info, install |
 | **isideload** | 0.2.25 | [nab138/isideload](https://github.com/nab138/isideload), вендорен в `src-tauri/vendor/isideload` | sideload/установка из Rust |
 | **Apple Mobile Device Support / iTunes / iCloud** | — | apple.com | USB и anisette на Windows |

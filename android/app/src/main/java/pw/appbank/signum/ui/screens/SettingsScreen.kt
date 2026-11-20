@@ -90,14 +90,14 @@ fun SettingsScreen(vm: SignumViewModel) {
             SectionTitle("Apple-инструмент")
             Spacer(Modifier.height(6.dp))
             Text(
-                "На Android Auto использует V6, затем V5 и V4. V6 работает через Configurator-профиль и после переключения может запросить повторный вход.",
+                "Android использует встроенный Store-контур с SAP-подписью. В режиме Auto Signum сам выбирает безопасную схему входа; V6 принудительно включает Configurator-профиль Apple.",
                 color = c.muted,
                 fontSize = 12.sp,
                 lineHeight = 17.sp,
             )
             Spacer(Modifier.height(8.dp))
             SegmentedControl(
-                options = listOf("auto" to "Auto", "v6" to "V6", "v5" to "V5", "v4" to "V4"),
+                options = listOf("auto" to "Auto", "v6" to "V6"),
                 selected = s.ipatoolEngine,
                 onSelect = { vm.saveSettings(s.copy(ipatoolEngine = it)) },
             )

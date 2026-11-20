@@ -7,5 +7,6 @@
   "helper": "sapsigner / sapsign-ssh / IPATOOL_SAP_HELPER",
   "v3_mode": "Preserved legacy ipatool-cpp; not selected when SAP helper is present",
   "verified_at": "2026-11-16",
-  "device_tools": "kda2495/IPA_Downloader 4.4.1"
+  "device_tools": "kda2495/IPA_Downloader 4.5.0",
+  "device_tools_release": "https://github.com/kda2495/IPA_Downloader/releases/tag/4.5.0"
 }

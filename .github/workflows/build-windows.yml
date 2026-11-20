@@ -5,21 +5,9 @@ name: Build Windows
   push:
     branches:
       - main
-    paths-ignore:
-      - "android/**"
-      - "website/**"
-      - "website-appbank/**"
-      - "backend/**"
-      - "**.md"
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - "android/**"
-      - "website/**"
-      - "website-appbank/**"
-      - "backend/**"
-      - "**.md"
 
 permissions:
   contents: read
@@ -77,6 +65,9 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Check frontend types
+        run: npx tsc --noEmit
+
       - name: Build Signum.exe
         run: npm run tauri -- build --no-bundle
 
@@ -93,3 +84,4 @@ jobs:
           name: signum-windows-x64
           path: out/Signum
           if-no-files-found: error
+          retention-days: 14

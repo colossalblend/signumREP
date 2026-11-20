@@ -116,7 +116,7 @@ export default function About() {
             </p>
           </div>
           <button type="button" className="btn-secondary shrink-0" onClick={() => void openLink(IPA_DOWNLOADER_URL)}>
-            kda2495/IPA_Downloader<ArrowUpRight size={14} />
+             kda2495/IPA_Downloader · 4.5.0<ArrowUpRight size={14} />
           </button>
         </div>
       </section>

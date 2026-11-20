@@ -44,7 +44,7 @@ function WindowButton({ children, onClick, danger = false, label }: {
 
 export default function Layout() {
   const window = getCurrentWindow();
-  const [appVersion, setAppVersion] = useState("1.1.1");
+  const [appVersion, setAppVersion] = useState("1.2.3");
   const [showOnboarding, setShowOnboarding] = useState(() => !hasSeenOnboarding());
 
   useEffect(() => {
