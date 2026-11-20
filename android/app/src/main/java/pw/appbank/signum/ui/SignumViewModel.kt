@@ -50,6 +50,8 @@ data class UiState(
     val catalogLoading: Boolean = false,
     val catalogError: String = "",
     val search: String = "",
+    /** Где искать: `catalog` — каталог Signum (в памяти), `store` — App Store (AppMagic + iTunes). */
+    val catalogScope: String = "catalog",
     val storeHits: List<AppStoreSearchHit> = emptyList(),
     val storeSearching: Boolean = false,
     val storeSearchError: String = "",
@@ -242,10 +244,26 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
      */
     private var searchJob: Job? = null
 
+    /**
+     * Переключатель «Каталог Signum / App Store», как на ПК. Текст поиска общий,
+     * но в сеть запрос уходит только на вкладке App Store — каталог фильтруется
+     * в памяти и с поиском Apple не пересекается.
+     */
+    fun setCatalogScope(scope: String) {
+        if (_state.value.catalogScope == scope) return
+        _state.update { it.copy(catalogScope = scope, selectMode = false, selectedAppIds = emptySet()) }
+        setSearch(_state.value.search)
+    }
+
     fun setSearch(q: String) {
-        _state.update { it.copy(search = q, storeHits = emptyList(), devHits = emptyList(), storeSearchError = "", storeSearching = q.trim().length >= 2) }
+        // Ссылка или номер из App Store в каталоге Signum не встречаются — сразу ищем в App Store.
+        if (_state.value.catalogScope != "store" && looksLikeStoreReference(q)) {
+            _state.update { it.copy(catalogScope = "store", selectMode = false, selectedAppIds = emptySet()) }
+        }
+        val storeScope = _state.value.catalogScope == "store"
+        _state.update { it.copy(search = q, storeHits = emptyList(), devHits = emptyList(), storeSearchError = "", storeSearching = storeScope && q.trim().length >= 2) }
         searchJob?.cancel()
-        if (q.trim().length < 2) {
+        if (!storeScope || q.trim().length < 2) {
             _state.update { it.copy(storeHits = emptyList(), devHits = emptyList(), storeSearching = false) }
             return
         }
@@ -294,6 +312,13 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         _state.update { it.copy(openedDeveloper = null, developerApps = emptyList(), developerLoading = false) }
 
     fun setGroup(id: String) = _state.update { it.copy(groupFilter = id) }
+
+    private fun looksLikeStoreReference(text: String): Boolean {
+        val v = text.trim()
+        return Regex("""apps\.apple\.com|itunes\.apple\.com""", RegexOption.IGNORE_CASE).containsMatchIn(v) ||
+            Regex("""(?:^|/)id\d{6,}""", RegexOption.IGNORE_CASE).containsMatchIn(v) ||
+            Regex("""^\d{6,}$""").matches(v)
+    }
 
     fun visibleApps(): List<CatalogApp> {
         val s = _state.value
