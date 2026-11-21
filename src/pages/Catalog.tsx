@@ -926,11 +926,6 @@ export default function Catalog() {
             </>
           )}
         </div>
-        {searchQuery.trim() && (
-          <div className="mt-2 flex items-center justify-between gap-3 px-1 text-[11px] text-slate-600">
-            <span>В каталоге найдено: {visibleApps.length}. Ниже автоматически проверяем AppMagic и iTunes.</span>
-          </div>
-        )}
         </>
       </div>
 
@@ -1043,12 +1038,9 @@ export default function Catalog() {
 
       {effectiveSearchQuery.trim().length >= 2 && (
         <section className="mt-12 border-t border-white/[0.06] pt-8">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <div>
-              <h2 className="text-lg font-bold tracking-tight text-white">Результаты AppMagic и iTunes</h2>
-              <p className="mt-1 text-xs text-slate-500">Поиск по App Store выполняется автоматически и не смешивает результаты с локальным каталогом.</p>
-            </div>
-            {storeSearching && <span className="inline-flex items-center gap-2 text-xs text-slate-500"><LoaderCircle size={14} className="animate-spin text-brand-300" />Ищем…</span>}
+          <div className="mb-4 flex items-end justify-between gap-3">
+            <h2 className="text-lg font-bold tracking-tight text-white">Результаты AppMagic и iTunes</h2>
+            {storeSearching && <span className="inline-flex items-center gap-2 pb-0.5 text-xs text-slate-500"><LoaderCircle size={14} className="animate-spin text-brand-300" />Ищем…</span>}
           </div>
           <StoreSearch
             query={effectiveSearchQuery}

@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ChevronRight, Download, LoaderCircle, Search, ShoppingBag, Smartphone, Store, X } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, Check, ChevronRight, Download, LoaderCircle, RotateCcw, Search, ShoppingBag, Smartphone, Store, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Checkbox from "./Checkbox";
@@ -88,6 +88,58 @@ function ResultIcon({ url, name, large = false, small = false }: {
       draggable={false}
       onError={() => setBroken(true)}
     />
+  );
+}
+
+function StoreHitCard({ hit, onClick, dataTour }: {
+  hit: StoreSearchApp;
+  onClick: () => void;
+  dataTour?: string;
+}) {
+  const [broken, setBroken] = useState(false);
+  const badge = hit.foundOnAccount
+    ? { className: "border-emerald-400/20 bg-emerald-400/10 text-emerald-300", icon: <RotateCcw size={11} />, label: "Есть на Apple ID" }
+    : hit.removedFromStore
+      ? { className: "border-amber-400/20 bg-amber-400/10 text-amber-300", icon: <Store size={11} />, label: "Нет в App Store" }
+      : null;
+
+  return (
+    <button
+      type="button"
+      data-tour={dataTour}
+      onClick={onClick}
+      className="panel group relative min-h-[270px] overflow-hidden p-5 text-left transition duration-300 hover:-translate-y-1 hover:border-white/[0.13] hover:bg-white/[0.055]"
+    >
+      <div className="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full bg-brand-500 opacity-20 blur-3xl transition group-hover:opacity-35" />
+      <div className="flex items-start justify-between gap-3">
+        <div className="relative h-[86px] w-[86px]">
+          <div className="absolute inset-2 translate-y-3 rounded-[24px] bg-brand-500 opacity-30 blur-xl" />
+          <div className="absolute inset-1 translate-x-2 translate-y-2 rounded-[22px] bg-black/35" />
+          {hit.iconUrl.trim() && !broken ? (
+            <img
+              src={hit.iconUrl}
+              alt=""
+              draggable={false}
+              referrerPolicy="no-referrer"
+              onError={() => setBroken(true)}
+              className="relative h-[78px] w-[78px] rounded-[20px] object-cover drop-shadow-icon-lg ring-1 ring-white/20"
+            />
+          ) : (
+            <div className="relative grid h-[78px] w-[78px] place-items-center rounded-[20px] bg-brand-gradient text-3xl font-black drop-shadow-icon-lg">{hit.name.slice(0, 1)}</div>
+          )}
+        </div>
+        {badge && (
+          <span className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${badge.className}`}>
+            {badge.icon}{badge.label}
+          </span>
+        )}
+      </div>
+      <div className="mt-6">
+        <h3 className="line-clamp-2 text-lg font-bold tracking-tight text-white">{hit.name}</h3>
+        {hit.publisher.trim() && <p className="mt-1 truncate text-xs text-slate-500">{hit.publisher.trim()}</p>}
+      </div>
+      <span className="absolute bottom-5 right-5 grid h-8 w-8 place-items-center rounded-lg bg-white/[0.055] text-brand-300 transition group-hover:bg-brand-500 group-hover:text-white"><ArrowUpRight size={15} /></span>
+    </button>
   );
 }
 
@@ -767,36 +819,18 @@ export default function StoreSearch({
       ) : (
         <>
           {/* ── Приложения ─────────────────────────────────────────────── */}
-          <div className={`${catalogMatches.length > 0 ? "mt-3" : "mt-6"} space-y-2`}>
+          <div className={`${catalogMatches.length > 0 ? "mt-3" : "mt-6"} grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4`}>
             {shownHits.map((hit, i) => (
-              <button
+              <StoreHitCard
                 key={hit.appStoreId}
-                type="button"
-                data-tour={tourShowHits && i === 0 ? "find-hit" : undefined}
-                className="panel flex w-full items-center gap-3 p-3 text-left transition hover:border-white/[0.12] hover:bg-white/[0.04]"
+                hit={hit}
+                dataTour={tourShowHits && i === 0 ? "find-hit" : undefined}
                 onClick={() => { if (!tourShowHits) openHit(hit); }}
-              >
-                <ResultIcon url={hit.iconUrl} name={hit.name} />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-semibold text-slate-100">{hit.name}</div>
-                  {hit.publisher.trim() && (
-                    <div className="mt-0.5 truncate text-xs text-slate-500">{hit.publisher.trim()}</div>
-                  )}
-                </div>
-                {hit.foundOnAccount ? (
-                  <span className="shrink-0 rounded-lg bg-emerald-400/10 px-2 py-1 text-[10px] font-bold uppercase text-emerald-300">
-                    Есть на Apple ID
-                  </span>
-                ) : hit.removedFromStore && (
-                  <span className="shrink-0 rounded-lg bg-amber-400/10 px-2 py-1 text-[10px] font-bold uppercase text-amber-300">
-                    Нет в App Store
-                  </span>
-                )}
-              </button>
+              />
             ))}
 
             {showEmpty && devHits.length === 0 && (
-              <div className="panel px-6 py-10 text-center">
+              <div className="panel col-span-full px-6 py-10 text-center">
                 <Search className="mx-auto text-slate-600" size={28} />
                 <p className="mt-3 text-sm font-semibold text-slate-300">Ничего не найдено</p>
                 <p className="mt-1 text-xs text-slate-600">
@@ -806,7 +840,7 @@ export default function StoreSearch({
             )}
 
             {!typed && !storeSearching && (
-              <div className="panel px-6 py-10 text-center">
+              <div className="panel col-span-full px-6 py-10 text-center">
                 <Search className="mx-auto text-slate-600" size={28} />
                 <p className="mt-3 text-sm font-semibold text-slate-300">Что найти</p>
                 <p className="mt-1 text-xs leading-5 text-slate-600">
