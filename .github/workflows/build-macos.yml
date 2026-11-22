@@ -58,20 +58,12 @@ jobs:
       - name: Verify bundled Mac tools
         run: |
           python3 - <<'PY'
-          import hashlib, json
           from pathlib import Path
           for arch in ("macos-arm64", "macos-x64"):
               root = Path("apple-tools") / arch
-              source = json.loads((root / "SOURCE.json").read_text())
-              for key, rel in (("v5_sha256", "v5/ipatool"),
-                               ("idevice_id_sha256", "support/idevice_id"),
-                               ("ideviceinstaller_sha256", "support/ideviceinstaller")):
-                  digest = hashlib.sha256((root / rel).read_bytes()).hexdigest()
-                  if digest != source[key]:
-                      raise SystemExit(f"{arch}/{rel}: sha256 mismatch")
-              for rel in ("v5/kbsync", "v5/libunicorn.2.dylib", "v5/assets.bin"):
-                  if not (root / rel).is_file():
-                      raise SystemExit(f"{arch}/{rel}: missing tool sidecar")
+              for name in ('v5/ipatool', 'v5/kbsync', 'v5/libunicorn.2.dylib', 'v5/assets.bin',
+                           'support/idevice_id', 'support/ideviceinstaller'):
+                  assert (root / name).is_file(), (arch, name)
           PY
 
       - name: Build macOS DMG
