@@ -51,8 +51,6 @@ data class CatalogApp(
     val activation: AppActivation? = null,
     val bundle_id: String? = null,
     val app_store_id: String? = null,
-    /** Все App Store ID этого приложения: по ним карточка каталога объединяется с результатом App Store. */
-    val app_store_ids: List<String> = emptyList(),
     /** Заполнено только у приложений, которые ставятся через TestFlight. */
     val testflight: TestFlightOffer? = null,
 )
@@ -289,8 +287,6 @@ data class StoreDeveloper(
     val artistId: String,
     val name: String,
     val appCount: Int = 0,
-    /** До трёх значков его приложений — для строки разработчика, как на ПК. */
-    val icons: List<String> = emptyList(),
 )
 
 data class AppStoreSearchHit(
@@ -304,8 +300,6 @@ data class AppStoreSearchHit(
     val minIos: String? = null,
     val price: String? = null,
     val foundOnAccount: Boolean = false,
-    /** AppMagic знает приложение, но в App Store его уже нет — ставится только из покупок. */
-    val removedFromStore: Boolean = false,
 )
 
 data class SignOptions(
@@ -365,16 +359,7 @@ data class AppSettings(
     val proxyPort: Int = 0,
     val proxyUser: String = "",
     val proxyPassword: String = "",
-) {
-    /**
-     * Что на самом деле включено из упрощённого вида. Отдельные флажки по
-     * умолчанию стоят «вкл», поэтому без проверки liteDesign анимации
-     * выключались у всех — даже у тех, кто упрощённый вид не включал.
-     */
-    val motionReduced: Boolean get() = liteDesign && liteReduceMotion
-    val staticLoaders: Boolean get() = liteDesign && (liteStaticLoaders || liteReduceMotion)
-    val flatBackground: Boolean get() = liteDesign && liteFlatBackgrounds
-}
+)
 
 data class OtaUpdateInfo(
     val hasUpdate: Boolean = false,
@@ -386,9 +371,6 @@ data class OtaUpdateInfo(
     // Обновление — это файл, который мы сами предложим установить. Сверять
     // его с тем, что обещал сервер, обязательно.
     val sha256: String? = null,
-    /** Сервер больше не принимает эту версию: работать без обновления нельзя. */
-    val clientSupported: Boolean = true,
-    val minClientVersion: String? = null,
 )
 
 data class CachedIpa(

@@ -1,4 +1,7 @@
-use apple_codesign_quick::ProvisioningProfile;
+use apple_codesign::{
+    SigningSettings,
+    cryptography::{InMemoryPrivateKey, PrivateKey},
+};
 use hex::ToHex;
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_RSA_SHA256};
 use rootcause::{option_ext::OptionExt, prelude::*};
@@ -11,10 +14,7 @@ use rsa::{
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
-use x509_cert::{
-    Certificate,
-    der::{Decode, Encode},
-};
+use x509_certificate::CapturedX509Certificate;
 
 use crate::{
     SideloadError,
@@ -24,17 +24,15 @@ use crate::{
         teams::DeveloperTeam,
     },
     sideload::builder::MaxCertsBehavior,
-    util::{callbacks::MaxCertsCallback, storage::SideloadingStorage},
+    util::storage::SideloadingStorage,
 };
-
-pub const APPLE_ROOT: &[u8] = include_bytes!("../assets/apple_root.cer");
-pub const APPLE_WWDR_G3_CERTIFICATE_DER: &[u8] = include_bytes!("../assets/AppleWWDRCAG3.cer");
 
 pub struct CertificateIdentity {
     pub machine_id: String,
     pub machine_name: String,
+    pub certificate: CapturedX509Certificate,
     pub private_key: RsaPrivateKey,
-    pub certificate: Certificate,
+    pub signing_key: InMemoryPrivateKey,
 }
 
 impl CertificateIdentity {
@@ -42,7 +40,7 @@ impl CertificateIdentity {
     /// Exports the certificate and private key as a PKCS#12 archive
     /// If you plan to import into SideStore/AltStore, use the machine id as the password
     pub async fn as_p12(&self, password: &str) -> Result<Vec<u8>, Report> {
-        let cert_der = self.certificate.to_der()?;
+        let cert_der = self.certificate.encode_der()?;
         let cert_der_len = cert_der.len();
         let key_der = self.private_key.to_pkcs8_der()?.as_bytes().to_vec();
         let key_der_len = key_der.len();
@@ -100,24 +98,20 @@ impl CertificateIdentity {
     }
 
     pub fn get_serial_number(&self) -> String {
-        let serial: String = self
-            .certificate
-            .tbs_certificate
-            .serial_number
-            .as_bytes()
-            .encode_hex::<String>();
+        let serial: String = self.certificate.serial_number_asn1().encode_hex();
         serial.trim_start_matches('0').to_string().to_uppercase()
     }
 
-    pub async fn retrieve<C: MaxCertsCallback>(
+    pub async fn retrieve(
         machine_name: &str,
         apple_email: &str,
         developer_session: &mut DeveloperSession,
         team: &DeveloperTeam,
         storage: &dyn SideloadingStorage,
-        max_certs_behavior: &MaxCertsBehavior<C>,
+        max_certs_behavior: &MaxCertsBehavior,
     ) -> Result<Self, Report> {
         let pr = Self::retrieve_private_key(apple_email, storage).await?;
+        let signing_key = Self::build_signing_key(&pr)?;
 
         let found = Self::find_matching(&pr, machine_name, developer_session, team).await;
         if let Ok(Some((cert, x509_cert))) = found {
@@ -127,6 +121,7 @@ impl CertificateIdentity {
                 machine_name: cert.machine_name.clone().unwrap_or_default(),
                 certificate: x509_cert,
                 private_key: pr,
+                signing_key,
             });
         }
 
@@ -150,76 +145,8 @@ impl CertificateIdentity {
             machine_name: cert.machine_name.clone().unwrap_or_default(),
             certificate: x509_cert,
             private_key: pr,
+            signing_key,
         })
-    }
-
-    pub fn profile_to_certificate_chain(
-        &self,
-        profile: &ProvisioningProfile,
-    ) -> Result<Vec<Certificate>, Report> {
-        let mut certificate_chain_der = Vec::with_capacity(profile.certificate_chain_der().len());
-
-        certificate_chain_der.extend(profile.certificate_chain_der().iter().cloned());
-
-        let mut certificate_candidates = Vec::new();
-
-        for certificate_der in certificate_chain_der {
-            let certificate = Certificate::from_der(certificate_der.as_ref())
-                .context(format!("failed to decode chain certificate"))?;
-            if !certificate_candidates.contains(&certificate) {
-                certificate_candidates.push(certificate);
-            }
-        }
-
-        for (name, certificate_der) in [
-            ("Apple WWDR G3", APPLE_WWDR_G3_CERTIFICATE_DER),
-            ("Apple Root CA", APPLE_ROOT),
-        ] {
-            let certificate = Certificate::from_der(certificate_der)
-                .context(format!("failed to decode bundled {name} certificate"))?;
-            if !certificate_candidates.contains(&certificate) {
-                certificate_candidates.push(certificate);
-            }
-        }
-
-        let certificate_chain = self.certificate_chain_for_signer(&certificate_candidates)?;
-        Ok(certificate_chain)
-    }
-
-    fn certificate_chain_for_signer(
-        &self,
-        certificate_candidates: &[Certificate],
-    ) -> Result<Vec<Certificate>, Report> {
-        if self.certificate.tbs_certificate.subject == self.certificate.tbs_certificate.issuer {
-            return Ok(Vec::new());
-        }
-
-        let mut issuer = self.certificate.tbs_certificate.issuer.clone();
-        let mut certificate_chain = Vec::new();
-
-        loop {
-            let certificate = certificate_candidates
-                .iter()
-                .find(|candidate| candidate.tbs_certificate.subject == issuer)
-                .ok_or_else(|| {
-                    report!(
-                        "missing issuer certificate {issuer} for the code-signing certificate chain"
-                    )
-                })?
-                .clone();
-
-            if certificate_chain.contains(&certificate) {
-                bail!("certificate chain contains a cycle");
-            }
-
-            let is_root = certificate.tbs_certificate.subject == certificate.tbs_certificate.issuer;
-            issuer = certificate.tbs_certificate.issuer.clone();
-            certificate_chain.push(certificate);
-
-            if is_root {
-                return Ok(certificate_chain);
-            }
-        }
     }
 
     async fn retrieve_private_key(
@@ -236,7 +163,7 @@ impl CertificateIdentity {
             return Ok(RsaPrivateKey::from_pkcs8_der(&priv_key)?);
         }
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let private_key = RsaPrivateKey::new(&mut rng, 2048)?;
         storage.store_data(
             &format!("{}/key", email_hash),
@@ -251,7 +178,7 @@ impl CertificateIdentity {
         machine_name: &str,
         developer_session: &mut DeveloperSession,
         team: &DeveloperTeam,
-    ) -> Result<Option<(DevelopmentCertificate, Certificate)>, Report> {
+    ) -> Result<Option<(DevelopmentCertificate, CapturedX509Certificate)>, Report> {
         let public_key_der = private_key
             .to_public_key()
             .to_pkcs1_der()?
@@ -267,18 +194,11 @@ impl CertificateIdentity {
                     && c.machine_id.is_some()
             })
         {
-            let x509_cert =
-                Certificate::from_der(cert.cert_content.as_ref().ok_or_report()?.as_ref())?;
+            let x509_cert = CapturedX509Certificate::from_der(
+                cert.cert_content.as_ref().ok_or_report()?.as_ref(),
+            )?;
 
-            let apple_public_key_der = x509_cert
-                .tbs_certificate
-                .subject_public_key_info
-                .subject_public_key
-                .as_bytes()
-                .ok_or_report()?
-                .to_vec();
-
-            if public_key_der == apple_public_key_der {
+            if public_key_der == x509_cert.public_key_data().as_ref() {
                 return Ok(Some((cert.clone(), x509_cert)));
             }
         }
@@ -286,13 +206,13 @@ impl CertificateIdentity {
         Ok(None)
     }
 
-    async fn request_certificate<C: MaxCertsCallback>(
+    async fn request_certificate(
         private_key: &RsaPrivateKey,
         machine_name: String,
         developer_session: &mut DeveloperSession,
         team: &DeveloperTeam,
-        max_certs_behavior: &MaxCertsBehavior<C>,
-    ) -> Result<(DevelopmentCertificate, Certificate), Report> {
+        max_certs_behavior: &MaxCertsBehavior,
+    ) -> Result<(DevelopmentCertificate, CapturedX509Certificate), Report> {
         let csr = Self::build_csr(private_key).context("Failed to generate CSR")?;
 
         let mut i = 0;
@@ -316,7 +236,7 @@ impl CertificateIdentity {
                             report!("Failed to find certificate after submitting CSR")
                         })?;
 
-                    let x509_cert = Certificate::from_der(
+                    let x509_cert = CapturedX509Certificate::from_der(
                         apple_cert
                             .cert_content
                             .as_ref()
@@ -344,7 +264,6 @@ impl CertificateIdentity {
                                 );
                             }
                             Self::revoke_others(
-                                &machine_name,
                                 developer_session,
                                 team,
                                 max_certs_behavior,
@@ -358,11 +277,6 @@ impl CertificateIdentity {
                         } else {
                             return Err(e);
                         }
-                    } else {
-                        // Signum patch: network/parse errors used to be swallowed
-                        // here; the loop then retried blindly and finally
-                        // reported "Reached max attempts", hiding the cause.
-                        return Err(e);
                     }
                 }
             };
@@ -390,25 +304,32 @@ impl CertificateIdentity {
         Ok(params.serialize_request(&subject_key)?.pem()?)
     }
 
-    async fn revoke_others<C: MaxCertsCallback>(
-        machine_name: &str,
+    fn build_signing_key(private_key: &RsaPrivateKey) -> Result<InMemoryPrivateKey, Report> {
+        let pkcs8 = private_key.to_pkcs8_der()?;
+        Ok(InMemoryPrivateKey::from_pkcs8_der(pkcs8.as_bytes())?)
+    }
+
+    async fn revoke_others(
         developer_session: &mut DeveloperSession,
         team: &DeveloperTeam,
-        max_certs_behavior: &MaxCertsBehavior<C>,
+        max_certs_behavior: &MaxCertsBehavior,
         error: SideloadError,
         existing_certs: &mut Vec<DevelopmentCertificate>,
     ) -> Result<(), Report> {
         match max_certs_behavior {
             MaxCertsBehavior::Revoke => {
-                // Signum patch: revoke our own stale certificates first, then
-                // other isideload-based tools, and only then certificates of
-                // third-party tools (AltStore, Sideloadly, Xcode...), whose
-                // apps on the phone would stop launching. `pop()` takes the
-                // last element, so the highest priority must sort last.
-                existing_certs.sort_by_key(|c| revoke_priority(c, machine_name));
+                // Prefer revoking Signum / isideload machine certs first, then others.
+                existing_certs.sort_by_key(|c| {
+                    let mn = c.machine_name.as_deref().unwrap_or("").to_ascii_lowercase();
+                    let prefer =
+                        mn.contains("signum") || mn.contains("isideload") || mn.contains("iloader");
+                    // false sorts before true when reversed — put preferred last so pop takes them first
+                    !prefer
+                });
+                // Keep trying until one revoke succeeds path returns (including 7252=already gone).
                 while let Some(cert) = existing_certs.pop() {
-                    let serial = match cert.serial_number.as_deref().map(str::trim) {
-                        Some(s) if !s.is_empty() => s.to_string(),
+                    let serial = match &cert.serial_number {
+                        Some(s) if !s.is_empty() => s.clone(),
                         _ => continue,
                     };
                     info!(
@@ -425,7 +346,7 @@ impl CertificateIdentity {
             }
             MaxCertsBehavior::Error => Err(error.into()),
             MaxCertsBehavior::Prompt(prompt_fn) => {
-                let certs_to_revoke = prompt_fn(existing_certs.to_vec()).await?;
+                let certs_to_revoke = prompt_fn(existing_certs);
                 if certs_to_revoke.is_none() {
                     error!("User did not select any certificates to revoke");
                     return Err(error.into());
@@ -441,79 +362,18 @@ impl CertificateIdentity {
             }
         }
     }
-}
 
-/// Signum patch: order in which certificates are revoked when the team hit
-/// the certificate limit (free Apple ID: 2-3 development certificates).
-/// Higher value = revoked earlier. Within a group, the certificate that
-/// expires first goes first.
-fn revoke_priority(
-    cert: &DevelopmentCertificate,
-    own_machine_name: &str,
-) -> (u8, std::cmp::Reverse<u64>) {
-    let machine = cert
-        .machine_name
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    let own = own_machine_name.trim().to_ascii_lowercase();
-    let group = if !own.is_empty() && machine == own {
-        3
-    } else if machine.contains("signum")
-        || machine.contains("isideload")
-        || machine.contains("iloader")
-    {
-        2
-    } else {
-        1
-    };
-    // Earlier expiry => larger key => popped first.
-    let expires = cert
-        .expiration_date
-        .map(|d| {
-            std::time::SystemTime::from(d)
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|v| v.as_secs())
-                .unwrap_or(0)
-        })
-        .unwrap_or(u64::MAX);
-    (group, std::cmp::Reverse(expires))
-}
+    pub fn setup_signing_settings<'a>(
+        &'a self,
+        settings: &mut SigningSettings<'a>,
+    ) -> Result<(), Report> {
+        settings.set_signing_key(
+            self.signing_key.as_key_info_signer(),
+            self.certificate.clone(),
+        );
+        settings.chain_apple_certificates();
+        settings.set_team_id_from_signing_certificate();
 
-#[cfg(test)]
-mod revoke_order_tests {
-    use super::*;
-
-    fn cert(machine: &str, serial: &str) -> DevelopmentCertificate {
-        DevelopmentCertificate {
-            name: None,
-            certificate_id: None,
-            serial_number: Some(serial.to_string()),
-            machine_id: None,
-            machine_name: Some(machine.to_string()),
-            cert_content: None,
-            certificate_platform: None,
-            certificate_type: None,
-            status: None,
-            status_code: None,
-            expiration_date: None,
-        }
-    }
-
-    #[test]
-    fn own_certificates_are_revoked_before_third_party_ones() {
-        let mut certs = vec![
-            cert("Signum", "A"),
-            cert("AltStore", "B"),
-            cert("iloader", "C"),
-            cert("Sideloadly", "D"),
-        ];
-        certs.sort_by_key(|c| revoke_priority(c, "Signum"));
-        let order: Vec<_> = std::iter::from_fn(|| certs.pop())
-            .map(|c| c.serial_number.unwrap())
-            .collect();
-        assert_eq!(order[0], "A");
-        assert_eq!(order[1], "C");
+        Ok(())
     }
 }

@@ -1,5 +1,5 @@
 use crate::dev::{
-    app_ids::AppId,
+    app_ids::{AppId, sanitize_developer_app_id_name},
     developer_session::DeveloperSession,
     device_type::{DeveloperDeviceType, dev_url},
     teams::DeveloperTeam,
@@ -17,8 +17,7 @@ pub struct AppGroup {
     pub application_group: String,
 }
 
-#[cfg_attr(feature = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait::async_trait)]
+#[async_trait::async_trait]
 pub trait AppGroupsApi {
     fn developer_session(&mut self) -> &mut DeveloperSession;
 
@@ -51,9 +50,11 @@ pub trait AppGroupsApi {
         identifier: &str,
         device_type: impl Into<Option<DeveloperDeviceType>> + Send,
     ) -> Result<AppGroup, Report> {
+        // Same rules as App ID name: Apple rejects Cyrillic/emoji in `name`.
+        let safe_name = sanitize_developer_app_id_name(name, identifier);
         let body = plist!(dict {
             "teamId": &team.team_id,
-            "name": crate::dev::sanitize_developer_name(name, identifier),
+            "name": &safe_name,
             "identifier": identifier,
         });
 

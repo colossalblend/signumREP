@@ -6,6 +6,8 @@ Options -Indexes
   RewriteRule ^index\.html$ index.php [L]
 </IfModule>
 
+# Оболочка страницы обязана перепроверяться: иначе у вернувшегося посетителя
+# остаётся вчерашняя разметка со старым номером версии.
 <IfModule mod_headers.c>
   <FilesMatch "\.(html|js)$">
     Header set Cache-Control "no-cache, must-revalidate, max-age=0"

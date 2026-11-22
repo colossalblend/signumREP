@@ -1,14 +1,13 @@
 use std::fmt::Display;
 
 use crate::{
-    dev::{developer_session::DeveloperSession, teams::DeveloperTeam},
-    sideload::{bundle::Bundle, sideloader::Sideloader},
-    util::{
-        callbacks::{ExtensionsBehaviorCallback, MaxCertsCallback},
-        storage::SideloadingStorage,
+    dev::{
+        certificates::DevelopmentCertificate, developer_session::DeveloperSession,
+        teams::DeveloperTeam,
     },
+    sideload::sideloader::Sideloader,
+    util::storage::SideloadingStorage,
 };
-use rootcause::prelude::*;
 
 /// Configuration for selecting a developer team during sideloading
 ///
@@ -35,55 +34,59 @@ impl Display for TeamSelection {
 }
 
 /// Behavior when the maximum number of development certificates is reached
-pub enum MaxCertsBehavior<C: MaxCertsCallback> {
+pub enum MaxCertsBehavior {
     /// If the maximum number of certificates is reached, revoke certs until it is possible to create a new certificate
     Revoke,
     /// If the maximum number of certificates is reached, return an error instead of creating a new certificate
     Error,
     /// If the maximum number of certificates is reached, prompt the user to select which certificates to revoke until it is possible to create a new certificate
-    Prompt(C),
+    Prompt(Box<dyn Fn(&Vec<DevelopmentCertificate>) -> Option<Vec<String>> + Send + Sync>),
 }
 
-#[derive(Debug, Clone)]
-/// Behavior used when an app contains sub bundles
-pub enum ExtensionsBehavior {
+/// The actual behavior choices for extensions (non-prompt variants)
+pub enum ExtensionsBehaviorChoice {
     /// Use the main app id/profile for all sub-bundles
     ReuseMain,
     /// Create separate app ids/profiles for each sub-bundle
     RegisterAll,
-    // Remove all sub-bundles
-    // RemoveExtensions,
+    /// Remove all sub-bundles
+    RemoveExtensions,
 }
 
-/// How to decide which ExtensionsBehavior to use
-pub enum ExtensionsBehaviorSelection<C: ExtensionsBehaviorCallback> {
-    /// Specify a behavior to use for all apps
-    Fixed(ExtensionsBehavior),
-    /// Callback function to choose every time an app has extensions
-    Prompt(C),
-}
+// /// Behavior used when an app contains sub bundles
+// pub enum ExtensionsBehavior {
+//     /// Use the main app id/profile for all sub-bundles
+//     ReuseMain,
+//     /// Create separate app ids/profiles for each sub-bundle
+//     RegisterAll,
+//     /// Remove all sub-bundles
+//     RemoveExtensions,
+//     /// Prompt the user to choose one of the above behaviors
+//     Prompt(fn(&Vec<String>) -> ExtensionsBehaviorChoice),
+// }
 
-impl<C: ExtensionsBehaviorCallback> ExtensionsBehaviorSelection<C> {
-    pub async fn behavior(&self, extensions: &[Bundle]) -> Result<ExtensionsBehavior, Report> {
-        match self {
-            ExtensionsBehaviorSelection::Fixed(b) => Ok(b.clone()),
-            ExtensionsBehaviorSelection::Prompt(callback) => callback(extensions).await,
-        }
-    }
-}
+// impl From<ExtensionsBehaviorChoice> for ExtensionsBehavior {
+//     fn from(choice: ExtensionsBehaviorChoice) -> Self {
+//         match choice {
+//             ExtensionsBehaviorChoice::ReuseMain => ExtensionsBehavior::ReuseMain,
+//             ExtensionsBehaviorChoice::RegisterAll => ExtensionsBehavior::RegisterAll,
+//             ExtensionsBehaviorChoice::RemoveExtensions => ExtensionsBehavior::RemoveExtensions,
+//         }
+//     }
+// }
 
-pub struct SideloaderBuilder<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> {
+pub struct SideloaderBuilder {
     developer_session: DeveloperSession,
     apple_email: String,
     team_selection: Option<TeamSelection>,
-    max_certs_behavior: Option<MaxCertsBehavior<C>>,
-    extensions_behavior: Option<ExtensionsBehaviorSelection<E>>,
+    max_certs_behavior: Option<MaxCertsBehavior>,
+    //extensions_behavior: Option<ExtensionsBehavior>,
     storage: Option<Box<dyn SideloadingStorage>>,
     machine_name: Option<String>,
     delete_app_after_install: bool,
 }
 
-impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> SideloaderBuilder<C, E> {
+impl SideloaderBuilder {
     /// Create a new `SideloaderBuilder` with the provided Apple developer session and Apple ID email.
     pub fn new(developer_session: DeveloperSession, apple_email: String) -> Self {
         SideloaderBuilder {
@@ -94,7 +97,7 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> SideloaderBuilder<C, E>
             apple_email,
             max_certs_behavior: None,
             delete_app_after_install: true,
-            extensions_behavior: None,
+            // extensions_behavior: None,
         }
     }
 
@@ -127,7 +130,7 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> SideloaderBuilder<C, E>
     }
 
     /// Set the behavior for when the maximum number of development certificates is reached
-    pub fn max_certs_behavior(mut self, behavior: MaxCertsBehavior<C>) -> Self {
+    pub fn max_certs_behavior(mut self, behavior: MaxCertsBehavior) -> Self {
         self.max_certs_behavior = Some(behavior);
         self
     }
@@ -138,17 +141,13 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> SideloaderBuilder<C, E>
         self
     }
 
-    pub fn extensions_behavior(mut self, behavior: ExtensionsBehaviorSelection<E>) -> Self {
-        self.extensions_behavior = Some(behavior);
-        self
-    }
+    // pub fn extensions_behavior(mut self, behavior: ExtensionsBehavior) -> Self {
+    //     self.extensions_behavior = Some(behavior);
+    //     self
+    // }
 
     /// Build the `Sideloader` instance with the provided configuration
-    pub fn build(self) -> Sideloader<C, E>
-    where
-        C: MaxCertsCallback,
-        E: ExtensionsBehaviorCallback,
-    {
+    pub fn build(self) -> Sideloader {
         Sideloader::new(
             self.developer_session,
             self.apple_email,
@@ -157,10 +156,8 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> SideloaderBuilder<C, E>
             self.machine_name.unwrap_or_else(|| "isideload".to_string()),
             self.storage
                 .unwrap_or_else(|| Box::new(crate::util::storage::new_storage())),
-            self.extensions_behavior
-                .unwrap_or(ExtensionsBehaviorSelection::Fixed(
-                    ExtensionsBehavior::RegisterAll,
-                )),
+            // self.extensions_behavior
+            //     .unwrap_or(ExtensionsBehavior::RegisterAll),
             self.delete_app_after_install,
         )
     }

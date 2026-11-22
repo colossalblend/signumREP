@@ -2,7 +2,6 @@ package pw.appbank.signum.data.api
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -31,43 +30,15 @@ class SignumApi {
             ?: root["data"] as? JsonArray
             ?: throw SignumApiException("Не удалось загрузить каталог")
         val bust = System.currentTimeMillis().toString()
-        val parsed = list.mapNotNull { el ->
+        val apps = list.mapNotNull { el ->
             val obj = el as? JsonObject ?: return@mapNotNull null
             parseCatalogApp(obj, bust)
         }
-        val apps = fillStoreIds(parsed)
         return CatalogFeed(
             apps = apps,
             groups = parseGroups(root),
             banners = parseBanners(root),
         )
-    }
-
-    /**
-     * Старый сервер не отдаёт `app_store_ids` в main.php. Без них карточку
-     * каталога нельзя объединить с результатом App Store, поэтому недостающие
-     * ID добираем одним пакетным запросом info.php?ids=, как ПК-клиент.
-     */
-    private fun fillStoreIds(apps: List<CatalogApp>): List<CatalogApp> {
-        val missing = apps.filter { it.app_store_ids.isEmpty() }.map { it.id }
-        if (missing.isEmpty()) return apps
-        val found = HashMap<String, List<String>>()
-        runCatching {
-            missing.chunked(150).forEach { chunk ->
-                val root = get("info.php", mapOf("ids" to chunk.joinToString(",")))
-                val data = root["data"] as? JsonObject ?: return@forEach
-                for ((id, payload) in data) {
-                    val ids = (payload as? JsonObject)?.arr("versions")
-                        ?.mapNotNull { (it as? JsonObject)?.anyStr("app_store_id")?.trim() }
-                        ?.filter { it.isNotEmpty() && it.all(Char::isDigit) }
-                        ?.distinct()
-                        .orEmpty()
-                    if (ids.isNotEmpty()) found[id] = ids
-                }
-            }
-        }
-        if (found.isEmpty()) return apps
-        return apps.map { app -> found[app.id]?.let { app.copy(app_store_ids = it) } ?: app }
     }
 
     fun fetchAppInfo(id: String): JsonObject {
@@ -98,39 +69,18 @@ class SignumApi {
         val url = root.str("download_url") ?: root.str("url")
         val notes = root.str("notes") ?: root.str("message")
         val has = latest != null && latest != APP_VERSION
-        // Как на ПК: нет поля — значит версия поддерживается.
-        val supported = (root["client_supported"] as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull ?: true
         return OtaUpdateInfo(
-            hasUpdate = has || root.bool("has_update") || !supported,
+            hasUpdate = has || root.bool("has_update"),
             version = latest,
             build = build,
             downloadUrl = url,
             notes = notes,
-            mandatory = root.bool("mandatory") || !supported,
+            mandatory = root.bool("mandatory"),
             sha256 = root.str("sha256"),
-            clientSupported = supported,
-            minClientVersion = root.str("min_client_version"),
         )
     }
 
-    fun fetchTb(id: String, force: Boolean = false): JsonObject =
-        get("tb.php", mapOf("id" to id, "force" to if (force) "1" else "0"))
-
-    /**
-     * Живой QR активации (tb.php). Код действует ограниченное время — сервер
-     * говорит сколько; по умолчанию 10 минут, как на ПК.
-     */
-    fun fetchTbActivation(id: String, force: Boolean): TbActivation {
-        val clean = id.trim()
-        if (clean.isEmpty()) throw SignumApiException("Не указан id активации")
-        val root = fetchTb(clean, force)
-        val payload = root.str("qr_payload")?.trim().orEmpty()
-        if (!root.bool("ok") || payload.isEmpty()) {
-            throw SignumApiException(root.str("error") ?: "Не удалось сгенерировать QR активации")
-        }
-        val ttl = (root.int("expires_in") ?: root.int("ttl_seconds") ?: 600).coerceAtLeast(0)
-        return TbActivation(payload = payload, expiresInSec = ttl, hint = root.str("hint"))
-    }
+    fun fetchTb(id: String): JsonObject = get("tb.php", mapOf("id" to id))
 
     private fun parseCatalogApp(obj: JsonObject, bust: String): CatalogApp? {
         val id = obj.anyStr("id") ?: return null
@@ -151,30 +101,12 @@ class SignumApi {
             activation = decodeActivation(obj.obj("activation")),
             bundle_id = obj.anyStr("bundle_id"),
             app_store_id = obj.anyStr("app_store_id", "store_id", "adam_id"),
-            app_store_ids = catalogStoreIds(obj),
             testflight = obj.obj("testflight")
                 ?.anyStr("url")
                 ?.trim()
                 ?.takeIf { it.startsWith("https://testflight.apple.com/") }
                 ?.let { TestFlightOffer(it) },
         )
-    }
-
-    /** ID из `app_store_ids`, `app_store_id` и ссылки `app_store_url` — как в ПК-клиенте. */
-    private fun catalogStoreIds(obj: JsonObject): List<String> {
-        val out = LinkedHashSet<String>()
-        fun push(value: String?) {
-            val id = value?.trim().orEmpty()
-            if (id.isNotEmpty() && id.all(Char::isDigit)) out += id
-        }
-        obj.arr("app_store_ids")?.forEach { el ->
-            push((el as? kotlinx.serialization.json.JsonPrimitive)?.content)
-        }
-        push(obj.anyStr("app_store_id", "store_id", "adam_id"))
-        obj.anyStr("app_store_url")?.let { url ->
-            Regex("/id(\\d+)").find(url)?.groupValues?.getOrNull(1)?.let(::push)
-        }
-        return out.toList()
     }
 
     private fun parseCatalogVersion(obj: JsonObject, bust: String): CatalogVersion? {
@@ -250,12 +182,9 @@ class SignumApi {
             if (!resp.isSuccessful) {
                 val err = root.str("error").orEmpty()
                 if (resp.code == 426 || err == "client_outdated") {
-                    val message = root.str("message") ?: "Приложение недоступно. Обновите Signum."
-                    clientOutdated.value = ClientOutdated(
-                        message = message,
-                        minClientVersion = root.str("min_client_version"),
+                    throw SignumApiException(
+                        root.str("message") ?: "Приложение недоступно. Обновите Signum.",
                     )
-                    throw SignumApiException(message)
                 }
                 throw SignumApiException(
                     root.str("message")
@@ -268,19 +197,9 @@ class SignumApi {
     }
 
     companion object {
-        /**
-         * Сервер ответил «клиент устарел» на любом запросе. Экран слушает это
-         * и закрывает приложение окном обновления — как ClientOutdatedGate на ПК.
-         */
-        val clientOutdated = kotlinx.coroutines.flow.MutableStateFlow<ClientOutdated?>(null)
-
         fun decodeActivation(obj: JsonObject?): AppActivation? {
             if (obj == null) return null
             return runCatching { SignumJson.decodeFromJsonElement<AppActivation>(obj) }.getOrNull()
         }
     }
 }
-
-data class ClientOutdated(val message: String, val minClientVersion: String? = null)
-
-data class TbActivation(val payload: String, val expiresInSec: Int, val hint: String? = null)

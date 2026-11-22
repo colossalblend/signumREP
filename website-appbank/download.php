@@ -18,7 +18,8 @@ try {
     if (!$url) {
         throw new RuntimeException('Release unavailable');
     }
-
+    // Send the browser straight to the versioned static file. The web server
+    // handles Content-Length, Range/206 and resumed downloads, without PHP limits.
     header('Location: ' . $url, true, 302);
     header('Content-Length: 0');
 } catch (Throwable $error) {

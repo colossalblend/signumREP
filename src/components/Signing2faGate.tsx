@@ -14,45 +14,25 @@ export default function Signing2faGate() {
   const [resending, setResending] = useState(false);
   const [error, setError] = useState("");
   const [hint, setHint] = useState("");
-  const [canSms, setCanSms] = useState(false);
 
   useEffect(() => {
-    // Подписка приходит асинхронно: если эффект сняли раньше (StrictMode,
-    // быстрый размонтаж), отписываемся сразу по приходу — иначе слушатель
-    // оставался висеть и окно 2FA открывалось дважды.
     let unlisten: (() => void) | undefined;
-    let disposed = false;
-    let unlistenClosed: (() => void) | undefined;
-    void listen<{ message?: string; sms?: boolean; can_sms?: boolean; retry?: boolean }>("signing-2fa-required", event => {
+    void listen<{ message?: string; sms?: boolean }>("signing-2fa-required", event => {
       setMessage(
         event.payload?.message?.trim() ||
           "Введите 6-значный код с iPhone.",
       );
-      setCanSms(!!event.payload?.can_sms);
       setCode("");
       setError("");
-      // Подсказку «код отправлен ещё раз» не стираем: новый запрос приходит
-      // как раз после повторной отправки.
+      setHint("");
       setOpen(true);
       setResending(false);
       setBusy(false);
     }).then(fn => {
-      if (disposed) fn();
-      else unlisten = fn;
-    }).catch(() => {});
-    // Подпись перестала ждать код (время вышло / отмена) — окно больше не нужно.
-    void listen("signing-2fa-closed", () => {
-      setOpen(false);
-      setCode("");
-      setHint("");
-    }).then(fn => {
-      if (disposed) fn();
-      else unlistenClosed = fn;
-    }).catch(() => {});
+      unlisten = fn;
+    });
     return () => {
-      disposed = true;
       unlisten?.();
-      unlistenClosed?.();
     };
   }, []);
 
@@ -76,13 +56,14 @@ export default function Signing2faGate() {
     }
   }
 
-  async function resend(action: "resend" | "sms" = "resend") {
+  async function resend() {
     setResending(true);
     setError("");
     setHint("");
     try {
-      await command("submit_signing_2fa", { code: null, action });
-      setHint(action === "sms" ? "Просим Apple прислать код по SMS…" : "Запрос на повторную отправку кода отправлен.");
+                                                                                        
+      await command("submit_signing_2fa", { code: null, action: "resend" });
+      setHint("Запрос на повторную отправку кода отправлен.");
       setCode("");
     } catch (err) {
       setError(errorMessage(err));
@@ -93,7 +74,6 @@ export default function Signing2faGate() {
 
   async function cancel() {
     setOpen(false);
-    setHint("");
     void command("submit_signing_2fa", { code: "", action: "cancel" }).catch(() => undefined);
   }
 
@@ -129,21 +109,11 @@ export default function Signing2faGate() {
               type="button"
               className="btn-secondary"
               disabled={busy || resending}
-              onClick={() => void resend("resend")}
+              onClick={() => void resend()}
             >
               {resending ? <LoaderCircle size={16} className="animate-spin" /> : null}
               Отправить код ещё раз
             </button>
-            {canSms && (
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={busy || resending}
-                onClick={() => void resend("sms")}
-              >
-                Прислать SMS
-              </button>
-            )}
             <button type="button" className="btn-secondary" disabled={busy || resending} onClick={() => void cancel()}>
               Отмена
             </button>

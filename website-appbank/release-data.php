@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 
+/** The website and in-app updater share this single release manifest. */
 function signum_site_releases(?string $manifestPath = null): array
 {
     $manifestPath = $manifestPath ?? dirname(__DIR__, 2) . '/api.appbank.pw/signum/releases.php';

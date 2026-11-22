@@ -7,7 +7,8 @@ $maintGuard = __DIR__ . '/../maintenance_guard.php';
 if (!is_file($maintGuard)) {
     $maintGuard = __DIR__ . '/../../maintenance_guard.php';
 }
-
+// The production host provides this guard outside the site directory. Keep
+// local preview/builds usable when that deployment-only file is unavailable.
 if (is_file($maintGuard)) {
     require $maintGuard;
 }

@@ -51,17 +51,6 @@ class AppStoreClient(
     private val versionLabelCache = ConcurrentHashMap<String, String>()
     private val bundleAdamCache = ConcurrentHashMap<String, String>()
 
-    // Данные аккаунта из ответа authenticate (accountInfo.address), как в
-    // ipatool Account: имя нужно для iTunesMetadata.plist и `auth info`.
-    private var accountAppleId: String? = null
-    private var firstName: String = ""
-    private var lastName: String = ""
-
-    // Сумка bag.xml: адреса redownload/update/songDownloadDone. Берётся один
-    // раз на час; без сети — значения по умолчанию, как у ipatool.
-    @Volatile
-    private var bagCache: Pair<Long, StoreProtocol.Bag>? = null
-
     fun isReady(): Boolean = !passwordToken.isNullOrBlank() && !dsPersonId.isNullOrBlank()
 
     fun clear() {
@@ -72,9 +61,6 @@ class AppStoreClient(
         cookies.clear()
         versionIdCache.clear()
         bundleAdamCache.clear()
-        accountAppleId = null
-        firstName = ""
-        lastName = ""
         pod = "25"
         storeFront = "143469-2,8"
     }
@@ -179,13 +165,10 @@ class AppStoreClient(
         for (endpoint in endpoints) {
             var url = endpoint
             for (attempt in 1..2) {
-                // ipatool 1.3.2: на native-адресе повтор с кодом 2FA — это attempt 2.
-                val native = url.contains("auth.itunes.apple.com/auth/", ignoreCase = true)
-                val requestAttempt = if (native && code.isNotEmpty()) 2 else attempt
                 val xml = Plist.xml(
                     Plist.dict(
                         "appleId" to email,
-                        "attempt" to requestAttempt.toString(),
+                        "attempt" to attempt.toString(),
                         "guid" to storeGuid,
                         "password" to credential,
                         "rmp" to "0",
@@ -213,37 +196,24 @@ class AppStoreClient(
                     .post(xml.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
                     .build()
                 val response = try {
-                    // Транспортный повтор как в do_login: до трёх отправок на 5xx
-                    // с паузой 250 мс × попытка. 429 — сразу стоп.
-                    var tx = 0
-                    var reply: Triple<Int, okhttp3.Headers, ByteArray>? = null
-                    while (true) {
-                        tx++
-                        reply = StorePodRouting.execute(
-                            url,
-                            send = { nextUrl ->
-                                url = nextUrl
-                                val routed = req.newBuilder().url(nextUrl).removeHeader("Cookie").apply {
-                                    if (cookies.isNotEmpty()) header("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
-                                }.build()
-                                Http.itunesNoFollow.newCall(routed).execute().use { resp ->
-                                    ingestCookies(resp.headers("Set-Cookie"), resp.headers)
-                                    StorePodRouting.Reply(
-                                        resp.code, Triple(resp.code, resp.headers, resp.body?.bytes() ?: ByteArray(0)),
-                                        resp.header("Location"), resp.header("pod") ?: cookies["itspod"],
-                                    )
-                                }
-                            },
-                            onPod = { pod = it },
-                            resolveRedirect = ::resolveAuthRedirect,
-                        )
-                        if (reply!!.first == 429) {
-                            return AuthOutcome.Failed("Apple временно ограничила вход (HTTP 429). Подождите несколько минут и повторите.")
-                        }
-                        if (reply.first / 100 != 5 || tx >= 3) break
-                        Thread.sleep(250L * tx)
-                    }
-                    reply!!
+                    StorePodRouting.execute(
+                        url,
+                        send = { nextUrl ->
+                            url = nextUrl
+                            val routed = req.newBuilder().url(nextUrl).removeHeader("Cookie").apply {
+                                if (cookies.isNotEmpty()) header("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
+                            }.build()
+                            Http.itunesNoFollow.newCall(routed).execute().use { resp ->
+                                ingestCookies(resp.headers("Set-Cookie"), resp.headers)
+                                StorePodRouting.Reply(
+                                    resp.code, Triple(resp.code, resp.headers, resp.body?.bytes() ?: ByteArray(0)),
+                                    resp.header("Location"), resp.header("pod") ?: cookies["itspod"],
+                                )
+                            }
+                        },
+                        onPod = { pod = it },
+                        resolveRedirect = ::resolveAuthRedirect,
+                    )
                 } catch (e: java.net.UnknownHostException) {
                     // A failed auth hostname must not prevent the remaining
                     // supported Store endpoints from being tried.
@@ -267,17 +237,8 @@ class AppStoreClient(
                 val failure = dict.str("failureType").orEmpty()
                 val msg = dict.str("customerMessage").orEmpty()
                 passwordToken = dict.str("passwordToken")
-                // Native-адрес может не прислать dsPersonId в теле, а положить
-                // DSID в заголовок x-dsid (do_login).
                 dsPersonId = dict.str("dsPersonId") ?: dict.dict("accountInfo")?.str("dsPersonId")
-                    ?: headers["x-dsid"]?.trim()?.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
                 if (!passwordToken.isNullOrBlank() && !dsPersonId.isNullOrBlank()) {
-                    val info = dict.dict("accountInfo")
-                    val address = info?.dict("address")
-                    accountAppleId = info?.str("appleId") ?: email
-                    firstName = address?.str("firstName").orEmpty()
-                    lastName = address?.str("lastName").orEmpty()
-                    StorePodRouting.validPod(headers["pod"])?.let { pod = it }
                     return AuthOutcome.Success
                 }
                 // Гейт 2FA — это ПУСТОЙ failureType вместе с MZFinance.BadLogin.
@@ -307,10 +268,8 @@ class AppStoreClient(
                     return AuthOutcome.Failed("Аккаунт Apple ID отключён.")
                 }
                 if (failure.isNotBlank() && failure != "0") {
-                    // do_login: при заполненном failureType — текст Apple или
-                    // «something went wrong».
                     lastFailure = AuthOutcome.Failed(
-                        if (msg.isNotBlank()) localizeStoreMessage(msg) else "Apple отклонила вход (failureType $failure). Повторите позже.",
+                        if (msg.isNotBlank()) localizeStoreMessage(msg) else STORE_SESSION_MESSAGE,
                     )
                     break
                 }
@@ -385,9 +344,6 @@ class AppStoreClient(
             dsPersonId = dict.str("dsPersonId")
             dict.str("storeFront")?.let { storeFront = it }
             StorePodRouting.validPod(dict.str("pod"))?.let { pod = it }
-            accountAppleId = dict.str("accountAppleId")
-            firstName = dict.str("firstName").orEmpty()
-            lastName = dict.str("lastName").orEmpty()
             dict.str("cookies")?.split(';')?.forEach { part ->
                 val idx = part.indexOf('=')
                 if (idx > 0) cookies[part.substring(0, idx).trim()] = part.substring(idx + 1).trim()
@@ -402,9 +358,6 @@ class AppStoreClient(
             "dsPersonId" to dsPersonId,
             "storeFront" to storeFront,
             "pod" to pod,
-            "accountAppleId" to accountAppleId,
-            "firstName" to firstName,
-            "lastName" to lastName,
             "cookies" to cookies.entries.joinToString(";") { "${it.key}=${it.value}" },
         )
         store.storeSessionBlob(
@@ -451,78 +404,6 @@ class AppStoreClient(
                 )
             }.distinctBy { it.adamId }
         }
-    }
-
-    /** Сведения об аккаунте — `ipatool auth info`. */
-    data class AccountInfo(
-        val email: String,
-        val name: String,
-        val dsid: String,
-        val storeFront: String,
-        /** Код страны витрины («RU»); если витрина неизвестна — сама витрина. */
-        val country: String,
-        val pod: String,
-    )
-
-    @Synchronized
-    fun accountInfo(): AccountInfo? {
-        restoreTokens()
-        if (!isReady()) return null
-        val email = accountAppleId ?: loginEmail ?: store.activeEmail() ?: return null
-        return AccountInfo(
-            email = email,
-            name = "$firstName $lastName".trim(),
-            dsid = dsPersonId.orEmpty(),
-            storeFront = storeFront,
-            country = StoreProtocol.countryCodeFromStorefront(storeFront) ?: storeFront,
-            pod = pod,
-        )
-    }
-
-    /**
-     * `ipatool auth revoke`: забыть сессию App Store активного аккаунта
-     * (токен, куки, pod). Пароль и сам аккаунт в списке не трогаем — это
-     * делает SignumEngine.logout().
-     */
-    @Synchronized
-    fun revoke() {
-        val email = store.activeEmail()
-        clear()
-        email?.let { store.deleteSessionBlob("store_$it") }
-    }
-
-    /**
-     * `ipatool search`: iTunes Search по витрине вошедшего аккаунта
-     * (entity=software,iPadSoftware, media=software), limit как у ipatool.
-     */
-    fun searchAccount(term: String, limit: Int = 5): List<AppStoreSearchHit> {
-        val q = term.trim()
-        if (q.isEmpty()) return emptyList()
-        restoreTokens()
-        val cc = StoreProtocol.countryCodeFromStorefront(storeFront)
-            ?: error("Не удалось определить страну витрины Apple ID ($storeFront).")
-        val req = Request.Builder().url(StoreProtocol.searchUrl(q, cc, limit.coerceIn(1, 200)))
-            .header("User-Agent", STORE_UA).get().build()
-        Http.itunes.newCall(req).execute().use { resp ->
-            if (resp.code != 200) error("Поиск App Store не удался (HTTP ${resp.code}).")
-            val root = SignumJson.parseToJsonElement(resp.body?.string().orEmpty()).jsonObject
-            return root["results"]?.jsonArray.orEmpty().mapNotNull { el -> hitFromJson(el.jsonObject) }
-        }
-    }
-
-    private fun hitFromJson(o: kotlinx.serialization.json.JsonObject): AppStoreSearchHit? {
-        val adam = o["trackId"]?.jsonPrimitive?.content ?: return null
-        return AppStoreSearchHit(
-            adamId = adam,
-            name = o["trackName"]?.jsonPrimitive?.content ?: "App",
-            artist = o["artistName"]?.jsonPrimitive?.content,
-            artistId = o["artistId"]?.jsonPrimitive?.content,
-            artwork = o["artworkUrl100"]?.jsonPrimitive?.content ?: o["artworkUrl60"]?.jsonPrimitive?.content,
-            bundleId = o["bundleId"]?.jsonPrimitive?.content,
-            version = o["version"]?.jsonPrimitive?.content,
-            minIos = o["minimumOsVersion"]?.jsonPrimitive?.content,
-            price = o["formattedPrice"]?.jsonPrimitive?.content,
-        )
     }
 
     fun search(term: String, country: String = "ru"): List<AppStoreSearchHit> {
@@ -809,29 +690,6 @@ class AppStoreClient(
         }
     }
 
-    /**
-     * `ipatool get-version-metadata`: маркетинговая версия, дата выпуска и
-     * минимальная iOS одной сборки. Минимальная iOS читается из Info.plist
-     * архива частичными запросами (только для настоящего .ipa) и кэшируется.
-     */
-    @Synchronized
-    fun versionMetadata(adamId: String, externalVersionId: String): StoreProtocol.VersionMetadata {
-        val adam = adamId.trim()
-        val ext = externalVersionId.trim()
-        require(adam.isNotEmpty() && ext.isNotEmpty() && ext != "latest") { "Нужны номер приложения и номер сборки." }
-        ensureAuth()
-        val dict = downloadPlist(adam, purchase = false, externalVersionId = ext)
-        val song = firstSong(dict) ?: throw StoreProtocol.LicenseRequiredException()
-        val meta = StoreProtocol.versionMetadataFromItem(song, ext)
-        if (meta.displayVersion.isNotEmpty()) {
-            val owner = store.activeEmail().orEmpty()
-            versionLabelCache["$owner:$adam:$ext"] = meta.displayVersion
-            store.storeHistoryCache("version_label_$owner:$adam:$ext", meta.displayVersion)
-        }
-        val minIos = runCatching { versionMinIos(adam, ext) }.getOrNull()
-        return meta.copy(minimumOSVersion = minIos, supportedPlatforms = if (minIos != null) listOf("iOS") else emptyList())
-    }
-
     fun ownsListing(appStoreId: String?, bundleId: String?, force: Boolean = false): Boolean {
         val adam = resolveAdamId(appStoreId, bundleId) ?: return false
         return listVersionIds(adam, force).isNotEmpty()
@@ -847,50 +705,26 @@ class AppStoreClient(
     ): File {
         ensureAuth()
         onProgress(8f, "Покупка в App Store…")
-        var bought = false
         if (!alreadyOwned) {
-            try {
-                buy(adamId)
-                bought = true
-            } catch (error: Exception) {
-                if (error is pw.appbank.signum.data.jobs.JobCancelledException) throw error
+            runCatching { buy(adamId) }.onFailure { error ->
                 val message = error.message.orEmpty().lowercase()
-                val alreadyOwnedResponse = error is StoreProtocol.AlreadyPurchasedException ||
-                    "already" in message ||
+                val alreadyOwnedResponse = "already" in message ||
                     "уже" in message && ("куп" in message || "приобр" in message) ||
                     "purchased" in message
-                // Платное приложение могло быть куплено раньше: пробуем скачать,
-                // а если лицензии нет — сообщим об этом ниже.
-                if (!alreadyOwnedResponse && error !is StoreProtocol.PaidAppNotSupportedException) throw error
-                Log.i("SignumStore", "buy skipped: ${error.javaClass.simpleName}")
+                if (!alreadyOwnedResponse) throw error
+                Log.i("SignumStore", "buy skipped: app is already owned")
             }
         }
         onProgress(22f, "Запрашиваем IPA…")
-        val plist = try {
-            downloadPlist(adamId, purchase = true, externalVersionId = externalVersionId, acceptTerms = true)
-        } catch (e: StoreProtocol.LicenseRequiredException) {
-            // download --purchase: лицензии нет — получаем её и повторяем один раз.
-            if (bought) throw e
-            onProgress(15f, "Покупка в App Store…")
-            val purchase = buy(adamId)
-            // Apple ставит выдачу в очередь асинхронно — ждём, если ссылок в ответе нет.
-            if (StoreProtocol.songList(purchase).isEmpty()) Thread.sleep(3000)
-            onProgress(22f, "Запрашиваем IPA…")
-            downloadPlist(adamId, purchase = true, externalVersionId = externalVersionId, acceptTerms = true)
-        }
+        val plist = downloadPlist(adamId, purchase = true, externalVersionId = externalVersionId, acceptTerms = true)
         val song = firstSong(plist) ?: error("App Store не вернул ссылку на приложение.")
         val url = song.str("URL") ?: error("App Store не вернул ссылку на приложение.")
         onProgress(35f, "Скачиваем IPA…")
-        val refresh = {
+        downloadIpaFile(url, dest, onProgress) {
             val again = downloadPlist(adamId, purchase = true, externalVersionId = externalVersionId)
             firstSong(again)?.str("URL")
         }
-        downloadIpaFile(url, dest, onProgress, refresh)
         if (dest.length() < 1000) error("Скачанный файл повреждён")
-        verifyMd5(song, dest, onProgress, url, refresh)
-        // Отчёт о завершённой загрузке — как iTunes; не влияет на результат.
-        runCatching { reportDownloadDone(song, adamId) }
-            .onFailure { Log.i("SignumStore", "songDownloadDone: ${it.message}") }
         // Лицензию Apple отдаёт отдельно от файла, в теле того же ответа. Без
         // неё приложение ставится, но вылетает при запуске: iOS не получает
         // ключ FairPlay. Десктоп вшивал её давно, Android — нет.
@@ -903,76 +737,15 @@ class AppStoreClient(
         return dest
     }
 
-    /**
-     * Проверка md5 из ответа Store, как в ipatool: при несовпадении файл
-     * удаляется и скачивается заново один раз; снова не сошлось — ошибка.
-     */
-    private fun verifyMd5(
-        song: NSDictionary,
-        dest: File,
-        onProgress: (Float, String) -> Unit,
-        url: String,
-        refresh: () -> String?,
-    ) {
-        val expected = song.str("md5")?.lowercase() ?: return
-        onProgress(65f, "Проверяем целостность IPA…")
-        if (StoreProtocol.md5Hex(dest).equals(expected, ignoreCase = true)) return
-        Log.w("SignumStore", "md5 mismatch, re-downloading once")
-        dest.delete()
-        onProgress(35f, "Файл повреждён при загрузке, скачиваем заново…")
-        downloadIpaFile(url, dest, onProgress, refresh)
-        val actual = StoreProtocol.md5Hex(dest)
-        if (!actual.equals(expected, ignoreCase = true)) {
-            dest.delete()
-            error("IPA повреждён: контрольная сумма не совпала и после повторной загрузки (md5 $expected, получено $actual).")
-        }
-    }
-
-    /** songDownloadDone: GET с pod аккаунта, songId и guid (report_download_done). */
-    private fun reportDownloadDone(song: NSDictionary, adamId: String): Boolean {
-        val songId = song.str("songId")?.toLongOrNull()?.takeIf { it != 0L } ?: adamId.toLong()
-        val url = StoreProtocol.songDownloadDoneUrl(
-            bag().songDownloadDoneEndpoint, pod, songId, song.str("download-id").orEmpty(), storeGuid,
-        )
-        val dsid = dsPersonId.orEmpty()
-        val req = Request.Builder().url(url)
-            .header("User-Agent", STORE_UA)
-            .header("Accept", "*/*")
-            .header("Accept-Language", "en-US")
-            .header("iCloud-DSID", dsid)
-            .header("X-Dsid", dsid)
-            .header("X-Apple-Store-Front", storeFront)
-            .apply {
-                if (cookies.isNotEmpty()) header("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
-            }
-            .get().build()
-        return Http.itunes.newCall(req).execute().use { resp ->
-            resp.code == 200 && resp.body?.string().orEmpty().contains("<string>success</string>")
-        }
-    }
-
-    /**
-     * Достаёт из ответа `sinfs` и `metadata` и кладёт их внутрь IPA.
-     * iTunesMetadata.plist дополняется как у iTunes/ipatool: Apple ID, имя,
-     * downloadInfo, дата загрузки, is-purchased-redownload, storeCohort.
-     */
+    /** Достаёт из ответа `sinfs` и `metadata` и кладёт их внутрь IPA. */
     private fun injectLicense(dest: File, song: NSDictionary) {
-        val sinfs = StoreProtocol.sinfs(song)
-        val source = song.objectForKey("metadata") as? NSDictionary
-        val metadata = source?.let { meta ->
-            runCatching {
-                Plist.xml(
-                    StoreProtocol.patchedMetadata(
-                        meta,
-                        appleId = accountAppleId ?: loginEmail ?: store.activeEmail().orEmpty(),
-                        firstName = firstName,
-                        lastName = lastName,
-                        storeFront = storeFront,
-                        dsid = dsPersonId.orEmpty(),
-                        nowMillis = System.currentTimeMillis(),
-                    ),
-                )
-            }.getOrElse { runCatching { Plist.xml(meta) }.getOrNull() }
+        val sinfs = (song.objectForKey("sinfs") as? NSArray)
+            ?.array
+            ?.mapNotNull { (it as? NSDictionary)?.objectForKey("sinf") as? NSData }
+            ?.map { it.bytes() }
+            .orEmpty()
+        val metadata = (song.objectForKey("metadata") as? NSDictionary)?.let { meta ->
+            runCatching { Plist.xml(meta) }.getOrNull()
         }
         if (sinfs.isEmpty() && metadata == null) return
         IpaTweaks.injectStoreLicense(dest, metadata, sinfs)
@@ -1132,65 +905,37 @@ class AppStoreClient(
         }
     }
 
-    /**
-     * Покупка бесплатного приложения — `ipatool purchase` (AppStore::purchase).
-     *
-     * Платное приложение не покупаем (PaidAppNotSupported). buyProduct идёт на
-     * адрес с pod аккаунта; при 2059 «временно недоступно» — повтор с
-     * pricingParameters=GAME (Arcade). Отказ сессии — один тихий повторный вход.
-     * Диалог условий Apple принимаем и повторяем покупку (дополнение Signum).
-     */
-    private fun buy(adamId: String): NSDictionary {
-        val adam = adamId.trim().toLongOrNull() ?: error("Неверный номер приложения: $adamId")
-        val price = runCatching { lookupPrice(adam) }.getOrNull()
-        if (price != null && price > 0.0) throw StoreProtocol.PaidAppNotSupportedException()
-        return withSilentRelogin {
-            try {
-                purchaseOnce(adam, StoreProtocol.PRICING_APPSTORE)
-            } catch (e: StoreProtocol.TemporarilyUnavailableException) {
-                purchaseOnce(adam, StoreProtocol.PRICING_ARCADE)
-            }
-        }
-    }
-
-    private fun purchaseOnce(adam: Long, pricing: String): NSDictionary {
-        val body = StoreProtocol.purchasePayload(storeGuid, adam, pricing)
+    private fun buy(adamId: String) {
         val ani = anisette.getData(gs)
-        var (status, dict) = postStore(StoreProtocol.purchaseUrl(pod), body, ani)
+        val body = Plist.dict(
+            "guid" to storeGuid,
+            "salableAdamId" to adamId,
+            "price" to "0",
+            "pricingParameters" to "STDQ",
+            "productType" to "C",
+            "appExtVrsId" to "0",
+        )
+        var dict = postStorePlist(
+            "https://buy.itunes.apple.com/WebObjects/MZBuy.woa/wa/buyProduct",
+            body,
+            ani,
+        )
         if (dict != null && isTermsDialog(dict) && acceptStoreTerms(ani, dict)) {
-            val again = postStore(StoreProtocol.purchaseUrl(pod), body, ani)
-            status = again.first
-            dict = again.second
+            dict = postStorePlist(
+                "https://buy.itunes.apple.com/WebObjects/MZBuy.woa/wa/buyProduct",
+                body,
+                ani,
+            )
         }
-        val d = dict ?: NSDictionary()
-        if (isTermsDialog(d)) error("Apple просит подтвердить условия. Подождите минуту и повторите установку.")
-        return StoreProtocol.checkPurchase(status, d)
-    }
-
-    /** Цена из iTunes lookup на витрине аккаунта; null — не удалось узнать. */
-    private fun lookupPrice(adam: Long): Double? {
-        val cc = StoreProtocol.countryCodeFromStorefront(storeFront) ?: return null
-        val req = Request.Builder().url(StoreProtocol.lookupUrl(cc, adamId = adam.toString()))
-            .header("User-Agent", STORE_UA).get().build()
-        return Http.itunes.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return@use null
-            val root = SignumJson.parseToJsonElement(resp.body?.string().orEmpty()).jsonObject
-            root["results"]?.jsonArray?.firstOrNull()?.jsonObject?.get("price")?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+        val fail = dict?.str("failureType")
+        val msg = dict?.str("customerMessage")
+        if (fail != null && fail != "0" && msg?.contains("already", true) != true) {
+            if (msg?.contains("not found", true) == true) return
+            if (isTermsDialog(dict)) {
+                error("Apple просит подтвердить условия. Подождите минуту и повторите установку.")
+            }
+            if (!msg.isNullOrBlank()) error(localizeStoreMessage(msg))
         }
-    }
-
-    /**
-     * Один тихий повторный вход по сохранённому паролю при отказе сессии
-     * (silent_relogin в ipatool): 2034 / 2042 / 1008 / «Sign In to the iTunes Store».
-     */
-    private fun <T> withSilentRelogin(block: () -> T): T = try {
-        block()
-    } catch (e: StoreProtocol.PasswordTokenExpiredException) {
-        Log.i("SignumStore", "session expired, silent re-login")
-        passwordToken = null
-        cookies.clear()
-        authenticate(force = true)
-        block()
     }
 
     private fun downloadPlist(
@@ -1200,118 +945,7 @@ class AppStoreClient(
         versionOnly: Boolean = false,
         acceptTerms: Boolean = false,
     ): NSDictionary {
-        val ext = externalVersionId?.trim()?.takeIf { it.isNotEmpty() && it != "latest" }
-        return try {
-            withSilentRelogin {
-                resolveDownload(adamId, ext, needSinfs = purchase && !versionOnly, acceptTerms = acceptTerms)
-            }
-        } catch (e: StoreProtocol.LicenseRequiredException) {
-            // Список версий: «не куплено» — это пустой ответ, а не ошибка.
-            if (versionOnly) NSDictionary() else throw e
-        } catch (e: StoreProtocol.PasswordTokenExpiredException) {
-            if (versionOnly) error(PASSWORD_TOKEN_MESSAGE) else throw e
-        }
-    }
-
-    /**
-     * Каскад скачивания ipatool 1.3.2 (resolve_download), без локального
-     * состояния библиотеки:
-     *  1) volumeStoreDownloadProduct (с passwordToken: kbsync на Android не
-     *     вычислить — storeagent здесь не эмулируется), с повтором 2042
-     *     hasBeenAuthedForBuy;
-     *  2) redownloadProduct с версией, закреплённой через mdm-lockup;
-     *  3) updateProduct со строгой проверкой ответа.
-     * Ответ «обслужен», если есть элемент (а для скачивания — и sinf).
-     * Ничего не отдало и лицензии нет — LicenseRequiredException.
-     */
-    private fun resolveDownload(
-        adamId: String,
-        externalVersionId: String?,
-        needSinfs: Boolean,
-        acceptTerms: Boolean,
-    ): NSDictionary {
-        val adam = adamId.trim().toLongOrNull() ?: error("Неверный номер приложения: $adamId")
         val ani = anisette.getData(gs)
-
-        // ── 1) volumeStoreDownloadProduct ────────────────────────────────────
-        var vs = volumeStoreDownload(adamId, externalVersionId, needSinfs, authed = false, ani = ani)
-        if (acceptTerms && isTermsDialog(vs) && acceptStoreTerms(ani, vs)) {
-            vs = volumeStoreDownload(adamId, externalVersionId, needSinfs, authed = false, ani = ani)
-        }
-        if (StoreProtocol.served(vs, needSinfs)) return vs
-        var vsFailure = StoreProtocol.failureOf(vs)
-        if (StoreProtocol.isAuthorizationDialog(vs)) {
-            Log.i("SignumStore", "volumeStoreDownload: auth dialog, retry hasBeenAuthedForBuy")
-            vs = volumeStoreDownload(adamId, externalVersionId, needSinfs, authed = true, ani = ani)
-            if (StoreProtocol.served(vs, needSinfs)) return vs
-            vsFailure = StoreProtocol.failureOf(vs)
-        }
-        val vsMessage = StoreProtocol.scalar(vs, "customerMessage")
-        if (StoreProtocol.isSessionFailure(vs) || isPasswordTokenFailure(vsFailure, vsMessage) ||
-            isUnknownStoreFailure(vsFailure, vsMessage) || isItunesSignIn(vsFailure, vsMessage)
-        ) {
-            throw StoreProtocol.PasswordTokenExpiredException()
-        }
-        if (isTermsDialog(vs)) error("Apple просит подтвердить условия. Подождите минуту и повторите установку.")
-        var customerMessage = vsMessage
-
-        // Закреплённая версия для redownload и updateProduct (пусто — без закрепления).
-        val pin = externalVersionId ?: runCatching { lookupLatestExternalVersionId(adam) }
-            .onFailure { Log.i("SignumStore", "platform lookup: ${it.message} — unpinned redownload") }
-            .getOrNull().orEmpty()
-        val bag = bag()
-
-        // ── 2) redownloadProduct, затем 3) updateProduct ─────────────────────
-        val (rdStatus, rdRaw) = postDownloadFamily("${bag.redownloadEndpoint}?guid=$storeGuid", adam, pin)
-        val rd = rdRaw ?: NSDictionary()
-        if (StoreProtocol.served(rd, needSinfs)) return rd
-        val rdUnavailable = rdStatus != 500 && StoreProtocol.isRedownloadUnavailable(rd)
-        StoreProtocol.scalar(rd, "customerMessage").takeIf { it.isNotEmpty() }?.let { customerMessage = it }
-        val wantUpdate = (rdStatus == 500 && rd.count() == 0) ||
-            StoreProtocol.isUnavailableResponse(rdStatus, rd) ||
-            rdUnavailable ||
-            (needSinfs && rdStatus == 200 && StoreProtocol.scalar(rd, "failureType").isEmpty() && !StoreProtocol.hasSinfs(rd)) ||
-            (!needSinfs && StoreProtocol.songList(rd).isEmpty())
-        if (wantUpdate && pin.isNotEmpty()) {
-            try {
-                val (upStatus, upRaw) = postDownloadFamily("${bag.updateEndpoint}?guid=$storeGuid", adam, pin)
-                val up = StoreProtocol.checkUpdateResponse(upStatus, upRaw ?: NSDictionary(), adam, pin, null)
-                if (StoreProtocol.served(up, needSinfs)) return up
-                StoreProtocol.scalar(up, "customerMessage").takeIf { it.isNotEmpty() }?.let { customerMessage = it }
-                if (rdUnavailable) throw StoreProtocol.LicenseRequiredException()
-            } catch (e: StoreProtocol.LicenseRequiredException) {
-                throw e
-            } catch (e: StoreProtocol.PasswordTokenExpiredException) {
-                throw e
-            } catch (e: StoreProtocol.StoreException) {
-                if (rdUnavailable) throw StoreProtocol.LicenseRequiredException()
-                if (customerMessage.isEmpty()) customerMessage = e.message.orEmpty()
-            } catch (e: java.io.IOException) {
-                if (rdUnavailable) throw StoreProtocol.LicenseRequiredException()
-                if (customerMessage.isEmpty()) customerMessage = e.message.orEmpty()
-            }
-        } else if (rdUnavailable) {
-            throw StoreProtocol.LicenseRequiredException()
-        }
-        // Лицензионные отказы старого ответа (1002 и т. п.) — тоже «не куплено».
-        if (vsFailure != StoreProtocol.FAILURE_LICENSE_NOT_FOUND && isLicenseFailure(vsFailure, vsMessage) &&
-            StoreProtocol.songList(rd).isEmpty()
-        ) {
-            throw StoreProtocol.LicenseRequiredException()
-        }
-        val failure = StoreProtocol.cascadeFailure(vsFailure, customerMessage, vs)
-        if (failure is StoreProtocol.LicenseRequiredException) throw failure
-        throw StoreProtocol.StoreException(localizeStoreMessage(failure.message.orEmpty()))
-    }
-
-    /** Шаг 1 каскада: volumeStoreDownloadProduct на адресе pod аккаунта. */
-    private fun volumeStoreDownload(
-        adamId: String,
-        externalVersionId: String?,
-        purchase: Boolean,
-        authed: Boolean,
-        ani: AnisetteData,
-    ): NSDictionary {
         val fields = mutableMapOf<String, Any?>(
             "creditDisplay" to "",
             "guid" to storeGuid,
@@ -1320,102 +954,94 @@ class AppStoreClient(
             "dsPersonId" to dsPersonId,
         )
         if (purchase) fields["ageCheck"] = true
-        if (!externalVersionId.isNullOrBlank()) fields["externalVersionId"] = externalVersionId
-        // 2042 AuthTokenResumeFreeBuy: «Загрузить» в диалоге подтверждения.
-        if (authed) fields["hasBeenAuthedForBuy"] = "true"
+        if (!externalVersionId.isNullOrBlank() && externalVersionId != "latest") {
+            fields["externalVersionId"] = externalVersionId
+        }
         val body = Plist.dict(*fields.entries.map { it.key to it.value }.toTypedArray())
         val url = "https://p$pod-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct?guid=$storeGuid"
-        return postStore(url, body, ani).second ?: NSDictionary()
-    }
-
-    /**
-     * redownloadProduct / updateProduct: тело download_request_payload и
-     * заголовки ipatool (Content-Type, iCloud-DSID, X-Dsid) плюс куки сессии.
-     */
-    private fun postDownloadFamily(startUrl: String, adam: Long, pin: String): Pair<Int, NSDictionary?> {
-        val dsid = dsPersonId ?: throw StoreProtocol.PasswordTokenExpiredException()
-        val payload = Plist.xml(StoreProtocol.downloadRequestPayload(storeGuid, adam, pin))
-        val owner = store.activeEmail()
-        var status = 0
-        val bytes = StorePodRouting.execute(
-            startUrl,
-            send = { url ->
-                check(store.activeEmail() == owner) { "Apple ID изменился. Повторите операцию." }
-                val req = Request.Builder().url(url)
-                    .header("Content-Type", "application/x-apple-plist")
-                    .header("User-Agent", STORE_UA)
-                    .header("iCloud-DSID", dsid)
-                    .header("X-Dsid", dsid)
-                    .apply {
-                        if (cookies.isNotEmpty()) header("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
-                    }
-                    .post(payload.toRequestBody("application/x-apple-plist".toMediaType()))
-                    .build()
-                Http.itunesNoFollow.newCall(req).execute().use { resp ->
-                    ingestCookies(resp.headers("Set-Cookie"), resp.headers)
-                    status = resp.code
-                    StorePodRouting.Reply(resp.code, resp.body?.bytes() ?: ByteArray(0), resp.header("Location"), null)
-                }
-            },
-            onPod = { },
-        )
-        // decode_plist_safe: пустое или не-plist тело — пустой словарь.
-        val dict = if (bytes.toString(Charsets.UTF_8).isBlank()) NSDictionary()
-        else runCatching { Plist.parse(bytes) }.getOrElse { NSDictionary() }
-        return status to dict
-    }
-
-    /**
-     * Последняя внешняя версия через MZStorePlatform (p=mdm-lockup) — каталоги
-     * enterprisestore, iphone, ipad по очереди, страна витрины аккаунта.
-     * Без закрепления версии redownload может отдать сборку чужой платформы.
-     */
-    private fun lookupLatestExternalVersionId(adam: Long): String {
-        val cc = StoreProtocol.countryCodeFromStorefront(storeFront)
-            ?: error("Неизвестная витрина аккаунта: $storeFront")
-        var last = ""
-        for (catalog in StoreProtocol.PLATFORM_CATALOGS) {
-            val req = Request.Builder().url(StoreProtocol.platformLookupUrl(adam, catalog, cc)).get().build()
-            val body = Http.itunes.newCall(req).execute().use { resp ->
-                if (resp.code != 200) error("platform version lookup request failed: ${resp.code}")
-                resp.body?.string().orEmpty()
-            }
-            val root = runCatching { SignumJson.parseToJsonElement(body).jsonObject }.getOrNull()
-                ?: error("platform version lookup returned invalid JSON")
-            when (val r = StoreProtocol.parsePlatformLookup(root, adam)) {
-                is StoreProtocol.PlatformLookup.Found -> return r.externalVersionId
-                is StoreProtocol.PlatformLookup.Missing -> last = r.reason
-            }
+        var dict = postStorePlist(url, body, ani)
+            ?: error("Не удалось получить данные App Store")
+        if (acceptTerms && isTermsDialog(dict) && acceptStoreTerms(ani, dict)) {
+            dict = postStorePlist(url, body, ani)
+                ?: error("Не удалось получить данные App Store")
         }
-        error("app $adam in storefront $cc (catalogs: enterprisestore, iphone, ipad): $last")
-    }
-
-    /** bag.xml?guid=…&ix=6 с UA Configurator; при сбое — адреса по умолчанию. */
-    private fun bag(): StoreProtocol.Bag {
-        bagCache?.let { (at, bag) -> if (System.currentTimeMillis() - at in 0..3_600_000) return bag }
-        val bag = runCatching {
-            val req = Request.Builder().url("${StoreProtocol.BAG_URL}?guid=$storeGuid&ix=6")
-                .header("Accept", "application/xml")
-                .header("User-Agent", StoreProtocol.BAG_USER_AGENT)
-                .get().build()
-            Http.itunes.newCall(req).execute().use { resp ->
-                check(resp.code == 200) { "bag HTTP ${resp.code}" }
-                StoreProtocol.parseBag(Plist.parse(resp.body?.bytes() ?: ByteArray(0)), Plist::parse)
+        val fail = dict.str("failureType")
+        val msg = dict.str("customerMessage")
+        if (isPasswordTokenFailure(fail, msg) || isUnknownStoreFailure(fail, msg) || isItunesSignIn(fail, msg)) {
+            passwordToken = null
+            cookies.clear()
+            if (!versionOnly) {
+                authenticate(force = true)
+                val retryUrl = "https://p$pod-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct?guid=$storeGuid"
+                fields["passwordToken"] = passwordToken
+                fields["dsPersonId"] = dsPersonId
+                val retryBody = Plist.dict(*fields.entries.map { it.key to it.value }.toTypedArray())
+                val retry = postStorePlist(retryUrl, retryBody, anisette.getData(gs))
+                    ?: error("Не удалось получить данные App Store")
+                val fail2 = retry.str("failureType")
+                val msg2 = retry.str("customerMessage")
+                if (fail2 != null && fail2 != "0") error(localizeStoreMessage(msg2 ?: fail2))
+                return retry
             }
-        }.onFailure { Log.i("SignumStore", "bag: ${it.message}, defaults") }
-            .getOrDefault(StoreProtocol.Bag())
-        bagCache = System.currentTimeMillis() to bag
-        return bag
+            if (isPasswordTokenFailure(fail, msg)) error(PASSWORD_TOKEN_MESSAGE)
+            error(localizeStoreMessage(msg ?: fail ?: "Не удалось проверить вход в App Store."))
+        }
+        if (versionOnly && isLicenseFailure(fail, msg)) return dict
+        // Примерно с 1 сентября 2026 Apple перестала отвечать на
+        // volumeStoreDownloadProduct для сборок, выпущенных с этой даты, —
+        // приходит пустой songList. Без второй ступени такие сборки не
+        // скачиваются совсем и не показывают версию.
+        if (firstSong(dict) == null) {
+            val alt = updateProductPlist(adamId, externalVersionId, ani)
+            if (alt != null && firstSong(alt) != null) return alt
+        }
+        if (versionOnly && fail != null && fail != "0") {
+            // Network, expired authentication and other Store failures do not
+            // prove that the app is absent from the account.
+            error(localizeStoreMessage(msg ?: fail))
+        }
+        if (!versionOnly && fail != null && fail != "0") {
+            if (isTermsDialog(dict)) {
+                error("Apple просит подтвердить условия. Подождите минуту и повторите установку.")
+            }
+            error(localizeStoreMessage(msg ?: fail))
+        }
+        return dict
     }
 
-    private fun postStorePlist(startUrl: String, body: NSDictionary, ani: AnisetteData): NSDictionary? =
-        postStore(startUrl, body, ani).second
+    /**
+     * Вторая ступень скачивания — DownloadDispatch.
+     *
+     * Ключи отличаются от volumeStoreDownloadProduct намеренно: здесь
+     * `appExtVrsId` вместо `externalVersionId`, числовой `salableAdamId` и
+     * `serialNumber`. Со старой формой тела Apple отвечает пустым songList,
+     * и на этом легко потерять час.
+     */
+    private fun updateProductPlist(
+        adamId: String,
+        externalVersionId: String?,
+        ani: AnisetteData,
+    ): NSDictionary? {
+        val adam = adamId.trim().toLongOrNull() ?: return null
+        val fields = mutableMapOf<String, Any?>(
+            "creditDisplay" to "",
+            "guid" to storeGuid,
+            "salableAdamId" to adam,
+            "serialNumber" to "0",
+        )
+        if (!externalVersionId.isNullOrBlank() && externalVersionId != "latest") {
+            fields["appExtVrsId"] = externalVersionId
+        }
+        val body = Plist.dict(*fields.entries.map { it.key to it.value }.toTypedArray())
+        return runCatching {
+            postStorePlist("$UPDATE_PRODUCT_URL?guid=$storeGuid", body, ani)
+        }.getOrNull()
+    }
 
-    private fun postStore(startUrl: String, body: NSDictionary, ani: AnisetteData): Pair<Int, NSDictionary?> {
+    private fun postStorePlist(startUrl: String, body: NSDictionary, ani: AnisetteData): NSDictionary? {
         val owner = store.activeEmail()
         val originalPod = pod
         val originalCookies = cookies.toMap()
-        var status = 0
         val bytes = StorePodRouting.execute(
             startUrl,
             send = { url ->
@@ -1424,7 +1050,6 @@ class AppStoreClient(
                 Http.itunesNoFollow.newCall(req).execute().use { resp ->
                     check(store.activeEmail() == owner) { "Apple ID изменился. Повторите операцию." }
                     ingestCookies(resp.headers("Set-Cookie"), resp.headers)
-                    status = resp.code
                     StorePodRouting.Reply(
                         resp.code, resp.body?.bytes() ?: ByteArray(0),
                         resp.header("Location"), resp.header("pod") ?: cookies["itspod"],
@@ -1434,11 +1059,10 @@ class AppStoreClient(
             onPod = { pod = it },
         )
         if ((originalPod != pod || originalCookies != cookies) && isReady() && store.activeEmail() == owner) persistStore()
-        val dict = runCatching { Plist.parse(bytes) }.getOrElse {
+        return runCatching { Plist.parse(bytes) }.getOrElse {
             pw.appbank.signum.data.api.DebugDump.logFail("SignumStore", bytes, it)
             null
         }
-        return status to dict
     }
 
     private fun ingestCookies(setCookies: List<String>, headers: okhttp3.Headers) {
@@ -1541,21 +1165,8 @@ class AppStoreClient(
         return "sign in to the itunes" in text || "sign in to the app store" in text
     }
 
-    /**
-     * adamId по bundle ID — `lookup` ipatool: сначала витрина аккаунта, затем
-     * запрос без страны (как было раньше) на случай другого региона.
-     */
     private fun lookupAdamByBundle(bundleId: String): String? {
-        val cc = StoreProtocol.countryCodeFromStorefront(storeFront)
-        if (cc != null) {
-            runCatching { lookupAdam(StoreProtocol.lookupUrl(cc, bundleId = bundleId)) }.getOrNull()?.let { return it }
-        }
-        return lookupAdam(
-            "https://itunes.apple.com/lookup?bundleId=${java.net.URLEncoder.encode(bundleId, "UTF-8")}&entity=software&limit=1",
-        )
-    }
-
-    private fun lookupAdam(url: String): String? {
+        val url = "https://itunes.apple.com/lookup?bundleId=${java.net.URLEncoder.encode(bundleId, "UTF-8")}&entity=software&limit=1"
         val req = Request.Builder().url(url).header("User-Agent", STORE_UA).get().build()
         return Http.itunes.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
@@ -1746,8 +1357,11 @@ class AppStoreClient(
      */
     private fun versionIpaUrl(adamId: String, ext: String): String? {
         val dispatch = runCatching {
-            val body = StoreProtocol.downloadRequestPayload(storeGuid, adamId.toLong(), ext)
-            val request = Request.Builder().url("${bag().updateEndpoint}?guid=$storeGuid")
+            val body = Plist.dict(
+                "creditDisplay" to "", "guid" to storeGuid, "salableAdamId" to adamId.toLong(),
+                "serialNumber" to "0", "appExtVrsId" to ext,
+            )
+            val request = Request.Builder().url("$UPDATE_PRODUCT_URL?guid=$storeGuid")
                 .header("User-Agent", STORE_UA)
                 .header("iCloud-DSID", dsPersonId.orEmpty()).header("X-Dsid", dsPersonId.orEmpty())
                 .header("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
@@ -1902,6 +1516,14 @@ class AppStoreClient(
 
         // Match ipatool's Configurator UA exactly (pkg/http/constants.go); the
         // FairPlay SAP signature is minted in a Configurator/CommerceKit context.
+        /**
+         * DownloadDispatch. Сумку (bag) Apple отдаёт этот адрес сама; ipatool
+         * читает его оттуда и при молчании сумки падает ровно на этот URL,
+         * так что константа совпадает с тем, что уже работает на практике.
+         */
+        private const val UPDATE_PRODUCT_URL =
+            "https://downloaddispatch.itunes.apple.com/up/updateProduct"
+
         private const val CONFIGURATOR_UA =
             "Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6"
         private const val STORE_UA = CONFIGURATOR_UA

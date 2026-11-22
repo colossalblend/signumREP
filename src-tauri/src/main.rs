@@ -5,14 +5,12 @@ mod apple_region;
 mod apple_signing;
 mod apple_store;
 mod app_transfer;
-mod auth_cache;
 mod bank_creds_page;
 mod bank_otp;
 mod diag_log;
 mod history_secrets;
 mod ipa_inspect;
 mod pty_login;
-mod signing_profile;
 mod store_search;
 mod system_proxy;
 mod uninstall;
@@ -782,7 +780,7 @@ struct AppState {
     /// Same idmsa freeze when смена страны просит код.
     region_2fa_pending: Arc<StdMutex<Option<apple_history::PendingHistoryAuth>>>,
     /// Reply channel for isideload GSA 2FA during IPA signing (blocks until UI submits code).
-    signing_2fa_reply: Arc<StdMutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    signing_2fa_reply: Arc<StdMutex<Option<std::sync::mpsc::Sender<String>>>>,
     login_2fa_engine: Arc<StdMutex<HashMap<String, String>>>,
     /// Pending bank OTP sessions (phone → SMS → credentials).
     bank_otp: Arc<bank_otp::BankOtpStore>,
@@ -1135,22 +1133,6 @@ struct SignedAppRecord {
     #[serde(default)]
     expires_unix: Option<u64>,
     signed_at: u64,
-    /// How it was signed, so a renewal repeats it exactly (Free/Paid/Custom).
-    #[serde(default)]
-    cert_mode: Option<apple_signing::CertMode>,
-    /// Signing options with the bundle id pinned: a renewal must replace the
-    /// installed app, not install a second copy under a new random id.
-    #[serde(default)]
-    options: Option<apple_signing::SignOptions>,
-    /// A custom certificate picked by path rather than saved under a name.
-    #[serde(default)]
-    custom_p12_path: Option<String>,
-    #[serde(default)]
-    custom_prov_path: Option<String>,
-    /// Last automatic renewal attempt — failures are retried with a pause
-    /// instead of every ten minutes.
-    #[serde(default)]
-    last_renew_attempt: Option<u64>,
 }
 
 /// A free Apple ID signing profile is good for a week.
@@ -1209,10 +1191,11 @@ fn saved_cert_expiry(app: &AppHandle, name: &str) -> Option<String> {
 fn remember_signed_app(
     app: &AppHandle,
     input: &apple_signing::SignAndInstallInput,
-    udid: Option<&str>,
-    result: &apple_signing::SignedIpaResult,
+    bundle_id: &str,
+    title: &str,
+    team_kind: &str,
 ) {
-    let bundle_id = result.metadata.bundle_id.trim();
+    let bundle_id = bundle_id.trim();
     if !input.install || bundle_id.is_empty() {
         return;
     }
@@ -1223,53 +1206,31 @@ fn remember_signed_app(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    // The signer now reports the real expiry (profile / certificate). The
-    // saved-certificate date and the free-team week are only fallbacks.
-    let expires_at = result.expires_at.clone().or_else(|| {
-        cert_name
-            .as_deref()
-            .and_then(|name| saved_cert_expiry(app, name))
-    });
-    let expires_unix = result
-        .expires_unix
-        .or_else(|| expires_at.as_deref().and_then(parse_iso_seconds))
-        .or_else(|| {
-            (result.team_kind == "free").then(|| signed_at + FREE_PROFILE_DAYS * 86_400)
-        });
+    let expires_at = cert_name
+        .as_deref()
+        .and_then(|name| saved_cert_expiry(app, name));
+    let expires_unix = expires_at
+        .as_deref()
+        .and_then(parse_iso_seconds)
+        // ponytail: the free-team week is a known Apple rule, not something the
+        // signer reports back. Read it off the generated profile if that ever
+        // becomes available here.
+        .or_else(|| (team_kind == "free").then(|| signed_at + FREE_PROFILE_DAYS * 86_400));
     let record = SignedAppRecord {
         bundle_id: bundle_id.to_string(),
-        title: result.metadata.name.clone(),
+        title: title.to_string(),
         ipa_path: input.ipa_path.clone(),
-        udid: udid.map(str::to_string).or_else(|| input.udid.clone()),
-        cert_name: cert_name.clone(),
-        team_kind: result.team_kind.clone(),
+        udid: input.udid.clone(),
+        cert_name,
+        team_kind: team_kind.to_string(),
         expires_at,
         expires_unix,
         signed_at,
-        cert_mode: Some(input.cert_mode),
-        options: Some(pinned_renewal_options(&input.options, bundle_id)),
-        custom_p12_path: input.custom_p12_path.clone().filter(|_| cert_name.is_none()),
-        custom_prov_path: input.custom_prov_path.clone().filter(|_| cert_name.is_none()),
-        last_renew_attempt: None,
     };
     let mut cache = load_cache(app);
     cache.signed_apps.retain(|item| item.bundle_id != record.bundle_id);
     cache.signed_apps.push(record);
     let _ = save_cache(app, &cache);
-}
-
-/// The options of the original signing, with the bundle id fixed to the one
-/// that ended up on the phone. "Unique bundle id" would otherwise mint a new
-/// id on every renewal: a second copy of the app and one more App ID gone.
-fn pinned_renewal_options(
-    options: &apple_signing::SignOptions,
-    bundle_id: &str,
-) -> apple_signing::SignOptions {
-    let mut pinned = options.clone();
-    pinned.auto_bundle_id = false;
-    pinned.custom_bundle_id = Some(bundle_id.to_string());
-    pinned.force_unique_bundle = false;
-    pinned
 }
 
 /// Signed apps whose profile is about to die, newest signature first.
@@ -1284,52 +1245,6 @@ fn list_signed_apps(app: AppHandle) -> Result<Vec<SignedAppRecord>, String> {
 #[serde(rename_all = "camelCase")]
 struct RenewSignedAppInput {
     bundle_id: String,
-}
-
-/// The sign job that would redo this record, as it was first done.
-fn renewal_input(record: &SignedAppRecord) -> Result<apple_signing::SignAndInstallInput, String> {
-    let cert_mode = record.cert_mode.unwrap_or(if record.cert_name.is_some() {
-        apple_signing::CertMode::Custom
-    } else {
-        apple_signing::CertMode::Auto
-    });
-    let custom = matches!(cert_mode, apple_signing::CertMode::Custom);
-    if custom
-        && record.cert_name.is_none()
-        && (record.custom_p12_path.is_none() || record.custom_prov_path.is_none())
-    {
-        return Err(
-            "Сертификат, которым подписано приложение, не сохранён в Signum. Подпишите заново, выбрав .p12 и .mobileprovision.".into(),
-        );
-    }
-    let options = record
-        .options
-        .clone()
-        .unwrap_or_default();
-    Ok(apple_signing::SignAndInstallInput {
-        ipa_path: record.ipa_path.clone(),
-        udid: record.udid.clone(),
-        install: true,
-        save_signed: false,
-        output_dir: None,
-        cert_mode,
-        cert_name: record.cert_name.clone(),
-        custom_p12_path: record.custom_p12_path.clone().filter(|_| custom),
-        custom_prov_path: record.custom_prov_path.clone().filter(|_| custom),
-        custom_cert_password: None,
-        options: pinned_renewal_options(&options, &record.bundle_id),
-    })
-}
-
-/// A sign job for this IPA is already waiting or running.
-async fn sign_job_pending(state: &AppState, ipa_path: &str) -> bool {
-    state.jobs.lock().await.values().any(|job| {
-        matches!(job.status, JobStatus::Queued | JobStatus::Running)
-            && matches!(
-                &job.retry_payload,
-                Some(RetryPayload::SignAndInstall(input)) if input.ipa_path == ipa_path
-            )
-    })
 }
 
 /// Sign and install the same IPA again with the same certificate.
@@ -1350,36 +1265,29 @@ async fn renew_signed_app(
             "Исходный IPA-файл больше не лежит по прежнему пути. Выберите его заново.".into(),
         );
     }
-    if sign_job_pending(&state, &record.ipa_path).await {
-        return Err("Подпись этого приложения уже в очереди.".into());
-    }
-    let sign_input = renewal_input(&record)?;
-    enqueue_sign_and_install(app.clone(), state, sign_input).await
-}
-
-/// Pause between automatic renewal attempts of one app after a failure, so a
-/// missing iPhone or an unanswered 2FA prompt is not retried every 10 minutes.
-const RESIGN_RETRY_SECS: u64 = 6 * 3600;
-
-fn renewal_due(record: &SignedAppRecord, now: u64) -> bool {
-    record
-        .expires_unix
-        .is_some_and(|at| at <= now + RESIGN_LEAD_SECS)
-        && record
-            .last_renew_attempt
-            .is_none_or(|at| now >= at + RESIGN_RETRY_SECS)
-}
-
-fn mark_renew_attempt(app: &AppHandle, bundle_id: &str, at: u64) {
-    let mut cache = load_cache(app);
-    if let Some(record) = cache
-        .signed_apps
-        .iter_mut()
-        .find(|item| item.bundle_id == bundle_id)
-    {
-        record.last_renew_attempt = Some(at);
-        let _ = save_cache(app, &cache);
-    }
+    let cert_mode = if record.cert_name.is_some() {
+        apple_signing::CertMode::Custom
+    } else {
+        apple_signing::CertMode::Auto
+    };
+    enqueue_sign_and_install(
+        app.clone(),
+        state,
+        apple_signing::SignAndInstallInput {
+            ipa_path: record.ipa_path,
+            udid: record.udid,
+            install: true,
+            save_signed: false,
+            output_dir: None,
+            cert_mode,
+            cert_name: record.cert_name,
+            custom_p12_path: None,
+            custom_prov_path: None,
+            custom_cert_password: None,
+            options: Default::default(),
+        },
+    )
+    .await
 }
 
 /// Re-sign whatever is about to expire. Opt-in, and silent when off.
@@ -1394,19 +1302,18 @@ async fn renew_expiring_signatures(app: &AppHandle) {
     let due: Vec<SignedAppRecord> = load_cache(app)
         .signed_apps
         .into_iter()
-        .filter(|record| renewal_due(record, now))
+        .filter(|record| {
+            record
+                .expires_unix
+                .is_some_and(|at| at <= now + RESIGN_LEAD_SECS)
+        })
         .filter(|record| PathBuf::from(&record.ipa_path).is_file())
         .collect();
     for record in due {
         let title = record.title.clone();
-        let state = app.state::<AppState>();
-        if sign_job_pending(&state, &record.ipa_path).await {
-            continue;
-        }
-        mark_renew_attempt(app, &record.bundle_id, now);
         let queued = renew_signed_app(
             app.clone(),
-            state,
+            app.state::<AppState>(),
             RenewSignedAppInput {
                 bundle_id: record.bundle_id.clone(),
             },
@@ -10615,65 +10522,6 @@ fn parse_catalog_banners(value: &JsonValue) -> Vec<CatalogBanner> {
         .unwrap_or_default()
 }
 
-/// App Store ids a catalogue card is already known by: `app_store_ids` from
-/// the summary, a single `app_store_id`, or the id inside `app_store_url`.
-fn catalog_app_store_ids(item: &JsonValue) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |value: &str| {
-        if let Some(id) = normalized_app_store_id(Some(value)) {
-            if !out.iter().any(|known| known == id) {
-                out.push(id.to_string());
-            }
-        }
-    };
-    if let Some(list) = item.get("app_store_ids").and_then(|v| v.as_array()) {
-        for value in list {
-            if let Some(text) = json_id_text(value) {
-                push(&text);
-            }
-        }
-    }
-    if let Some(text) = item.get("app_store_id").and_then(json_id_text) {
-        push(&text);
-    }
-    if let Some(url) = item.get("app_store_url").and_then(|v| v.as_str()) {
-        if let Some(pos) = url.rfind("/id") {
-            let digits: String = url[pos + 3..].chars().take_while(|c| c.is_ascii_digit()).collect();
-            push(&digits);
-        }
-    }
-    out
-}
-
-/// An id the server may send either as a string or as a bare number.
-fn json_id_text(value: &JsonValue) -> Option<String> {
-    if let Some(text) = value.as_str() {
-        return Some(text.trim().to_string());
-    }
-    value.as_u64().map(|number| number.to_string())
-}
-
-/// Bundle ids of a catalogue card (summary field plus every version), lower-
-/// cased: the fallback key for merging with an App Store hit that has no id
-/// match, e.g. when an older server sent no App Store ids at all.
-fn catalog_bundle_ids<'a>(item: &JsonValue, versions: impl IntoIterator<Item = &'a JsonValue>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |value: Option<&str>| {
-        let Some(id) = value.map(str::trim).filter(|id| !id.is_empty()) else {
-            return;
-        };
-        let id = id.to_ascii_lowercase();
-        if !out.contains(&id) {
-            out.push(id);
-        }
-    };
-    push(item.get("bundle_id").and_then(|v| v.as_str()));
-    for version in versions {
-        push(version.get("bundle_id").and_then(|v| v.as_str()));
-    }
-    out
-}
-
 async fn enrich_catalog_apps(app: &AppHandle, list: &[JsonValue]) -> Vec<JsonValue> {
     let bust = icon_cache_bust();
 
@@ -10699,42 +10547,19 @@ async fn enrich_catalog_apps(app: &AppHandle, list: &[JsonValue]) -> Vec<JsonVal
                     .and_then(|value| value.as_str())
                     .is_none_or(|value| value.trim().is_empty())
             };
-            missing("version") || missing("min_ios") || catalog_app_store_ids(item).is_empty()
+            missing("version") || missing("min_ios")
         })
-        .filter_map(|item| item.get("id").and_then(json_id_text))
-        .filter(|id| !id.is_empty())
+        .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
+        .map(str::to_string)
         .collect();
     let extra = fetch_catalog_versions_batch(app, &needs_info)
         .await
         .unwrap_or_default();
 
     for item in &mut items {
-        // App Store ids let the catalogue and the App Store search merge the
-        // same app into one card. Newer servers send them in the summary; an
-        // older one only has them inside info.php versions.
-        let mut store_ids = catalog_app_store_ids(item);
-        let extra_versions: &[JsonValue] = item
-            .get("id")
-            .and_then(json_id_text)
-            .and_then(|id| extra.get(&id))
-            .map(|(_, versions)| versions.as_slice())
-            .unwrap_or(&[]);
-        for version in extra_versions {
-            let raw = version.get("app_store_id").and_then(json_id_text);
-            if let Some(id) = normalized_app_store_id(raw.as_deref()) {
-                if !store_ids.iter().any(|known| known == id) {
-                    store_ids.push(id.to_string());
-                }
-            }
-        }
-        let bundle_ids = catalog_bundle_ids(item, extra_versions);
         let Some(obj) = item.as_object_mut() else {
             continue;
         };
-        obj.insert("app_store_ids".into(), serde_json::json!(store_ids));
-        if !bundle_ids.is_empty() {
-            obj.insert("bundle_ids".into(), serde_json::json!(bundle_ids));
-        }
         if let Some(icon) = obj
             .get("icon_url")
             .and_then(|v| v.as_str())
@@ -10888,7 +10713,6 @@ fn ipatool_data_dir() -> Option<PathBuf> {
 }
 
 fn reset_ipatool_local_store() {
-    auth_cache::invalidate_all();
     // Живая ConPTY-сессия входа после сброса не должна дописать аккаунт:
     // процесс умрёт, пока не записал ничего.
     pty_login::cancel_parked("local store reset");
@@ -11695,7 +11519,7 @@ pub(crate) fn format_login_error(output: &str, password: &str) -> String {
         );
     }
     if is_corrupt_cookie_error(&sanitized) {
-        return CORRUPT_SAVED_LOGIN_MESSAGE.into();
+        return "Сохранённый вход повреждён. Нажмите «Войти снова».".into();
     }
     if is_keychain_passphrase_required_error(&sanitized) {
         return with_technical_detail(
@@ -11862,39 +11686,7 @@ fn format_session_verify_error(error: &str) -> String {
     with_technical_detail("Не удалось проверить вход в Apple ID.", &clean)
 }
 
-/// Ключ кэша `auth info`: движок, ключ сессии и байты файлов сессии.
-fn auth_info_cache_key(program: &str, secret: &str) -> Option<u64> {
-    let dir = ipatool_data_dir()?;
-    auth_cache::fingerprint(
-        program,
-        secret,
-        &[
-            fs::read(dir.join("account")).ok(),
-            fs::read(dir.join("keyring").join("account")).ok(),
-        ],
-    )
-}
-
-/// `auth info` с кэшем: ответ зависит только от локального файла сессии,
-/// поэтому повторно ipatool запускается лишь когда файл поменялся (вход,
-/// выход, смена аккаунта, сброс). Одновременные вызовы ждут первый.
 async fn run_auth_info_once(program: &str, keychain: &IpatoolKeychain) -> Result<String, String> {
-    let IpatoolKeychain::Passphrase(secret) = keychain;
-    let _flight = auth_cache::flight().lock().await;
-    if let Some(email) = auth_info_cache_key(program, secret).and_then(auth_cache::lookup) {
-        return Ok(email);
-    }
-    let result = run_auth_info_uncached(program, keychain).await;
-    if let (Ok(email), Some(key)) = (&result, auth_info_cache_key(program, secret)) {
-        auth_cache::store(key, email);
-    }
-    result
-}
-
-async fn run_auth_info_uncached(
-    program: &str,
-    keychain: &IpatoolKeychain,
-) -> Result<String, String> {
     // Global flags must come before the subcommand. Putting --format after
     // `auth info` can confuse argument parsing on some ipatool-cpp builds.
     let mut args = ipatool_args(keychain);
@@ -11910,7 +11702,6 @@ async fn run_auth_info_uncached(
         Err(error)
             if is_corrupt_cookie_error(&error) || is_keychain_integrity_error(&error) =>
         {
-            move_libcurl_jar_aside_for(program);
             sanitize_ipatool_session_files();
             cleanup_stale_cookie_lock(true);
             run()
@@ -11920,7 +11711,6 @@ async fn run_auth_info_uncached(
         Err(error) => return Err(format_session_verify_error(&error)),
     };
     if is_corrupt_cookie_error(&output) || is_keychain_integrity_error(&output) {
-        move_libcurl_jar_aside_for(program);
         sanitize_ipatool_session_files();
         cleanup_stale_cookie_lock(true);
         match run().await {
@@ -12155,48 +11945,10 @@ async fn run_ipatool_login_once(
     result
 }
 
-/// The message `format_login_error` gives for an unreadable cookie jar. The raw
-/// ipatool text is gone by the time `run_ipatool_login` sees the error, so the
-/// automatic repair has to recognise the formatted one too — otherwise it
-/// never ran and the user was told to press «Войти снова» over and over.
-const CORRUPT_SAVED_LOGIN_MESSAGE: &str = "Сохранённый вход повреждён. Нажмите «Войти снова».";
-
-fn is_corrupt_saved_login_error(error: &str) -> bool {
-    error.starts_with(CORRUPT_SAVED_LOGIN_MESSAGE) || is_corrupt_cookie_error(error)
-}
-
-/// Go engines (everything but ipatool-cpp) parse `~/.ipatool/cookies` as JSON
-/// and panic with `cannot load cookies: invalid character '#'` on the libcurl
-/// (Netscape) jar ipatool-cpp leaves behind. Before such an engine runs, move
-/// that jar to `cookies.netscape.bak`; the cpp account lives in its own file.
-fn move_libcurl_jar_aside_for(program: &str) -> bool {
-    if is_cpp_ipatool(program) {
-        return false;
-    }
-    let Some(dir) = ipatool_data_dir() else {
-        return false;
-    };
-    let jar = dir.join("cookies");
-    let is_libcurl = fs::read(&jar)
-        .map(|raw| ipatool_cookie_bytes_are_libcurl(&raw))
-        .unwrap_or(false);
-    if !is_libcurl {
-        return false;
-    }
-    let _ = fs::remove_file(dir.join("cookies.netscape.bak"));
-    if fs::rename(&jar, dir.join("cookies.netscape.bak")).is_err() {
-        let _ = fs::remove_file(&jar);
-    }
-    ipatool_debug_log("cookies: libcurl jar moved aside before a Go engine");
-    true
-}
-
 async fn run_ipatool_login(program: &str, args: &[String], password: &str) -> Result<(), String> {
-    move_libcurl_jar_aside_for(program);
     match run_ipatool_login_once(program, args, password).await {
         Ok(()) => Ok(()),
-        Err(error) if is_corrupt_saved_login_error(&error) => {
-            ipatool_debug_log("login: unreadable session store, resetting and retrying once");
+        Err(error) if is_corrupt_cookie_error(&error) => {
             reset_ipatool_local_store();
             cleanup_stale_cookie_lock(true);
             run_ipatool_login_once(program, args, password).await
@@ -12347,9 +12099,6 @@ async fn login_catalog_with_fallback(
     two_factor_code: Option<&str>,
     resending: bool,
 ) -> Result<String, String> {
-    // Ok carries the Apple ID the saved session belongs to — normally `email`,
-    // but Apple answers with the primary address when the person signed in
-    // with an alias (another address or phone number of the same account).
     auth_stage(
         "catalog-start",
         email,
@@ -12480,7 +12229,7 @@ async fn login_catalog_with_fallback(
                     ));
                     auth_stage("catalog-session-saved", email, &format!("engine={engine}"));
                     remember_login_engine(app, &engine);
-                    return Ok(email.to_string());
+                    return Ok(engine.clone());
                 }
                 if !current_ipatool_session_exists() {
                     let detail = format!(
@@ -12507,29 +12256,12 @@ async fn login_catalog_with_fallback(
                         }
                         remember_login_engine(app, engine);
                         auth_stage("catalog-session-saved", email, &format!("engine={engine}"));
-                        return Ok(email.to_string());
+                        return Ok(engine.clone());
                     }
-                    // ipatool только что вошёл с этим паролем, и файл сессии
-                    // записан этим входом — значит, это тот же аккаунт, просто
-                    // человек ввёл другой адрес (псевдоним или телефон), а Apple
-                    // вернул основной. Раньше вход отклонялся «подтверждён для
-                    // другого Apple ID», затем запускался запасной движок, падал
-                    // на чужом файле cookies, и человек видел «Сохранённый вход
-                    // повреждён». Принимаем вход под адресом, который вернул Apple.
-                    Ok(actual) if !actual.trim().is_empty() => {
-                        let canonical = normalize_account_email(&actual);
-                        ipatool_debug_log(&format!(
-                            "login saved engine={engine}: Apple returned the primary Apple ID for an alias"
-                        ));
-                        if let Ok(mut engines) = state.login_2fa_engine.lock() {
-                            engines.remove(email);
-                        }
-                        remember_login_engine(app, engine);
-                        auth_stage("catalog-session-saved", &canonical, &format!("engine={engine} alias=1"));
-                        return Ok(canonical);
-                    }
-                    Ok(_) => {
-                        last_error = "Вход не удалось сохранить. Войдите в Apple ID снова.".into();
+                    Ok(actual) => {
+                        last_error = format!(
+                            "Вход подтверждён для другого Apple ID ({actual}), ожидался {email}."
+                        );
                     }
                     Err(error) => {
                         ipatool_debug_log(&format!(
@@ -13126,24 +12858,10 @@ async fn resolve_session_state(
 /// `auth info` on one engine: the Apple ID it owns, or the raw English error
 /// (ipatool's own `error` field when it answered, the process output otherwise).
 async fn auth_info_owner(program: &str, args: &[String]) -> Result<String, String> {
-    let secret = args
-        .iter()
-        .position(|arg| arg == "--keychain-passphrase")
-        .and_then(|index| args.get(index + 1))
-        .cloned()
-        .unwrap_or_default();
-    let _flight = auth_cache::flight().lock().await;
-    if let Some(email) = auth_info_cache_key(program, &secret).and_then(auth_cache::lookup) {
-        return Ok(email);
-    }
-    let result = match run_process_raw_error(program, args, Duration::from_secs(30), None).await {
+    match run_process_raw_error(program, args, Duration::from_secs(30), None).await {
         Ok(output) => parse_ipatool_auth_info_email(&output),
         Err(error) => Err(error),
-    };
-    if let (Ok(email), Some(key)) = (&result, auth_info_cache_key(program, &secret)) {
-        auth_cache::store(key, email);
     }
-    result
 }
 
 #[tauri::command]
@@ -13883,8 +13601,6 @@ fn submit_signing_2fa(
     let code = code.unwrap_or_default();
     let payload = if action.eq_ignore_ascii_case("resend") {
         "__resend__".to_string()
-    } else if action.eq_ignore_ascii_case("sms") {
-        "__sms__".to_string()
     } else {
         let digits: String = code
             .chars()
@@ -17162,14 +16878,12 @@ async fn process_sign_and_install(
     // Free/paid sign uses isideload (codesign / internal pack), not the Windows
     // zsign helper. Keep an optional path for API compatibility; never hard-fail
     // when zsign is absent (macOS/Linux never ship it).
-    // Для своего сертификата zsign необязателен: без него (macOS/Linux)
-    // подписывает встроенный подписчик.
-    let zsign_path = tools
+    let zsign = tools
         .zsign
         .as_deref()
         .map(PathBuf::from)
-        .filter(|p| p.is_file());
-    let zsign = zsign_path.clone().unwrap_or_else(|| PathBuf::from("zsign"));
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("zsign"));
     let anisette = tools.anisette.as_deref().map(PathBuf::from);
     let app_data = app
         .path()
@@ -17202,19 +16916,15 @@ async fn process_sign_and_install(
     // CertMode::Custom → zsign с сохранённым/указанным сертификатом.
     // CertMode::Auto/Free/Paid → isideload через Apple ID.
     let result = if matches!(input.cert_mode, apple_signing::CertMode::Custom) {
-        // Сохранённые сертификаты лежат в app_config_dir (там их пишет
-        // import_custom_cert и читает list_custom_certs). Раньше здесь читали
-        // app_data_dir: на Linux это другая папка, и сохранённый сертификат
-        // «не находился».
-        let cert_store = app
+        let app_data = app
             .path()
-            .app_config_dir()
-            .map_err(|e| format!("app config: {e}"))?;
+            .app_data_dir()
+            .map_err(|e| format!("app data: {e}"))?;
         // Либо из сохранённого имени, либо явные пути из UI.
         let (p12_path, prov_path, pass) = if let Some(name) =
             input.cert_name.as_deref().map(str::trim).filter(|v| !v.is_empty())
         {
-            let (p12, prov, pass) = apple_signing::load_custom_cert(&cert_store, name)?;
+            let (p12, prov, pass) = apple_signing::load_custom_cert(&app_data, name)?;
             (p12, prov, pass)
         } else {
             let p12 = input
@@ -17231,10 +16941,10 @@ async fn process_sign_and_install(
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
                 .ok_or_else(|| "Укажите файл .mobileprovision".to_string())?;
-            // Пароль не обрезаем: пробелы по краям — тоже символы пароля.
             let pass = input
                 .custom_cert_password
                 .as_deref()
+                .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .map(ToOwned::to_owned);
             (p12, prov, pass)
@@ -17246,9 +16956,8 @@ async fn process_sign_and_install(
             &p12_path,
             &prov_path,
             &pass,
-            if input.install { udid.as_deref() } else { None },
             &input.options,
-            zsign_path.as_deref(),
+            &zsign,
             &cache_dir,
             &output_ipa,
             |pct, msg| {
@@ -17280,8 +16989,7 @@ async fn process_sign_and_install(
             &device_name,
             &email,
             &password,
-            // Раньше здесь всегда стоял Auto, и выбор Free/Paid игнорировался.
-            input.cert_mode,
+            apple_signing::CertMode::Auto,
             &input.options,
             anisette.as_deref(),
             &zsign,
@@ -17357,7 +17065,13 @@ async fn process_sign_and_install(
         }
     }
 
-    remember_signed_app(app, input, udid.as_deref(), &result);
+    remember_signed_app(
+        app,
+        input,
+        &result.metadata.bundle_id,
+        &result.metadata.name,
+        &result.team_kind,
+    );
 
     Ok(())
 }
@@ -23042,42 +22756,6 @@ Download error: storefront blocked";
     }
 
     #[test]
-    fn catalog_store_ids_come_from_summary_and_url() {
-        let item = serde_json::json!({
-            "id": "vk",
-            "app_store_ids": ["564177498", "", "abc"],
-            "app_store_url": "https://apps.apple.com/ru/app/vk/id564177498?l=en"
-        });
-        assert_eq!(catalog_app_store_ids(&item), vec!["564177498".to_string()]);
-        let by_url = serde_json::json!({"app_store_url": "https://apps.apple.com/app/id6789069556"});
-        assert_eq!(catalog_app_store_ids(&by_url), vec!["6789069556".to_string()]);
-        assert!(catalog_app_store_ids(&serde_json::json!({"app_store_url": null})).is_empty());
-    }
-
-    #[test]
-    fn catalog_store_ids_accept_numbers() {
-        let item = serde_json::json!({"app_store_ids": [564177498u64, "564177498"], "app_store_id": 1234567890u64});
-        assert_eq!(
-            catalog_app_store_ids(&item),
-            vec!["564177498".to_string(), "1234567890".to_string()]
-        );
-    }
-
-    #[test]
-    fn catalog_bundle_ids_merge_summary_and_versions() {
-        let item = serde_json::json!({"bundle_id": "com.Vk.Vkclient"});
-        let versions = [
-            serde_json::json!({"bundle_id": "com.vk.vkclient"}),
-            serde_json::json!({"bundle_id": " ru.vk.lite "}),
-            serde_json::json!({"bundle_id": ""}),
-        ];
-        assert_eq!(
-            catalog_bundle_ids(&item, versions.iter()),
-            vec!["com.vk.vkclient".to_string(), "ru.vk.lite".to_string()]
-        );
-    }
-
-    #[test]
     fn store_variants_do_not_count_as_archived_alternatives() {
         let selected = serde_json::json!({
             "app_store_id": "100",
@@ -23466,97 +23144,5 @@ mod signature_expiry_tests {
         assert_eq!(parse_iso_seconds("not a date at all"), None);
         // Before the epoch there is nothing to renew.
         assert_eq!(parse_iso_seconds("1969-01-01T00:00:00Z"), None);
-    }
-}
-
-#[cfg(test)]
-mod signed_app_renewal_tests {
-    use super::*;
-
-    fn record(expires_unix: Option<u64>) -> SignedAppRecord {
-        SignedAppRecord {
-            bundle_id: "ru.bank.app.ab12cd".into(),
-            title: "Bank".into(),
-            ipa_path: "/tmp/bank.ipa".into(),
-            udid: Some("00008110-001A".into()),
-            cert_name: None,
-            team_kind: "free".into(),
-            expires_at: None,
-            expires_unix,
-            signed_at: 1_000,
-            cert_mode: None,
-            options: None,
-            custom_p12_path: None,
-            custom_prov_path: None,
-            last_renew_attempt: None,
-        }
-    }
-
-    #[test]
-    fn renewal_keeps_the_installed_bundle_id() {
-        let options = apple_signing::SignOptions {
-            force_unique_bundle: true,
-            strip_plugins: true,
-            ..Default::default()
-        };
-        let pinned = pinned_renewal_options(&options, "ru.bank.app.ab12cd");
-        assert!(!pinned.force_unique_bundle);
-        assert!(!pinned.auto_bundle_id);
-        assert_eq!(pinned.custom_bundle_id.as_deref(), Some("ru.bank.app.ab12cd"));
-        // The rest of the original choices survive.
-        assert!(pinned.strip_plugins);
-    }
-
-    #[test]
-    fn renewal_repeats_mode_and_options() {
-        let mut item = record(Some(10));
-        item.cert_mode = Some(apple_signing::CertMode::Paid);
-        item.options = Some(apple_signing::SignOptions {
-            strip_plugins: true,
-            ..Default::default()
-        });
-        let input = renewal_input(&item).unwrap();
-        assert_eq!(input.cert_mode, apple_signing::CertMode::Paid);
-        assert!(input.options.strip_plugins);
-        assert_eq!(
-            input.options.custom_bundle_id.as_deref(),
-            Some("ru.bank.app.ab12cd")
-        );
-        assert!(input.install);
-    }
-
-    #[test]
-    fn old_records_still_renew_with_a_pinned_bundle() {
-        let input = renewal_input(&record(Some(10))).unwrap();
-        assert_eq!(input.cert_mode, apple_signing::CertMode::Auto);
-        assert!(!input.options.auto_bundle_id);
-        assert_eq!(
-            input.options.custom_bundle_id.as_deref(),
-            Some("ru.bank.app.ab12cd")
-        );
-    }
-
-    #[test]
-    fn custom_renewal_needs_a_certificate() {
-        let mut item = record(Some(10));
-        item.cert_mode = Some(apple_signing::CertMode::Custom);
-        assert!(renewal_input(&item).is_err());
-        item.custom_p12_path = Some("/c/cert.p12".into());
-        item.custom_prov_path = Some("/c/p.mobileprovision".into());
-        let input = renewal_input(&item).unwrap();
-        assert_eq!(input.custom_p12_path.as_deref(), Some("/c/cert.p12"));
-    }
-
-    #[test]
-    fn renewal_is_due_early_and_backs_off_after_a_failure() {
-        let now = 1_000_000;
-        assert!(!renewal_due(&record(None), now));
-        assert!(!renewal_due(&record(Some(now + RESIGN_LEAD_SECS + 60)), now));
-        let mut item = record(Some(now + 3600));
-        assert!(renewal_due(&item, now));
-        item.last_renew_attempt = Some(now - 60);
-        assert!(!renewal_due(&item, now));
-        item.last_renew_attempt = Some(now - RESIGN_RETRY_SECS);
-        assert!(renewal_due(&item, now));
     }
 }

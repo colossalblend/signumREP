@@ -6,10 +6,10 @@ use crate::dev::{
 use plist::{Data, Date};
 use plist_macro::plist;
 use rootcause::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DevelopmentCertificate {
     pub name: Option<String>,
@@ -25,7 +25,7 @@ pub struct DevelopmentCertificate {
     pub expiration_date: Option<Date>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CertificateType {
     pub certificate_type_display_id: Option<String>,
@@ -39,7 +39,7 @@ pub struct CertificateType {
     pub max_active_certs: Option<i64>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CertRequest {
     pub cert_request_id: String,
@@ -71,8 +71,7 @@ impl std::fmt::Debug for DevelopmentCertificate {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait::async_trait)]
+#[async_trait::async_trait]
 pub trait CertificatesApi {
     fn developer_session(&mut self) -> &mut DeveloperSession;
 
@@ -146,13 +145,14 @@ pub trait CertificatesApi {
         {
             Ok(_) => Ok(()),
             Err(e) => {
-                // Signum patch: 7252 = no certificate with this serial on the
-                // team (already revoked / stale list). Treat as success so the
-                // max-certs recovery can submit a new CSR.
+                // 7252: no certificate with this serial on the team (already revoked / stale list).
+                // Treat as success so we can submit a new CSR (max-certs recovery).
                 let missing = e
                     .iter_reports()
                     .find_map(|node| node.downcast_current_context::<crate::SideloadError>())
-                    .is_some_and(|err| matches!(err, crate::SideloadError::DeveloperError(7252, _)));
+                    .is_some_and(|err| {
+                        matches!(err, crate::SideloadError::DeveloperError(7252, _))
+                    });
                 if missing {
                     tracing::info!(
                         "Certificate serial {} already absent on team (7252), continuing",

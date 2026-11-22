@@ -256,8 +256,7 @@ export default function IpaSigning() {
             Подписано через Signum
           </div>
           <p className="mt-1.5 text-[11px] leading-5 text-slate-500">
-            Подпись бесплатного Apple ID живёт неделю, платного — до года, своим
-            сертификатом — пока действует профиль. Когда срок выйдет, приложение
+            Подпись бесплатного Apple ID живёт неделю. Когда срок выйдет, приложение
             перестанет открываться — подпишите заново той же кнопкой.
           </p>
           <div className="mt-4 space-y-2">
@@ -910,16 +909,10 @@ function signatureLeft(item: SignedAppRecord): { text: string; soon: boolean } |
       ? (item.signed_at + 7 * 86_400) * 1000
       : null;
   if (!until) return null;
-  const left = until - Date.now();
-  const days = Math.floor(left / 86_400_000);
+  const days = Math.floor((until - Date.now()) / 86_400_000);
   const date = new Date(until).toLocaleDateString("ru-RU");
-  if (left <= 0) return { text: `Подпись истекла ${date} — приложение не откроется`, soon: true };
-  if (days === 0) {
-    // «Сегодня» вводило в заблуждение, когда до конца оставалось 23 часа.
-    const hours = Math.max(1, Math.floor(left / 3_600_000));
-    const time = new Date(until).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-    return { text: `Подпись истекает через ${hours} ч (${date} ${time})`, soon: true };
-  }
+  if (days < 0) return { text: `Подпись истекла ${date} — приложение не откроется`, soon: true };
+  if (days === 0) return { text: "Подпись истекает сегодня", soon: true };
   if (days <= 2) return { text: `Подпись истекает через ${days} дн. (${date})`, soon: true };
   return { text: `Подпись действует до ${date}`, soon: false };
 }

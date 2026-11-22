@@ -377,15 +377,4 @@ class SettingsStore(context: Context) {
     fun markOnboardingSeen() {
         prefs.edit().putBoolean("onboarding_seen_v1", true).apply()
     }
-
-    /** «Пройти обучение заново» из настроек. */
-    fun resetOnboarding() {
-        prefs.edit().putBoolean("onboarding_seen_v1", false).apply()
-    }
-
-    /** Меню разработчика: открывается семью нажатиями на версию, как на ПК. */
-    fun devMenuUnlocked(): Boolean = prefs.getBoolean("dev_menu_unlocked", false)
-    fun setDevMenuUnlocked(on: Boolean) {
-        prefs.edit().putBoolean("dev_menu_unlocked", on).apply()
-    }
 }

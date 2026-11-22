@@ -1,12 +1,8 @@
-use std::collections::BTreeMap;
-
-use apple_codesign_quick::{
-    BundleSigningSettings, ProvisioningProfile, RustCryptoCmsSigner, sign_bundle,
-};
-
+use apple_codesign::{SigningSettings, UnifiedSigner};
 use plist::Dictionary;
-use rootcause::prelude::*;
-use tracing::warn;
+use plist_macro::plist_to_xml_string;
+use rootcause::{option_ext::OptionExt, prelude::*};
+use tracing::info;
 
 use crate::{
     dev::{app_ids::Profile, teams::DeveloperTeam},
@@ -14,34 +10,81 @@ use crate::{
         application::{Application, SpecialApp},
         cert_identity::CertificateIdentity,
     },
+    util::plist::PlistDataExtract,
 };
 
-pub async fn sign<F, Fut>(
+pub fn sign(
     app: &mut Application,
     cert_identity: &CertificateIdentity,
-    main_provisioning_profile: &Profile,
-    all_profiles: &mut Vec<(String, Profile, Dictionary)>,
+    provisioning_profile: &Profile,
     special: &Option<SpecialApp>,
     team: &DeveloperTeam,
-    progress_callback: Option<F>,
-) -> Result<(), Report>
-where
-    F: Fn(f32) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let profile = ProvisioningProfile::parse(main_provisioning_profile.encoded_profile.as_ref())?;
-    let certificate_chain = cert_identity.profile_to_certificate_chain(&profile)?;
+) -> Result<(), Report> {
+    let mut settings = signing_settings(cert_identity)?;
+    let entitlements: Dictionary =
+        entitlements_from_prov(provisioning_profile.encoded_profile.as_ref(), special, team)?;
 
-    let signer = RustCryptoCmsSigner::new(
-        cert_identity.private_key.clone(),
-        cert_identity.certificate.clone(),
-        certificate_chain,
-    );
-    if let Some(callback) = &progress_callback {
-        callback(0.4).await;
+    settings
+        .set_entitlements_xml(
+            apple_codesign::SettingsScope::Main,
+            plist_to_xml_string(&entitlements),
+        )
+        .context("Failed to set entitlements XML")?;
+    let signer = UnifiedSigner::new(settings);
+
+    for bundle in app.bundle.collect_bundles_sorted() {
+        info!(
+            "Signing {}",
+            bundle
+                .bundle_dir
+                .file_name()
+                .unwrap_or(bundle.bundle_dir.as_os_str())
+                .to_string_lossy()
+        );
+        signer
+            .sign_path_in_place(&bundle.bundle_dir)
+            .context(format!(
+                "Failed to sign bundle: {}",
+                bundle.bundle_dir.display()
+            ))?;
     }
 
-    let mut entitlements = profile.entitlements().clone();
+    Ok(())
+}
+
+pub fn signing_settings<'a>(cert: &'a CertificateIdentity) -> Result<SigningSettings<'a>, Report> {
+    let mut settings = SigningSettings::default();
+
+    cert.setup_signing_settings(&mut settings)?;
+    settings.set_for_notarization(false);
+    settings.set_shallow(true);
+
+    Ok(settings)
+}
+
+fn entitlements_from_prov(
+    data: &[u8],
+    special: &Option<SpecialApp>,
+    team: &DeveloperTeam,
+) -> Result<Dictionary, Report> {
+    let start = data
+        .windows(6)
+        .position(|w| w == b"<plist")
+        .ok_or_report()?;
+    let end = data
+        .windows(8)
+        .rposition(|w| w == b"</plist>")
+        .ok_or_report()?
+        + 8;
+    let plist_data = &data[start..end];
+    let plist = plist::Value::from_reader_xml(plist_data)?;
+
+    let mut entitlements = plist
+        .as_dictionary()
+        .ok_or_report()?
+        .get_dict("Entitlements")?
+        .clone();
+
     if matches!(
         special,
         Some(SpecialApp::SideStoreLc) | Some(SpecialApp::LiveContainer)
@@ -60,37 +103,9 @@ where
 
         entitlements.insert(
             "keychain-access-groups".to_string(),
-            plist::Value::Array(keychain_access.clone()),
+            plist::Value::Array(keychain_access),
         );
-
-        let liveprocess_profile = all_profiles
-            .iter_mut()
-            .find(|(bundle_id, _, _)| bundle_id.ends_with("LiveProcess"));
-        if let Some((_, _, liveprocess_entitlements)) = liveprocess_profile {
-            liveprocess_entitlements.insert(
-                "keychain-access-groups".to_string(),
-                plist::Value::Array(keychain_access),
-            );
-        } else {
-            warn!("Could not find LiveProcess profile");
-        }
     }
 
-    let mut settings = BundleSigningSettings::new(&team.team_id, entitlements, Some(&signer));
-    settings.embedded_mobileprovision = Some(main_provisioning_profile.encoded_profile.as_ref());
-
-    settings.embedded_mobileprovisions_by_bundle_id = all_profiles
-        .iter()
-        .map(|(bundle_id, data, _)| (bundle_id.clone(), data.encoded_profile.as_ref()))
-        .collect::<BTreeMap<_, _>>();
-    settings.entitlements_by_bundle_id = all_profiles
-        .iter()
-        .map(|(bundle_id, _, entitlements)| (bundle_id.clone(), entitlements.clone()))
-        .collect();
-
-    if let Some(callback) = &progress_callback {
-        callback(0.5).await;
-    }
-
-    Ok(sign_bundle(&app.bundle.bundle_dir, &settings)?)
+    Ok(entitlements)
 }

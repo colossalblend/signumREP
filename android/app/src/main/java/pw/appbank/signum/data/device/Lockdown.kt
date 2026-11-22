@@ -446,12 +446,7 @@ class DeviceService(
     @Volatile
     private var sessionBusy = false
 
-    // Один сеанс с iPhone за раз. ReentrantLock, а не synchronized: списку
-    // устройств нужен tryLock — он не должен ждать конца многоминутной установки.
-    private val usbLock = java.util.concurrent.locks.ReentrantLock()
-
-    /** Последняя известная версия iOS по серийному номеру — пока USB занят установкой. */
-    private val knownIos = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val usbLock = Any()
     private val permissionWaiters = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
 
     fun notifyUsbChanged() {
@@ -512,8 +507,7 @@ class DeviceService(
         forcePair: Boolean = false,
         block: (LockdownClient, UsbMux) -> Unit,
     ): DeviceInfo {
-        usbLock.lock()
-        try {
+        synchronized(usbLock) {
             var devices = AppleUsb.listAppleDevices(context)
             if (devices.isEmpty()) {
                 onStatus("Ждём iPhone по USB…")
@@ -574,8 +568,6 @@ class DeviceService(
                 claimed = null
                 sessionBusy = false
             }
-        } finally {
-            usbLock.unlock()
         }
     }
 
@@ -616,34 +608,18 @@ class DeviceService(
             pw.appbank.signum.data.models.DeviceInfo(
                 udid = udid,
                 productType = AppleUsb.describe(dev),
-                productVersion = probeIos(dev, serial),
+                productVersion = runCatching {
+                    val claim = AppleUsb.claim(context, dev)
+                    try {
+                        val mux = UsbMux(claim)
+                        mux.handshake()
+                        LockdownClient(store, mux.connect(UsbMux.LOCKDOWN_PORT)).readInfo().productVersion
+                    } finally { AppleUsb.release(claim) }
+                }.getOrNull(),
                 deviceName = dev.productName ?: "iPhone",
                 connection = "usb",
                 paired = pairingExists,
             )
-        }
-    }
-
-    /**
-     * Версия iOS для списка устройств. Захват USB силой (claimInterface force)
-     * посреди идущей установки отбирал интерфейс у неё и ронял установку —
-     * поэтому, пока USB занят, показываем последнюю известную версию.
-     */
-    private fun probeIos(dev: android.hardware.usb.UsbDevice, serial: String?): String? {
-        if (!AppleUsb.hasPermission(context, dev)) return serial?.let { knownIos[it] }
-        if (!usbLock.tryLock()) return serial?.let { knownIos[it] }
-        return try {
-            runCatching {
-                val claim = AppleUsb.claim(context, dev)
-                try {
-                    val mux = UsbMux(claim)
-                    mux.handshake()
-                    LockdownClient(store, mux.connect(UsbMux.LOCKDOWN_PORT)).readInfo().productVersion
-                } finally { AppleUsb.release(claim) }
-            }.getOrNull()?.also { v -> if (serial != null) knownIos[serial] = v }
-                ?: serial?.let { knownIos[it] }
-        } finally {
-            usbLock.unlock()
         }
     }
 

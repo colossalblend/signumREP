@@ -1,6 +1,13 @@
 <?php
 declare(strict_types=1);
 
+/**
+ * Актуальные версии Signum для блока загрузок.
+ *
+ * Версии и ссылки берутся из того же releases.php, что использует приложение.
+ * Большие файлы отдаёт веб-сервер напрямую, с поддержкой Range и докачки.
+ */
+
 header('Content-Type: application/json; charset=UTF-8');
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');

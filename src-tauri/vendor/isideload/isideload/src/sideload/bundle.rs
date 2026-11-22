@@ -1,11 +1,10 @@
 // This file was made using https://github.com/Dadoum/Sideloader as a reference.
 // I'm planning on redoing this later to better handle entitlements, extensions, etc, but it will do for now
 
-use isideload_vfs::fs::File;
-use plist::{Dictionary, Value, to_writer_binary};
+use plist::{Dictionary, Value};
 use rootcause::prelude::*;
 use std::{
-    io::BufWriter,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -33,13 +32,13 @@ impl Bundle {
 
         let info_plist_path = bundle_path.join("Info.plist");
         assert_bundle(
-            isideload_vfs::fs::metadata(&info_plist_path).is_ok(),
+            info_plist_path.exists(),
             &format!("No Info.plist here: {}", info_plist_path.display()),
         )?;
 
-        let plist_data = isideload_vfs::fs::read(&info_plist_path).context(
-            SideloadError::InvalidBundle("Failed to read Info.plist".to_string()),
-        )?;
+        let plist_data = fs::read(&info_plist_path).context(SideloadError::InvalidBundle(
+            "Failed to read Info.plist".to_string(),
+        ))?;
 
         let app_info = plist::from_bytes(&plist_data).context(SideloadError::InvalidBundle(
             "Failed to parse Info.plist".to_string(),
@@ -47,15 +46,15 @@ impl Bundle {
 
         // Load app extensions from PlugIns directory
         let plug_ins_dir = bundle_path.join("PlugIns");
-        let app_extensions = if isideload_vfs::fs::metadata(&plug_ins_dir).is_ok() {
-            isideload_vfs::fs::read_dir(&plug_ins_dir)
+        let app_extensions = if plug_ins_dir.exists() {
+            fs::read_dir(&plug_ins_dir)
                 .context(SideloadError::InvalidBundle(
                     "Failed to read PlugIns directory".to_string(),
                 ))?
                 .filter_map(|entry| entry.ok())
                 .filter(|entry| {
                     entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                        && isideload_vfs::fs::metadata(&entry.path().join("Info.plist")).is_ok()
+                        && entry.path().join("Info.plist").exists()
                 })
                 .filter_map(|entry| Bundle::new(entry.path()).ok())
                 .collect()
@@ -65,15 +64,15 @@ impl Bundle {
 
         // Load frameworks from Frameworks directory
         let frameworks_dir = bundle_path.join("Frameworks");
-        let frameworks = if isideload_vfs::fs::metadata(&frameworks_dir).is_ok() {
-            isideload_vfs::fs::read_dir(&frameworks_dir)
+        let frameworks = if frameworks_dir.exists() {
+            fs::read_dir(&frameworks_dir)
                 .context(SideloadError::InvalidBundle(
                     "Failed to read Frameworks directory".to_string(),
                 ))?
                 .filter_map(|entry| entry.ok())
                 .filter(|entry| {
                     entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                        && isideload_vfs::fs::metadata(&entry.path().join("Info.plist")).is_ok()
+                        && entry.path().join("Info.plist").exists()
                 })
                 .filter_map(|entry| Bundle::new(entry.path()).ok())
                 .collect()
@@ -94,21 +93,6 @@ impl Bundle {
     }
 
     pub fn set_bundle_identifier(&mut self, id: &str) {
-        let old_id = self.bundle_identifier().and_then(|s| Some(s.to_string()));
-        if let Some(Value::Array(bg_tasks)) =
-            self.app_info.get_mut("BGTaskSchedulerPermittedIdentifiers")
-        {
-            for task in bg_tasks.iter_mut() {
-                if let Value::String(task_id) = task {
-                    if let Some(old_bundle_id) = &old_id {
-                        if task_id.contains(old_bundle_id) {
-                            *task_id = task_id.replace(old_bundle_id, id);
-                        }
-                    }
-                }
-            }
-        }
-
         self.app_info.insert(
             "CFBundleIdentifier".to_string(),
             Value::String(id.to_string()),
@@ -145,19 +129,9 @@ impl Bundle {
 
     pub fn write_info(&self) -> Result<(), Report> {
         let info_plist_path = self.bundle_dir.join("Info.plist");
-        // plist::to_file_binary(&info_plist_path, &self.app_info).context(
-        //     SideloadError::InvalidBundle("Failed to write Info.plist".to_string()),
-        // )?;
-        let mut file = File::create(&info_plist_path).context(SideloadError::InvalidBundle(
-            "Failed to write Info.plist".to_string(),
-        ))?;
-        to_writer_binary(BufWriter::new(&mut file), &self.app_info).context(
-            SideloadError::InvalidBundle("Failed to create Info.plist writer".to_string()),
+        plist::to_file_binary(&info_plist_path, &self.app_info).context(
+            SideloadError::InvalidBundle("Failed to write Info.plist".to_string()),
         )?;
-
-        file.sync_all().context(SideloadError::InvalidBundle(
-            "Failed to sync Info.plist".to_string(),
-        ))?;
         Ok(())
     }
 
@@ -222,9 +196,10 @@ fn find_dylibs(dir: &Path, bundle_root: &Path) -> Result<Vec<String>, Report> {
         bundle_root: &Path,
         libraries: &mut Vec<String>,
     ) -> Result<(), Report> {
-        let entries = isideload_vfs::fs::read_dir(dir).context(SideloadError::InvalidBundle(
-            format!("Failed to read directory {}", dir.display()),
-        ))?;
+        let entries = fs::read_dir(dir).context(SideloadError::InvalidBundle(format!(
+            "Failed to read directory {}",
+            dir.display()
+        )))?;
 
         for entry in entries {
             let entry = entry.context(SideloadError::InvalidBundle(
@@ -232,11 +207,9 @@ fn find_dylibs(dir: &Path, bundle_root: &Path) -> Result<Vec<String>, Report> {
             ))?;
 
             let path = entry.path();
-            let file_type = isideload_vfs::fs::metadata(&path)
-                .map(|m| m.file_type())
-                .context(SideloadError::InvalidBundle(
-                    "Failed to get file type".to_string(),
-                ))?;
+            let file_type = entry.file_type().context(SideloadError::InvalidBundle(
+                "Failed to get file type".to_string(),
+            ))?;
 
             if file_type.is_file() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str())

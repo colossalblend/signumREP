@@ -6,10 +6,9 @@ use plist_macro::plist;
 use reqwest::header::HeaderMap;
 use rootcause::prelude::*;
 use serde::Deserialize;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use tokio::sync::RwLock;
 use tracing::warn;
-use web_time::SystemTime;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AnisetteClientInfo {
@@ -101,25 +100,15 @@ impl AnisetteData {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum AnisetteDataResponse {
-    Data(AnisetteData),
-    NeedsProvisioning,
-    IncorrectlyProvisioned,
-}
-
-#[cfg_attr(feature = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait::async_trait)]
+#[async_trait::async_trait]
 pub trait AnisetteProvider {
-    async fn get_anisette_data(&self) -> Result<AnisetteDataResponse, Report>;
-
-    async fn resync(&self, _sim: &str) -> Result<AnisetteDataResponse, Report> {
-        Err(report!("anisette resync not supported by this provider"))
-    }
+    async fn get_anisette_data(&self) -> Result<AnisetteData, Report>;
 
     async fn get_client_info(&self) -> Result<AnisetteClientInfo, Report>;
 
-    async fn provision(&mut self, gs: &Arc<GrandSlam>, force_recheck: bool) -> Result<(), Report>;
+    async fn provision(&mut self, gs: Arc<GrandSlam>) -> Result<(), Report>;
+
+    fn needs_provisioning(&self) -> Result<bool, Report>;
 }
 
 #[derive(Clone)]
@@ -146,57 +135,30 @@ impl AnisetteDataGenerator {
             return Ok(data.clone());
         }
 
-        // 3 attempts for the worst case: load anisette from storage, server says -45061 -> reprovision anisette -> get data
-        let data = self.get_data_or_provision(&gs, 3).await?;
-        let arc_data = Arc::new(data);
-        self.data = Some(arc_data.clone());
-        Ok(arc_data)
-    }
-
-    async fn get_data_or_provision(
-        &mut self,
-        gs: &Arc<GrandSlam>,
-        max_iters: usize,
-    ) -> Result<AnisetteData, Report> {
-        if max_iters == 0 {
-            bail!("Max anisette provisioning attempts reached");
-        }
-        // trying to avoid locking as write unless necessary for concurrency later on
+        // trying to avoid locking as write unless necessary to promote concurrency
         let provider = self.provider.read().await;
-        match provider.get_anisette_data().await? {
-            AnisetteDataResponse::Data(data) => Ok(data),
-            status @ (AnisetteDataResponse::NeedsProvisioning
-            | AnisetteDataResponse::IncorrectlyProvisioned) => {
-                drop(provider);
-                let mut provider_write = self.provider.write().await;
-                provider_write
-                    .provision(
-                        gs,
-                        matches!(status, AnisetteDataResponse::IncorrectlyProvisioned),
-                    )
-                    .await?;
-                drop(provider_write);
-                Box::pin(self.get_data_or_provision(gs, max_iters - 1)).await
-            }
+
+        if provider.needs_provisioning()? {
+            drop(provider);
+            let mut provider_write = self.provider.write().await;
+            provider_write.provision(gs).await?;
+            drop(provider_write);
+
+            let provider = self.provider.read().await;
+            let data = provider.get_anisette_data().await?;
+            let arc_data = Arc::new(data);
+            self.data = Some(arc_data.clone());
+            Ok(arc_data)
+        } else {
+            let data = provider.get_anisette_data().await?;
+            let arc_data = Arc::new(data);
+            self.data = Some(arc_data.clone());
+            Ok(arc_data)
         }
     }
 
     pub async fn get_client_info(&self) -> Result<AnisetteClientInfo, Report> {
         let provider = self.provider.read().await;
         provider.get_client_info().await
-    }
-
-    /// Perform a login anisette resync with the server, returning corrected data.
-    pub async fn resync(&mut self, sim: &str) -> Result<Arc<AnisetteData>, Report> {
-        let provider = self.provider.read().await;
-        let data = match provider.resync(sim).await? {
-            AnisetteDataResponse::Data(data) => data,
-            _ => {
-                bail!("Anisette provider failed to provide data for resync, needs provisioning");
-            }
-        };
-        let arc_data = Arc::new(data);
-        self.data = Some(arc_data.clone());
-        Ok(arc_data)
     }
 }

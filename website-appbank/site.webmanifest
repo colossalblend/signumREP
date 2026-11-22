@@ -1,11 +1,11 @@
 {
   "name": "Signum",
   "short_name": "Signum",
-  "description": "Приложения на iPhone с Windows, macOS, Linux и Android",
+  "description": "Установка iOS-приложений на iPhone с Windows и macOS",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#0e0f12",
-  "theme_color": "#0e0f12",
+  "background_color": "#0b0d13",
+  "theme_color": "#0b0d13",
   "lang": "ru",
   "icons": [
     {

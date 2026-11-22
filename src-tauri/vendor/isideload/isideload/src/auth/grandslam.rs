@@ -1,26 +1,20 @@
-use super::middleware::WasmProxyMiddleware;
 use plist::Dictionary;
 use plist_macro::plist_to_xml_string;
 use plist_macro::pretty_print_dictionary;
-#[cfg(not(feature = "wasm"))]
-use reqwest::Certificate;
 use reqwest::{
-    ClientBuilder,
+    Certificate, ClientBuilder,
     header::{HeaderMap, HeaderValue},
 };
-use reqwest_middleware::ClientBuilder as MwClientBuilder;
 use rootcause::prelude::*;
 use tracing::debug;
-use tracing::warn;
 
-#[cfg(not(feature = "wasm"))]
-use crate::sideload::cert_identity::APPLE_ROOT;
 use crate::{SideloadError, anisette::AnisetteClientInfo, util::plist::PlistDataExtract};
 
+const APPLE_ROOT: &[u8] = include_bytes!("./apple_root.der");
 const URL_BAG: &str = "https://gsa.apple.com/grandslam/GsService2/lookup";
 
 pub struct GrandSlam {
-    pub client: reqwest_middleware::ClientWithMiddleware,
+    pub client: reqwest::Client,
     pub client_info: AnisetteClientInfo,
     url_bag: Dictionary,
 }
@@ -30,13 +24,8 @@ impl GrandSlam {
     ///
     /// # Arguments
     /// - `client`: The reqwest client to use for requests
-    pub async fn new(
-        client_info: AnisetteClientInfo,
-        debug: bool,
-        proxy_url: Option<String>,
-    ) -> Result<Self, Report> {
-        let client =
-            Self::build_reqwest_client(debug, proxy_url).context("Failed to build HTTP client")?;
+    pub async fn new(client_info: AnisetteClientInfo, debug: bool) -> Result<Self, Report> {
+        let client = Self::build_reqwest_client(debug).context("Failed to build HTTP client")?;
         let base_headers = Self::base_headers(&client_info, false)?;
         let url_bag = Self::fetch_url_bag(&client, base_headers).await?;
         Ok(Self {
@@ -48,8 +37,8 @@ impl GrandSlam {
 
     /// Fetch the URL bag from GrandSlam and cache it
     pub async fn fetch_url_bag(
-        client: &reqwest_middleware::ClientWithMiddleware,
-        mut base_headers: HeaderMap,
+        client: &reqwest::Client,
+        base_headers: HeaderMap,
     ) -> Result<Dictionary, Report> {
         debug!("Fetching URL bag from GrandSlam");
         let resp = client
@@ -81,7 +70,7 @@ impl GrandSlam {
         Ok(url)
     }
 
-    pub fn get(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
+    pub fn get(&self, url: &str) -> Result<reqwest::RequestBuilder, Report> {
         let builder = self
             .client
             .get(url)
@@ -90,7 +79,7 @@ impl GrandSlam {
         Ok(builder)
     }
 
-    pub fn get_sms(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
+    pub fn get_sms(&self, url: &str) -> Result<reqwest::RequestBuilder, Report> {
         let builder = self
             .client
             .get(url)
@@ -99,7 +88,7 @@ impl GrandSlam {
         Ok(builder)
     }
 
-    pub fn put_sms(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
+    pub fn put_sms(&self, url: &str) -> Result<reqwest::RequestBuilder, Report> {
         let builder = self
             .client
             .put(url)
@@ -108,7 +97,7 @@ impl GrandSlam {
         Ok(builder)
     }
 
-    pub fn post(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
+    pub fn post(&self, url: &str) -> Result<reqwest::RequestBuilder, Report> {
         let builder = self
             .client
             .post(url)
@@ -117,7 +106,7 @@ impl GrandSlam {
         Ok(builder)
     }
 
-    pub fn post_sms(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
+    pub fn post_sms(&self, url: &str) -> Result<reqwest::RequestBuilder, Report> {
         let builder = self
             .client
             .post(url)
@@ -126,7 +115,7 @@ impl GrandSlam {
         Ok(builder)
     }
 
-    pub fn patch(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
+    pub fn patch(&self, url: &str) -> Result<reqwest::RequestBuilder, Report> {
         let builder = self
             .client
             .patch(url)
@@ -140,41 +129,14 @@ impl GrandSlam {
         url: &str,
         body: &Dictionary,
         additional_headers: Option<HeaderMap>,
-        retry_limit: Option<u32>,
     ) -> Result<Dictionary, Report> {
-        let result = self
+        let resp = self
             .post(url)?
-            .headers(
-                additional_headers
-                    .clone()
-                    .unwrap_or_else(reqwest::header::HeaderMap::new),
-            )
+            .headers(additional_headers.unwrap_or_else(reqwest::header::HeaderMap::new))
             .body(plist_to_xml_string(body))
             .send()
             .await
-            .context("Failed to send grandslam request")?;
-
-        if let Some(retries) = retry_limit
-            && result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-        {
-            if retries > 0 {
-                warn!(
-                    "Received 429 Too Many Requests, retrying request ({} retries left)",
-                    retries
-                );
-                return Box::pin(self.plist_request(
-                    url,
-                    body,
-                    additional_headers,
-                    Some(retries - 1),
-                ))
-                .await;
-            } else {
-                bail!("Received 429 Too Many Requests, no retries left");
-            }
-        }
-
-        let resp = result
+            .context("Failed to send grandslam request")?
             .error_for_status()
             .context("Received error response from grandslam")?
             .text()
@@ -225,10 +187,6 @@ impl GrandSlam {
             "X-Apple-App-Info",
             HeaderValue::from_static("com.apple.gs.xcode.auth"),
         );
-        headers.insert(
-            reqwest::header::CONNECTION,
-            HeaderValue::from_static("close"),
-        );
 
         Ok(headers)
     }
@@ -239,31 +197,16 @@ impl GrandSlam {
     /// - `debug`: DANGER, If true, accept invalid certificates and enable verbose connection logging
     /// # Errors
     /// Returns an error if the reqwest client cannot be built
-    pub fn build_reqwest_client(
-        #[cfg(not(feature = "wasm"))] debug: bool,
-        #[cfg(feature = "wasm")] _debug: bool,
-        proxy_url: Option<String>,
-    ) -> Result<reqwest_middleware::ClientWithMiddleware, Report> {
-        #[cfg(not(feature = "wasm"))]
+    pub fn build_reqwest_client(debug: bool) -> Result<reqwest::Client, Report> {
         let cert = Certificate::from_der(APPLE_ROOT)?;
-        #[cfg(not(feature = "wasm"))]
         let client = ClientBuilder::new()
             .add_root_certificate(cert)
             .http1_title_case_headers()
             .danger_accept_invalid_certs(debug)
             .connection_verbose(debug)
-            // .pool_max_idle_per_host(0)
             .build()?;
-        #[cfg(feature = "wasm")]
-        let client = ClientBuilder::new().build()?;
 
-        let builder = MwClientBuilder::new(client);
-        let builder = if let Some(proxy_url) = proxy_url {
-            builder.with(WasmProxyMiddleware::new(proxy_url))
-        } else {
-            builder
-        };
-        Ok(builder.build())
+        Ok(client)
     }
 }
 
