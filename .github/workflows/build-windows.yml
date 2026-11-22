@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   windows:
-    name: Signum.exe (x64)
+    name: Windows installer (x64)
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -32,6 +32,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python build tools
+        run: python -m pip install --disable-pip-version-check pefile
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -48,19 +56,14 @@ jobs:
             fi
           done
 
-      - name: Fetch ipatool-cpp 1.3.2 (best effort)
-        continue-on-error: true
+      - name: Fetch Windows tools
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p dl apple-tools/windows-x64/v5
-          gh release download 1.3.2 -R Sorvigolova/ipatool -p '*indows*' -D dl
-          for z in dl/*.zip; do [ -f "$z" ] && unzip -o -q "$z" -d dl/x; done
-          exe="$(find dl -iname 'ipatool*.exe' | head -1)"
-          test -n "$exe"
-          cp "$exe" apple-tools/windows-x64/v5/ipatool.exe
-          sha256sum apple-tools/windows-x64/v5/ipatool.exe
+          gh release download tools-b42 -R "$GITHUB_REPOSITORY" -p signum-tools-windows-b42.zip -D "$RUNNER_TEMP"
+          unzip -o -q "$RUNNER_TEMP/signum-tools-windows-b42.zip"
+          test -f apple-tools/windows-x64/v5/ipatool.exe
 
       - name: Install npm dependencies
         run: npm ci
@@ -68,20 +71,27 @@ jobs:
       - name: Check frontend types
         run: npx tsc --noEmit
 
-      - name: Build Signum.exe
-        run: npm run tauri -- build --no-bundle
+      - name: Build Windows installer
+        run: npm run build:win
 
-      - name: Collect portable folder
+      - name: Verify installer version and payload
         shell: bash
         run: |
-          mkdir -p out/Signum/resources
-          cp src-tauri/target/release/signum.exe out/Signum/Signum.exe
-          cp -r apple-tools out/Signum/resources/apple-tools
+          test -s installers/Signum_1.2.3_Setup.exe
+          python - <<'PY'
+          import zipfile
+          z = zipfile.ZipFile('installer/payload/SignumPayload.zip')
+          names = set(z.namelist())
+          assert 'signum.exe' in names
+          assert 'uninstall.exe' in names
+          assert 'resources/apple-tools/windows-x64/v5/ipatool.exe' in names
+          print('Windows installer payload:', len(names), 'files')
+          PY
 
-      - name: Upload Signum.exe
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: signum-windows-x64
-          path: out/Signum
+          name: signum-windows-installer-1.2.3
+          path: installers/Signum_1.2.3_Setup.exe
           if-no-files-found: error
           retention-days: 14

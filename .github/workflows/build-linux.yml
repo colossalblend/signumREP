@@ -34,10 +34,16 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Fetch Linux tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download tools-b42 -R "$GITHUB_REPOSITORY" -p signum-tools-linux-b42.tar.gz -D "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/signum-tools-linux-b42.tar.gz"
+
       - name: chmod helper binaries
         run: |
-          chmod +x linux_x64/ipatool linux_x64/ipatool-v4 linux_x64/ipatool-v5 linux_x64/zsign
-          if [ -d linux_arm64 ]; then chmod +x linux_arm64/ipatool linux_arm64/ipatool-v4 linux_arm64/ipatool-v5 linux_arm64/zsign; fi
+          find linux_x64 linux_arm64 -type f -exec chmod +x {} +
 
       - name: Build Linux bundles
         run: npm run tauri -- build --bundles deb --bundles appimage
@@ -46,6 +52,7 @@ jobs:
         run: |
           test -n "$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)"
           test -n "$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)"
+          dpkg-deb -f "$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)" Version | grep -qx '1.2.3'
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

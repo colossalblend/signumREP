@@ -32,29 +32,12 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Prepare bundled device tools
+      - name: Fetch macOS tools
         run: |
           set -eux
-          mkdir -p apple-tools/macos-arm64/v2 apple-tools/macos-arm64/v3-legacy apple-tools/macos-arm64/v4 apple-tools/macos-arm64/v5
-          mkdir -p apple-tools/macos-x64/v2 apple-tools/macos-x64/v3-legacy apple-tools/macos-x64/v4 apple-tools/macos-x64/v5
-          mkdir -p apple-tools/macos-arm64/support apple-tools/macos-x64/support
-          # v5 = ipatool-cpp straight from upstream, pinned by sha256: the tools
-          # tarball above may still carry an older build.
-          GH_TOKEN=${{ github.token }} gh release download 1.3.2 -R Sorvigolova/ipatool -p 'macOS_*_ipatool-cpp.zip' -D /tmp/ipatool-cpp
-          printf '%s  %s\n' \
-            87d4d4189c3d71cc97e1896fadb4bae62877ba3cc3b2a5f9ddf0df3bbb4b0fe0 /tmp/ipatool-cpp/macOS_arm64_ipatool-cpp.zip \
-            9e52e14559a772d2e5d3a2379973c34e5d3d1c99cac5451a44ab8ab796fb13b3 /tmp/ipatool-cpp/macOS_amd64_ipatool-cpp.zip \
-            | shasum -a 256 -c
-          unzip -p /tmp/ipatool-cpp/macOS_arm64_ipatool-cpp.zip ipatool-cpp-macOS-arm64 > apple-tools/macos-arm64/v5/ipatool
-          unzip -p /tmp/ipatool-cpp/macOS_amd64_ipatool-cpp.zip ipatool-cpp-macOS-amd64 > apple-tools/macos-x64/v5/ipatool
-          chmod +x apple-tools/macos-arm64/v5/ipatool apple-tools/macos-x64/v5/ipatool
-          # Device tools come from the tarball: one build per arch, libraries
-          # bound via @executable_path. Never copy Homebrew's here — the runner
-          # is arm64 and they link /opt/homebrew, which gave every Intel Mac
-          # "Bad CPU type" and broke Macs without Homebrew (1.1.6, 1.1.7 b31).
-          for arch in arm64 x64; do
-            chmod +x apple-tools/macos-${arch}/support/*
-          done
+          gh release download tools-b42 -R "$GITHUB_REPOSITORY" -p signum-tools-macos-b42.tar.gz -D "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/signum-tools-macos-b42.tar.gz"
+          find apple-tools -type f ! -name '*.dylib' ! -name '*.bin' ! -name '*.json' ! -name '*.txt' -exec chmod +x {} +
           for tool in ideviceinfo ideviceinstaller idevicepair; do
             test "$(lipo -archs apple-tools/macos-x64/support/${tool})" = x86_64
             test "$(lipo -archs apple-tools/macos-arm64/support/${tool})" = arm64
@@ -86,8 +69,7 @@ jobs:
           hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
           trap 'hdiutil detach "$mount"' EXIT
           app="$mount/Signum.app"
-          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")" = 1.2.0
-          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$app/Contents/Info.plist")" = 39
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")" = 1.2.3
           lipo "$app/Contents/MacOS/signum" -verify_arch x86_64 arm64
           test -x "$app/Contents/Resources/resources/apple-tools/macos-arm64/v5/ipatool"
           test -x "$app/Contents/Resources/resources/apple-tools/macos-x64/v5/ipatool"
@@ -100,14 +82,10 @@ jobs:
           test -n "$dmg"
           shasum -a 256 "$dmg" | tee macos-sha256.txt
 
-      - name: Save macOS release for deployment
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -eux
-          gh release create macos-b39 --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" --title "Signum 1.2.0 build 39 macOS" \
-            --notes "Universal Intel and Apple Silicon DMG; verified in CI." --draft
-          gh release upload macos-b39 \
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg \
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signum-macos-1.2.3
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             macos-sha256.txt
