@@ -30,15 +30,43 @@ class SignumApi {
             ?: root["data"] as? JsonArray
             ?: throw SignumApiException("Не удалось загрузить каталог")
         val bust = System.currentTimeMillis().toString()
-        val apps = list.mapNotNull { el ->
+        val parsed = list.mapNotNull { el ->
             val obj = el as? JsonObject ?: return@mapNotNull null
             parseCatalogApp(obj, bust)
         }
+        val apps = fillStoreIds(parsed)
         return CatalogFeed(
             apps = apps,
             groups = parseGroups(root),
             banners = parseBanners(root),
         )
+    }
+
+    /**
+     * Старый сервер не отдаёт `app_store_ids` в main.php. Без них карточку
+     * каталога нельзя объединить с результатом App Store, поэтому недостающие
+     * ID добираем одним пакетным запросом info.php?ids=, как ПК-клиент.
+     */
+    private fun fillStoreIds(apps: List<CatalogApp>): List<CatalogApp> {
+        val missing = apps.filter { it.app_store_ids.isEmpty() }.map { it.id }
+        if (missing.isEmpty()) return apps
+        val found = HashMap<String, List<String>>()
+        runCatching {
+            missing.chunked(150).forEach { chunk ->
+                val root = get("info.php", mapOf("ids" to chunk.joinToString(",")))
+                val data = root["data"] as? JsonObject ?: return@forEach
+                for ((id, payload) in data) {
+                    val ids = (payload as? JsonObject)?.arr("versions")
+                        ?.mapNotNull { (it as? JsonObject)?.anyStr("app_store_id")?.trim() }
+                        ?.filter { it.isNotEmpty() && it.all(Char::isDigit) }
+                        ?.distinct()
+                        .orEmpty()
+                    if (ids.isNotEmpty()) found[id] = ids
+                }
+            }
+        }
+        if (found.isEmpty()) return apps
+        return apps.map { app -> found[app.id]?.let { app.copy(app_store_ids = it) } ?: app }
     }
 
     fun fetchAppInfo(id: String): JsonObject {
@@ -101,12 +129,30 @@ class SignumApi {
             activation = decodeActivation(obj.obj("activation")),
             bundle_id = obj.anyStr("bundle_id"),
             app_store_id = obj.anyStr("app_store_id", "store_id", "adam_id"),
+            app_store_ids = catalogStoreIds(obj),
             testflight = obj.obj("testflight")
                 ?.anyStr("url")
                 ?.trim()
                 ?.takeIf { it.startsWith("https://testflight.apple.com/") }
                 ?.let { TestFlightOffer(it) },
         )
+    }
+
+    /** ID из `app_store_ids`, `app_store_id` и ссылки `app_store_url` — как в ПК-клиенте. */
+    private fun catalogStoreIds(obj: JsonObject): List<String> {
+        val out = LinkedHashSet<String>()
+        fun push(value: String?) {
+            val id = value?.trim().orEmpty()
+            if (id.isNotEmpty() && id.all(Char::isDigit)) out += id
+        }
+        obj.arr("app_store_ids")?.forEach { el ->
+            push((el as? kotlinx.serialization.json.JsonPrimitive)?.content)
+        }
+        push(obj.anyStr("app_store_id", "store_id", "adam_id"))
+        obj.anyStr("app_store_url")?.let { url ->
+            Regex("/id(\\d+)").find(url)?.groupValues?.getOrNull(1)?.let(::push)
+        }
+        return out.toList()
     }
 
     private fun parseCatalogVersion(obj: JsonObject, bust: String): CatalogVersion? {

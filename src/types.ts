@@ -94,6 +94,8 @@ export interface CatalogApp {
   in_store?: boolean;
   color?: string;
   aliases?: string[];
+  /** App Store ids этого приложения — по ним карточка каталога объединяется с результатом App Store. */
+  app_store_ids?: string[];
                                         
   category?: string;
                                                   

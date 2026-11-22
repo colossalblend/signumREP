@@ -10522,6 +10522,38 @@ fn parse_catalog_banners(value: &JsonValue) -> Vec<CatalogBanner> {
         .unwrap_or_default()
 }
 
+/// App Store ids a catalogue card is already known by: `app_store_ids` from
+/// the summary, a single `app_store_id`, or the id inside `app_store_url`.
+fn catalog_app_store_ids(item: &JsonValue) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |value: &str| {
+        if let Some(id) = normalized_app_store_id(Some(value)) {
+            if !out.iter().any(|known| known == id) {
+                out.push(id.to_string());
+            }
+        }
+    };
+    if let Some(list) = item.get("app_store_ids").and_then(|v| v.as_array()) {
+        for value in list {
+            if let Some(text) = value.as_str() {
+                push(text);
+            } else if let Some(number) = value.as_u64() {
+                push(&number.to_string());
+            }
+        }
+    }
+    if let Some(text) = item.get("app_store_id").and_then(|v| v.as_str()) {
+        push(text);
+    }
+    if let Some(url) = item.get("app_store_url").and_then(|v| v.as_str()) {
+        if let Some(pos) = url.rfind("/id") {
+            let digits: String = url[pos + 3..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            push(&digits);
+        }
+    }
+    out
+}
+
 async fn enrich_catalog_apps(app: &AppHandle, list: &[JsonValue]) -> Vec<JsonValue> {
     let bust = icon_cache_bust();
 
@@ -10547,7 +10579,7 @@ async fn enrich_catalog_apps(app: &AppHandle, list: &[JsonValue]) -> Vec<JsonVal
                     .and_then(|value| value.as_str())
                     .is_none_or(|value| value.trim().is_empty())
             };
-            missing("version") || missing("min_ios")
+            missing("version") || missing("min_ios") || catalog_app_store_ids(item).is_empty()
         })
         .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
         .map(str::to_string)
@@ -10557,9 +10589,27 @@ async fn enrich_catalog_apps(app: &AppHandle, list: &[JsonValue]) -> Vec<JsonVal
         .unwrap_or_default();
 
     for item in &mut items {
+        // App Store ids let the catalogue and the App Store search merge the
+        // same app into one card. Newer servers send them in the summary; an
+        // older one only has them inside info.php versions.
+        let mut store_ids = catalog_app_store_ids(item);
+        if let Some((_, versions)) = item
+            .get("id")
+            .and_then(|value| value.as_str())
+            .and_then(|id| extra.get(id))
+        {
+            for version in versions {
+                if let Some(id) = normalized_app_store_id(version.get("app_store_id").and_then(|v| v.as_str())) {
+                    if !store_ids.iter().any(|known| known == id) {
+                        store_ids.push(id.to_string());
+                    }
+                }
+            }
+        }
         let Some(obj) = item.as_object_mut() else {
             continue;
         };
+        obj.insert("app_store_ids".into(), serde_json::json!(store_ids));
         if let Some(icon) = obj
             .get("icon_url")
             .and_then(|v| v.as_str())
@@ -22753,6 +22803,19 @@ Download error: storefront blocked";
         let dump = r#"2026/08/28 22:07:36 warning: discarding cookies in invalid format (error: json: cannot unmarshal object into Go value of type []cookiejar.entry) {"level":"error","error":"failed to get account: failed to get item: illegal base64 data at input byte 0","success":false,"time":"2026-08-28T22:07:36+03:00"}"#;
         let parsed = parse_ipatool_auth_info_email(dump);
         assert!(parsed.unwrap_err().contains("illegal base64"));
+    }
+
+    #[test]
+    fn catalog_store_ids_come_from_summary_and_url() {
+        let item = serde_json::json!({
+            "id": "vk",
+            "app_store_ids": ["564177498", "", "abc"],
+            "app_store_url": "https://apps.apple.com/ru/app/vk/id564177498?l=en"
+        });
+        assert_eq!(catalog_app_store_ids(&item), vec!["564177498".to_string()]);
+        let by_url = serde_json::json!({"app_store_url": "https://apps.apple.com/app/id6789069556"});
+        assert_eq!(catalog_app_store_ids(&by_url), vec!["6789069556".to_string()]);
+        assert!(catalog_app_store_ids(&serde_json::json!({"app_store_url": null})).is_empty());
     }
 
     #[test]

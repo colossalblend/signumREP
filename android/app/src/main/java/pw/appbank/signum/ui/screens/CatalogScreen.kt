@@ -199,7 +199,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                 }
                 if (s.search.isNotBlank()) {
                     Text(
-                        "В каталоге найдено: ${apps.size}. Ниже автоматически проверяем AppMagic и iTunes.",
+                        "В каталоге найдено: ${apps.size}. Ниже — результаты App Store.",
                         color = c.muted,
                         fontSize = 11.sp,
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -299,12 +299,103 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                 }
             }
         }
-        if (s.search.trim().length >= 2 && s.storeHits.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Text("Результаты AppMagic и iTunes", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        val favorites = s.settings.favoriteAppIds.toSet()
+        val favoriteApps = if (s.search.isBlank() && catalogSort == "default" && compatibility == "all") apps.filter { it.id in favorites } else emptyList()
+        if (favoriteApps.isNotEmpty()) {
+            item(key = "g-favorites", span = { GridItemSpan(maxLineSpan) }) {
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    Text("Избранное", color = c.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.weight(1f))
+                    Text("${favoriteApps.size}", color = c.muted, fontSize = 11.sp)
+                }
             }
-            items(s.storeHits, key = { "s${it.adamId}" }) { hit ->
-                Panel(onClick = { vm.openStoreHit(hit) }) {
+            items(favoriteApps, key = { "fav-${it.id}" }) { app ->
+                AppCard(
+                    app = app,
+                    favorite = true,
+                    selectable = s.selectMode,
+                    selected = app.id in s.selectedAppIds,
+                    onToggleFavorite = { vm.toggleFavorite(app.id) },
+                ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
+            }
+        }
+        if (displayedSections != null) {
+            displayedSections.forEach { section ->
+                item(key = "g-${section.id}", span = { GridItemSpan(maxLineSpan) }) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.Bottom,
+                    ) {
+                        Text(section.title, color = c.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.weight(1f))
+                        Text("${section.apps.size}", color = c.muted, fontSize = 11.sp)
+                    }
+                }
+                items(section.apps, key = { it.id }) { app ->
+                    AppCard(
+                        app = app,
+                        favorite = app.id in favorites,
+                        selectable = s.selectMode,
+                        selected = app.id in s.selectedAppIds,
+                        onToggleFavorite = { vm.toggleFavorite(app.id) },
+                    ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
+                }
+            }
+        } else {
+            items(displayedApps, key = { it.id }) { app ->
+                AppCard(
+                    app = app,
+                    favorite = app.id in favorites,
+                    selectable = s.selectMode,
+                    selected = app.id in s.selectedAppIds,
+                    onToggleFavorite = { vm.toggleFavorite(app.id) },
+                ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
+            }
+        }
+        // Одно приложение — одна карточка: результат App Store с тем же ID,
+        // что у приложения каталога, превращается в карточку каталога, а если
+        // она уже показана выше — не дублируется.
+        val shownCatalogIds = (displayedSections?.flatMap { it.apps } ?: displayedApps).mapTo(HashSet()) { it.id }
+        val catalogByStoreId = HashMap<String, CatalogApp>().apply {
+            s.catalog.forEach { app -> app.app_store_ids.forEach { id -> putIfAbsent(id, app) } }
+        }
+        val seenMerged = HashSet<String>()
+        val mergedStore = s.storeHits.mapNotNull { hit ->
+            val app = catalogByStoreId[hit.adamId.trim()]
+            when {
+                app == null -> hit to null
+                app.id in shownCatalogIds || !seenMerged.add(app.id) -> null
+                else -> hit to app
+            }
+        }
+        if (s.search.trim().length >= 2 && s.storeHits.isNotEmpty()) {
+            item(key = "store-title", span = { GridItemSpan(maxLineSpan) }) {
+                Column(Modifier.fillMaxWidth().padding(top = 14.dp)) {
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(c.border))
+                    Spacer(Modifier.height(16.dp))
+                    Text("Результаты App Store", color = c.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (mergedStore.isEmpty()) {
+                item(key = "store-all-merged", span = { GridItemSpan(maxLineSpan) }) {
+                    Text(
+                        "Всё, что нашлось в App Store, уже есть в каталоге выше.",
+                        color = c.muted,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+            items(mergedStore, key = { (hit, app) -> app?.let { "sc-${it.id}" } ?: "s${hit.adamId}" }) { (hit, catalogApp) ->
+                if (catalogApp != null) {
+                    AppCard(
+                        app = catalogApp,
+                        favorite = catalogApp.id in favorites,
+                        onToggleFavorite = { vm.toggleFavorite(catalogApp.id) },
+                    ) { vm.openOffer(catalogApp) }
+                } else Panel(onClick = { vm.openStoreHit(hit) }) {
                     Column {
                         if (hit.artwork.isNullOrBlank()) {
                             Box(
@@ -361,62 +452,6 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                         Spacer(Modifier.height(8.dp))
                     }
                 }
-            }
-        }
-        val favorites = s.settings.favoriteAppIds.toSet()
-        val favoriteApps = if (s.search.isBlank() && catalogSort == "default" && compatibility == "all") apps.filter { it.id in favorites } else emptyList()
-        if (favoriteApps.isNotEmpty()) {
-            item(key = "g-favorites", span = { GridItemSpan(maxLineSpan) }) {
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
-                    verticalAlignment = Alignment.Bottom,
-                ) {
-                    Text("Избранное", color = c.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.weight(1f))
-                    Text("${favoriteApps.size}", color = c.muted, fontSize = 11.sp)
-                }
-            }
-            items(favoriteApps, key = { "fav-${it.id}" }) { app ->
-                AppCard(
-                    app = app,
-                    favorite = true,
-                    selectable = s.selectMode,
-                    selected = app.id in s.selectedAppIds,
-                    onToggleFavorite = { vm.toggleFavorite(app.id) },
-                ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
-            }
-        }
-        if (displayedSections != null) {
-            displayedSections.forEach { section ->
-                item(key = "g-${section.id}", span = { GridItemSpan(maxLineSpan) }) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
-                        verticalAlignment = Alignment.Bottom,
-                    ) {
-                        Text(section.title, color = c.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.weight(1f))
-                        Text("${section.apps.size}", color = c.muted, fontSize = 11.sp)
-                    }
-                }
-                items(section.apps, key = { it.id }) { app ->
-                    AppCard(
-                        app = app,
-                        favorite = app.id in favorites,
-                        selectable = s.selectMode,
-                        selected = app.id in s.selectedAppIds,
-                        onToggleFavorite = { vm.toggleFavorite(app.id) },
-                    ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
-                }
-            }
-        } else {
-            items(displayedApps, key = { it.id }) { app ->
-                AppCard(
-                    app = app,
-                    favorite = app.id in favorites,
-                    selectable = s.selectMode,
-                    selected = app.id in s.selectedAppIds,
-                    onToggleFavorite = { vm.toggleFavorite(app.id) },
-                ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
             }
         }
     }

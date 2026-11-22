@@ -51,6 +51,8 @@ data class CatalogApp(
     val activation: AppActivation? = null,
     val bundle_id: String? = null,
     val app_store_id: String? = null,
+    /** Все App Store ID этого приложения: по ним карточка каталога объединяется с результатом App Store. */
+    val app_store_ids: List<String> = emptyList(),
     /** Заполнено только у приложений, которые ставятся через TestFlight. */
     val testflight: TestFlightOffer? = null,
 )

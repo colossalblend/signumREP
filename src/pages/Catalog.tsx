@@ -651,6 +651,8 @@ export default function Catalog() {
     [foundApps, tourDemo],
   );
 
+  const shownCatalogIds = useMemo(() => new Set(visibleApps.map(app => app.id)), [visibleApps]);
+
   const favoriteApps = useMemo(
     () => (searchQuery.trim() || catalogSort !== "default" || compatibilityFilter !== "all"
       ? []
@@ -939,7 +941,7 @@ export default function Catalog() {
                <div className="mx-auto mt-6 max-w-sm rounded-2xl border border-white/[0.08] bg-black/15 p-4">
                  <p className="text-xs leading-5 text-slate-400">
                    В каталоге собраны проверенные приложения и специальные сборки.
-                   Для остальных названий результаты AppMagic и iTunes появятся ниже автоматически.
+                   Для остальных названий результаты App Store появятся ниже автоматически.
                  </p>
                </div>
               {searchBankAlt && (
@@ -1039,13 +1041,14 @@ export default function Catalog() {
       {effectiveSearchQuery.trim().length >= 2 && (
         <section className="mt-12 border-t border-white/[0.06] pt-8">
           <div className="mb-4 flex items-end justify-between gap-3">
-            <h2 className="text-lg font-bold tracking-tight text-white">Результаты AppMagic и iTunes</h2>
+            <h2 className="text-lg font-bold tracking-tight text-white">Результаты App Store</h2>
             {storeSearching && <span className="inline-flex items-center gap-2 pb-0.5 text-xs text-slate-500"><LoaderCircle size={14} className="animate-spin text-brand-300" />Ищем…</span>}
           </div>
           <StoreSearch
             query={effectiveSearchQuery}
             tourShowHits={tourShowHits}
-            catalogMatches={[]}
+            catalogApps={apps}
+            shownCatalogIds={shownCatalogIds}
             onOpenCatalogApp={app => void openInstallOffer(app)}
             onSearchingChange={setStoreSearching}
           />
