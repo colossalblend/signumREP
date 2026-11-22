@@ -5141,6 +5141,7 @@ version = "1.2.3"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
+ "apple-codesign-quick",
  "base64 0.22.1",
  "cbc 0.1.2",
  "flate2",
@@ -5148,6 +5149,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "isideload",
+ "isideload-p12-keystore",
  "keyring",
  "num-bigint",
  "num-traits",
@@ -5172,6 +5174,7 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
+ "x509-cert 0.2.5",
  "zip 2.4.2",
 ]
 

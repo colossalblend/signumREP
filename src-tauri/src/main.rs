@@ -781,7 +781,7 @@ struct AppState {
     /// Same idmsa freeze when смена страны просит код.
     region_2fa_pending: Arc<StdMutex<Option<apple_history::PendingHistoryAuth>>>,
     /// Reply channel for isideload GSA 2FA during IPA signing (blocks until UI submits code).
-    signing_2fa_reply: Arc<StdMutex<Option<std::sync::mpsc::Sender<String>>>>,
+    signing_2fa_reply: Arc<StdMutex<Option<tokio::sync::oneshot::Sender<String>>>>,
     login_2fa_engine: Arc<StdMutex<HashMap<String, String>>>,
     /// Pending bank OTP sessions (phone → SMS → credentials).
     bank_otp: Arc<bank_otp::BankOtpStore>,
@@ -13684,6 +13684,8 @@ fn submit_signing_2fa(
     let code = code.unwrap_or_default();
     let payload = if action.eq_ignore_ascii_case("resend") {
         "__resend__".to_string()
+    } else if action.eq_ignore_ascii_case("sms") {
+        "__sms__".to_string()
     } else {
         let digits: String = code
             .chars()
@@ -16961,12 +16963,14 @@ async fn process_sign_and_install(
     // Free/paid sign uses isideload (codesign / internal pack), not the Windows
     // zsign helper. Keep an optional path for API compatibility; never hard-fail
     // when zsign is absent (macOS/Linux never ship it).
-    let zsign = tools
+    // Для своего сертификата zsign необязателен: без него (macOS/Linux)
+    // подписывает встроенный подписчик.
+    let zsign_path = tools
         .zsign
         .as_deref()
         .map(PathBuf::from)
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("zsign"));
+        .filter(|p| p.is_file());
+    let zsign = zsign_path.clone().unwrap_or_else(|| PathBuf::from("zsign"));
     let anisette = tools.anisette.as_deref().map(PathBuf::from);
     let app_data = app
         .path()
@@ -16999,15 +17003,19 @@ async fn process_sign_and_install(
     // CertMode::Custom → zsign с сохранённым/указанным сертификатом.
     // CertMode::Auto/Free/Paid → isideload через Apple ID.
     let result = if matches!(input.cert_mode, apple_signing::CertMode::Custom) {
-        let app_data = app
+        // Сохранённые сертификаты лежат в app_config_dir (там их пишет
+        // import_custom_cert и читает list_custom_certs). Раньше здесь читали
+        // app_data_dir: на Linux это другая папка, и сохранённый сертификат
+        // «не находился».
+        let cert_store = app
             .path()
-            .app_data_dir()
-            .map_err(|e| format!("app data: {e}"))?;
+            .app_config_dir()
+            .map_err(|e| format!("app config: {e}"))?;
         // Либо из сохранённого имени, либо явные пути из UI.
         let (p12_path, prov_path, pass) = if let Some(name) =
             input.cert_name.as_deref().map(str::trim).filter(|v| !v.is_empty())
         {
-            let (p12, prov, pass) = apple_signing::load_custom_cert(&app_data, name)?;
+            let (p12, prov, pass) = apple_signing::load_custom_cert(&cert_store, name)?;
             (p12, prov, pass)
         } else {
             let p12 = input
@@ -17024,10 +17032,10 @@ async fn process_sign_and_install(
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
                 .ok_or_else(|| "Укажите файл .mobileprovision".to_string())?;
+            // Пароль не обрезаем: пробелы по краям — тоже символы пароля.
             let pass = input
                 .custom_cert_password
                 .as_deref()
-                .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .map(ToOwned::to_owned);
             (p12, prov, pass)
@@ -17039,8 +17047,9 @@ async fn process_sign_and_install(
             &p12_path,
             &prov_path,
             &pass,
+            if input.install { udid.as_deref() } else { None },
             &input.options,
-            &zsign,
+            zsign_path.as_deref(),
             &cache_dir,
             &output_ipa,
             |pct, msg| {
@@ -17072,7 +17081,8 @@ async fn process_sign_and_install(
             &device_name,
             &email,
             &password,
-            apple_signing::CertMode::Auto,
+            // Раньше здесь всегда стоял Auto, и выбор Free/Paid игнорировался.
+            input.cert_mode,
             &input.options,
             anisette.as_deref(),
             &zsign,
@@ -17148,13 +17158,7 @@ async fn process_sign_and_install(
         }
     }
 
-    remember_signed_app(
-        app,
-        input,
-        &result.metadata.bundle_id,
-        &result.metadata.name,
-        &result.team_kind,
-    );
+    remember_signed_app(app, input, udid.as_deref(), &result);
 
     Ok(())
 }
