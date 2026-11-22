@@ -152,8 +152,95 @@
           if (fresh && fresh.version) node.textContent = fresh.version;
         });
         applyDownloadUI(platform);
+        renderChecksums(data.platforms);
       })
       .catch(function () { /* остаются значения из разметки */ });
+  }
+
+  // ── Контрольные суммы SHA-256 ─────────────────────────────────────────
+
+  var CHECKSUM_NAMES = [
+    ["windows", "Windows", "bi-windows"],
+    ["macos", "macOS", "bi-apple"],
+    ["linux", "Linux · AppImage", "bi-ubuntu"],
+    ["android", "Android", "bi-android2"]
+  ];
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    return new Promise(function (resolve, reject) {
+      var area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(area);
+      if (ok) resolve(); else reject(new Error("copy failed"));
+    });
+  }
+
+  function renderChecksums(platforms) {
+    var box = document.getElementById("checksums");
+    var list = box && box.querySelector("[data-checksums-list]");
+    if (!list) return;
+    list.textContent = "";
+    var count = 0;
+    CHECKSUM_NAMES.forEach(function (entry) {
+      var info = platforms[entry[0]];
+      var hash = info && typeof info.sha256 === "string" ? info.sha256.toLowerCase() : "";
+      if (!/^[a-f0-9]{64}$/.test(hash)) return;
+      var row = document.createElement("li");
+      row.className = "checksum";
+      var icon = document.createElement("i");
+      icon.className = "bi " + entry[2];
+      icon.setAttribute("aria-hidden", "true");
+      var name = document.createElement("span");
+      name.className = "checksum-name";
+      name.textContent = entry[1];
+      if (info.version) {
+        var ver = document.createElement("small");
+        ver.textContent = "v" + info.version;
+        name.appendChild(ver);
+      }
+      var code = document.createElement("code");
+      code.className = "checksum-hash";
+      code.textContent = hash;
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "checksum-copy";
+      button.setAttribute("aria-label", "Скопировать отпечаток для " + entry[1]);
+      button.innerHTML = '<i class="bi bi-copy" aria-hidden="true"></i><span>Копировать</span>';
+      var timer = 0;
+      button.addEventListener("click", function () {
+        copyText(hash).then(function () {
+          button.classList.add("is-done");
+          button.lastChild.textContent = "Скопировано";
+          window.clearTimeout(timer);
+          timer = window.setTimeout(function () {
+            button.classList.remove("is-done");
+            button.lastChild.textContent = "Копировать";
+          }, 1800);
+        }).catch(function () {
+          var range = document.createRange();
+          range.selectNodeContents(code);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        });
+      });
+      row.appendChild(icon);
+      row.appendChild(name);
+      row.appendChild(code);
+      row.appendChild(button);
+      list.appendChild(row);
+      count += 1;
+    });
+    box.hidden = count === 0;
+    if (count) box.classList.add("is-visible");
   }
 
   // ── Диалог «Все платформы» ────────────────────────────────────────────
