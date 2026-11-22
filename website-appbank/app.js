@@ -418,9 +418,9 @@
   // ── FAQ: плавное раскрытие ────────────────────────────────────────────
 
   function initFaq() {
-    $all(document, ".faq-item").forEach(function (details) {
+    $all(document, ".faq-item, .checksums").forEach(function (details) {
       var summary = details.querySelector("summary");
-      var panel = details.querySelector(".faq-panel");
+      var panel = details.querySelector(".faq-panel, .checksums-panel");
       if (!summary || !panel) return;
       panel.classList.add("is-js");
       details.classList.toggle("is-open", details.open);
@@ -600,7 +600,10 @@
           var twin = catalogBox.querySelector("[data-store-id='" + id + "']");
           if (!twin) return;
           left -= 1;
+          r.style.height = r.offsetHeight + "px";
+          void r.offsetHeight;
           r.classList.add("is-leaving");
+          later(function () { if (r.parentNode) r.parentNode.removeChild(r); }, 520);
           twin.classList.add("is-merged");
           var tag = document.createElement("span");
           tag.className = "demo-tag";
