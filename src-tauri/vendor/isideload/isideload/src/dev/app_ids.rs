@@ -2,6 +2,7 @@ use crate::{
     dev::{
         developer_session::DeveloperSession,
         device_type::{DeveloperDeviceType, dev_url},
+        normalize_app_names,
         teams::DeveloperTeam,
     },
     util::plist::{PlistDataExtract, SensitivePlistAttachment},
@@ -11,52 +12,6 @@ use plist_macro::plist;
 use reqwest::header::HeaderValue;
 use rootcause::prelude::*;
 use serde::{Deserialize, Serialize};
-
-/// Developer Portal `appIdName` must be plain ASCII (letters/digits/space/-/_).
-/// Display names from RU bank IPAs often contain Cyrillic and fail registration.
-pub fn sanitize_developer_app_id_name(name: &str, identifier: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else if matches!(c, ' ' | '-' | '_' | '.') {
-                ' '
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let cleaned = cleaned.trim().to_string();
-    if cleaned
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .count()
-        >= 2
-    {
-        return cleaned.chars().take(50).collect();
-    }
-    // Fallback: last reverse-DNS label, e.g. com.tinkoff.business -> business
-    let from_id: String = identifier
-        .rsplit('.')
-        .next()
-        .unwrap_or("App")
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .take(40)
-        .collect();
-    if from_id.len() >= 2 {
-        // Apple often wants a human-ish name; capitalize first letter.
-        let mut chars = from_id.chars();
-        let first = chars.next().map(|c| c.to_ascii_uppercase()).unwrap_or('A');
-        format!("{first}{}", chars.as_str())
-    } else {
-        "SignedApp".into()
-    }
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,7 +52,8 @@ pub struct Profile {
     pub is_free_provisioning_profile: Option<bool>,
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(feature = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait::async_trait)]
 pub trait AppIdsApi {
     fn developer_session(&mut self) -> &mut DeveloperSession;
 
@@ -108,14 +64,10 @@ pub trait AppIdsApi {
         identifier: &str,
         device_type: impl Into<Option<DeveloperDeviceType>> + Send,
     ) -> Result<AppId, Report> {
-        // Apple Developer API parameter `appIdName` only accepts a limited ASCII
-        // set. CFBundleDisplayName with Cyrillic/emoji (e.g. «Личный кабинет…»)
-        // fails with error 35: An invalid value was provided for 'appIdName'.
-        let safe_name = sanitize_developer_app_id_name(name, identifier);
         let body = plist!(dict {
             "teamId": &team.team_id,
             "identifier": identifier,
-            "name": &safe_name,
+            "name": normalize_app_names(name),
         });
 
         let app_id: AppId = self

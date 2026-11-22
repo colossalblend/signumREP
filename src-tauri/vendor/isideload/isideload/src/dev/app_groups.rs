@@ -1,7 +1,8 @@
 use crate::dev::{
-    app_ids::{AppId, sanitize_developer_app_id_name},
+    app_ids::AppId,
     developer_session::DeveloperSession,
     device_type::{DeveloperDeviceType, dev_url},
+    normalize_app_names,
     teams::DeveloperTeam,
 };
 use plist_macro::plist;
@@ -17,7 +18,8 @@ pub struct AppGroup {
     pub application_group: String,
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(feature = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait::async_trait)]
 pub trait AppGroupsApi {
     fn developer_session(&mut self) -> &mut DeveloperSession;
 
@@ -50,11 +52,9 @@ pub trait AppGroupsApi {
         identifier: &str,
         device_type: impl Into<Option<DeveloperDeviceType>> + Send,
     ) -> Result<AppGroup, Report> {
-        // Same rules as App ID name: Apple rejects Cyrillic/emoji in `name`.
-        let safe_name = sanitize_developer_app_id_name(name, identifier);
         let body = plist!(dict {
             "teamId": &team.team_id,
-            "name": &safe_name,
+            "name": normalize_app_names(name),
             "identifier": identifier,
         });
 

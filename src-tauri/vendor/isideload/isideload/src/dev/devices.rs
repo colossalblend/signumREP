@@ -20,7 +20,8 @@ pub struct DeveloperDevice {
     pub status: Option<String>,
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(feature = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait::async_trait)]
 pub trait DevicesApi {
     fn developer_session(&mut self) -> &mut DeveloperSession;
 
@@ -49,11 +50,9 @@ pub trait DevicesApi {
         udid: &str,
         device_type: impl Into<Option<DeveloperDeviceType>> + Send,
     ) -> Result<DeveloperDevice, Report> {
-        // Device names from iOS can be Cyrillic; Apple only accepts limited ASCII.
-        let safe_name = crate::dev::app_ids::sanitize_developer_app_id_name(name, udid);
         let body = plist!(dict {
             "teamId": &team.team_id,
-            "name": &safe_name,
+            "name": name,
             "deviceNumber": udid,
         });
 
