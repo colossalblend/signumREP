@@ -142,6 +142,19 @@ data class UiState(
     val signPath: String = "",
     val signOptions: SignOptions = SignOptions(),
     val signMessage: String = "",
+    // ── Экраны аккаунта, устройств, файла и настроек ──
+    /** Сведения о выбранном IPA: имя, bundle id, версия, минимальная iOS. */
+    val signMeta: pw.appbank.signum.data.models.IpaMetadata? = null,
+    val signBusy: Boolean = false,
+    val historyHasMore: Boolean = false,
+    val historyNextBatchId: String? = null,
+    val historyLoadingMore: Boolean = false,
+    /** Форма входа поверх уже вошедшего аккаунта: «Добавить Apple ID» и «Войти снова». */
+    val addingAccount: Boolean = false,
+    val installedLoading: Boolean = false,
+    val otaChecking: Boolean = false,
+    val otaCheckMessage: String = "",
+    val cacheBytes: Long = -1L,
 )
 
 class SignumViewModel(val engine: SignumEngine) : ViewModel() {
@@ -1176,6 +1189,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         _state.update {
             it.copy(
                 history = emptyList(),
+                historyHasMore = false,
+                historyNextBatchId = null,
                 historyNeeds2fa = false,
                 history2fa = "",
                 historyMessage = "",
@@ -1205,6 +1220,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                             historyNeeds2fa = r.needs2fa,
                             historyMessage = r.message.orEmpty(),
                             history2fa = if (r.needs2fa) it.history2fa else "",
+                            historyHasMore = if (keepShown) it.historyHasMore else r.hasMore,
+                            historyNextBatchId = if (keepShown) it.historyNextBatchId else r.nextBatchId,
                         )
                     }
                 }
@@ -1367,19 +1384,47 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
 
     fun loadInstalled() {
         DiagLog.note("ui", "запросил список приложений на iPhone")
+        if (_state.value.installedLoading) return
         viewModelScope.launch {
+            _state.update { it.copy(installedLoading = true) }
             runCatching { engine.installedApps() }
-                .onSuccess { apps -> _state.update { it.copy(installed = apps) } }
-                .onFailure { e -> _state.update { it.copy(deviceMessage = Errors.localize(e.message ?: "")) } }
+                .onSuccess { apps -> _state.update { it.copy(installed = apps, installedLoading = false) } }
+                .onFailure { e ->
+                    _state.update { it.copy(installedLoading = false, deviceMessage = Errors.localize(e.message ?: "")) }
+                }
         }
     }
 
     fun restoreOffloaded(app: InstalledApp) {
         if (!app.isPlaceholder) return
+        viewModelScope.launch { restoreOffloadedNow(app) }
+    }
+
+    /**
+     * «Восстановить все» — по одному, а не пачкой параллельных запросов:
+     * раньше каждое приложение било в App Store одновременно, а сообщения
+     * затирали друг друга, и человек видел только последнее.
+     */
+    fun restoreAllOffloaded() {
+        val apps = _state.value.installed.filter { it.isPlaceholder }
+        if (apps.isEmpty()) return
+        viewModelScope.launch {
+            var ok = 0
+            for (app in apps) if (restoreOffloadedNow(app)) ok++
+            _state.update {
+                it.copy(deviceMessage = "В очередь восстановления добавлено: $ok из ${apps.size}.")
+            }
+        }
+    }
+
+    private suspend fun restoreOffloadedNow(app: InstalledApp): Boolean {
         val owner = engine.settings.activeEmail()
         val deviceIos = _state.value.selectedDevice?.productVersion
-        viewModelScope.launch {
-            _state.update { it.copy(deviceMessage = "Проверяем покупку приложения…") }
+        _state.update { it.copy(deviceMessage = "Проверяем покупку: ${app.name ?: app.bundleId}…") }
+        // resolveAdamId, versionMinIos и ownsListing ходят в сеть синхронно.
+        // На главном потоке это NetworkOnMainThreadException: восстановление
+        // сгруженного приложения не работало никогда, всегда падало с ошибкой.
+        return withContext(Dispatchers.IO) {
             runCatching {
                 if (owner.isNullOrBlank()) error("Сначала войдите в Apple ID на странице «Аккаунт».")
                 if (deviceIos.isNullOrBlank()) error("Не удалось определить версию iOS устройства.")
@@ -1407,7 +1452,7 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                 _state.update { it.copy(deviceMessage = "${app.name ?: app.bundleId} добавлено в очередь восстановления.") }
             }.onFailure { error ->
                 _state.update { it.copy(deviceMessage = Errors.localize(error.message ?: "Не удалось восстановить приложение.")) }
-            }
+            }.isSuccess
         }
     }
 
@@ -1440,6 +1485,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
      * человек видит баннер только когда есть что ставить.
      */
     private fun checkOta() {
+        // Настройка «Автопроверка обновлений» раньше ни на что не влияла.
+        if (!engine.settingsFlow.value.autoUpdate) return
         viewModelScope.launch {
             val info = runCatching { engine.fetchOta() }.getOrNull() ?: return@launch
             if (!info.hasUpdate || info.downloadUrl.isNullOrBlank()) return@launch
@@ -1518,6 +1565,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         _state.update {
             it.copy(
                 history = emptyList(),
+                historyHasMore = false,
+                historyNextBatchId = null,
                 historySelected = emptySet(),
                 historyMessage = "",
                 loginMessage = "Выбран Apple ID $email",
@@ -1532,6 +1581,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         _state.update {
             it.copy(
                 history = emptyList(),
+                historyHasMore = false,
+                historyNextBatchId = null,
                 historySelected = emptySet(),
                 loginMessage = "Apple ID $email убран",
             )
@@ -1547,6 +1598,197 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
 
     fun refreshAuth() {
         _state.update { it.copy(auth = engine.authStatus()) }
+    }
+
+    // ── Аккаунт: несколько Apple ID и история покупок по страницам ──────
+
+    /** «Добавить Apple ID» при уже вошедшем аккаунте. */
+    fun startAddAccount() = _state.update {
+        it.copy(
+            addingAccount = true,
+            loginEmail = "",
+            loginPassword = "",
+            loginCode = "",
+            loginStep = "credentials",
+            loginMessage = "",
+        )
+    }
+
+    /** «Войти снова» для сохранённого Apple ID без действующего входа. */
+    fun startRelogin(email: String) = _state.update {
+        it.copy(
+            addingAccount = true,
+            loginEmail = email,
+            loginPassword = "",
+            loginCode = "",
+            loginStep = "credentials",
+            loginMessage = "Введите пароль Apple ID $email",
+        )
+    }
+
+    fun cancelAddAccount() = _state.update {
+        it.copy(addingAccount = false, loginStep = "credentials", loginCode = "", loginPassword = "", loginMessage = "")
+    }
+
+    /** Вызывается экраном, когда вход завершился: форму добавления закрываем. */
+    fun finishAddAccountIfDone() {
+        val s = _state.value
+        if (s.addingAccount && s.auth.authenticated && s.loginStep == "credentials" && !s.loginBusy &&
+            s.auth.email.equals(s.loginEmail.trim(), ignoreCase = true)
+        ) {
+            _state.update { it.copy(addingAccount = false, loginPassword = "") }
+        }
+    }
+
+    /**
+     * «Загрузить ещё» и «До конца». Apple отдаёт историю страницами; страницу
+     * приклеиваем к уже показанному списку без дублей.
+     */
+    fun loadMoreHistory(all: Boolean) {
+        if (_state.value.historyLoadingMore || !_state.value.historyHasMore) return
+        viewModelScope.launch {
+            _state.update { it.copy(historyLoadingMore = true, historyMessage = "") }
+            var pages = 0
+            try {
+                while (true) {
+                    val batch = _state.value.historyNextBatchId ?: break
+                    val r = engine.fetchHistory(null, true, batch, false)
+                    _state.update {
+                        val known = it.history.mapTo(HashSet()) { a -> a.adamId }
+                        val merged = it.history + r.apps.filter { a -> known.add(a.adamId) }
+                        it.copy(
+                            history = merged,
+                            historyHasMore = r.hasMore && !r.nextBatchId.isNullOrBlank() && r.nextBatchId != batch,
+                            historyNextBatchId = r.nextBatchId,
+                            historyMessage = "Загружено покупок: ${merged.size}",
+                        )
+                    }
+                    pages++
+                    // Ограничение на случай, если Apple будет возвращать ту же страницу.
+                    if (!all || !_state.value.historyHasMore || pages >= 200) break
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(historyMessage = Errors.localize(e.message ?: "")) }
+            } finally {
+                _state.update { it.copy(historyLoadingMore = false) }
+            }
+        }
+    }
+
+    // ── Свой файл ──────────────────────────────────────────────────────
+
+    /**
+     * Скопировать выбранный IPA к себе и прочитать его Info.plist.
+     *
+     * Раньше копирование шло прямо в обработчике выбора файла, на главном
+     * потоке: файл в сотни мегабайт вешал экран до «Приложение не отвечает».
+     * И каждая копия оставалась в кэше навсегда — теперь прежняя удаляется.
+     */
+    fun pickIpa(ctx: android.content.Context, uri: android.net.Uri) {
+        if (_state.value.signBusy) return
+        val previous = _state.value.signPath
+        viewModelScope.launch {
+            _state.update { it.copy(signBusy = true, signMessage = "Копируем файл…", signMeta = null) }
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val name = queryDisplayName(ctx, uri)
+                    val dest = java.io.File(ctx.cacheDir, "picked/${System.currentTimeMillis()}-${name.ifBlank { "app.ipa" }}")
+                    dest.parentFile?.mkdirs()
+                    val input = ctx.contentResolver.openInputStream(uri) ?: error("Не удалось открыть файл")
+                    input.use { src -> dest.outputStream().use { src.copyTo(it, 256 * 1024) } }
+                    val meta = runCatching { pw.appbank.signum.data.signing.IpaTweaks.metadata(dest) }.getOrElse {
+                        dest.delete()
+                        error("Это не IPA-файл или он повреждён.")
+                    }
+                    if (previous.isNotBlank() && previous != dest.absolutePath && previous.contains("/picked")) {
+                        runCatching { java.io.File(previous).delete() }
+                    }
+                    dest to meta
+                }
+            }
+            outcome.onSuccess { (file, meta) ->
+                _state.update { it.copy(signBusy = false, signPath = file.absolutePath, signMeta = meta, signMessage = "") }
+            }.onFailure { e ->
+                _state.update { it.copy(signBusy = false, signMessage = Errors.localize(e.message ?: "Не удалось прочитать файл")) }
+            }
+        }
+    }
+
+    private fun queryDisplayName(ctx: android.content.Context, uri: android.net.Uri): String {
+        val raw = runCatching {
+            ctx.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: ""
+        return raw.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").take(80)
+    }
+
+    fun clearPickedIpa() {
+        val path = _state.value.signPath
+        if (path.contains("/picked")) runCatching { java.io.File(path).delete() }
+        _state.update { it.copy(signPath = "", signMeta = null, signMessage = "") }
+    }
+
+    // ── Настройки ───────────────────────────────────────────────────────
+
+    /** Ручная проверка обновлений — работает и при выключенной автопроверке. */
+    fun checkUpdatesNow() {
+        if (_state.value.otaChecking) return
+        viewModelScope.launch {
+            _state.update { it.copy(otaChecking = true, otaCheckMessage = "") }
+            val result = runCatching { engine.fetchOta() }
+            _state.update { st ->
+                result.fold(
+                    { info ->
+                        if (info.hasUpdate && !info.downloadUrl.isNullOrBlank()) {
+                            st.copy(otaChecking = false, ota = info, otaCheckMessage = "Доступна версия ${info.version.orEmpty()}".trim())
+                        } else {
+                            st.copy(otaChecking = false, otaCheckMessage = "Установлена последняя версия")
+                        }
+                    },
+                    { e -> st.copy(otaChecking = false, otaCheckMessage = Errors.localize(e.message ?: "Не удалось проверить обновления")) },
+                )
+            }
+        }
+    }
+
+    /** Все наши временные файлы: кэш IPA, подготовленные, выбранные и недокачанные. */
+    private fun cacheRoots(): List<java.io.File> = listOf(
+        engine.settings.ipaCacheDir(),
+        engine.settings.signedDir(),
+        java.io.File(engine.settings.cacheDir(), "picked"),
+        java.io.File(engine.settings.cacheDir(), "temp"),
+    )
+
+    fun refreshCacheSize() {
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                cacheRoots().sumOf { root -> root.walkTopDown().filter { it.isFile }.sumOf { it.length() } }
+            }
+            _state.update { it.copy(cacheBytes = bytes) }
+        }
+    }
+
+    /**
+     * Очистить кэш. Файлы идущих дел не трогаем: удалить их посреди загрузки
+     * или установки — значит уронить дело.
+     */
+    fun clearCacheNow() {
+        val busy = engine.jobs.jobsFlow.value.any { it.status == JobStatus.running || it.status == JobStatus.queued }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val keep = _state.value.signPath
+                cacheRoots().forEachIndexed { index, root ->
+                    // temp — папки идущих загрузок; при активной очереди не трогаем.
+                    if (busy && index >= 1) return@forEachIndexed
+                    root.listFiles()?.forEach { f ->
+                        if (f.absolutePath != keep) f.deleteRecursively()
+                    }
+                }
+            }
+            refreshCacheSize()
+        }
     }
 
     class Factory(private val engine: SignumEngine) : ViewModelProvider.Factory {
