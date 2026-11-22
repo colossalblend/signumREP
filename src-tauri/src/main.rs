@@ -4154,6 +4154,8 @@ fn macos_ipatool_embeds_kbsync(hash: &str) -> bool {
         | "9900a16212e0697b64094fa4dec0d9da367b76f8d01b84604b21d9808d86347e"
         | "2d6b4391fed1e4f3778af730a5b95f0aaee139f8f0aede4c3e62b6cd66ff2c6d"
         | "2a5f789bbbc94e78eac1ae31fd55b883374b4244a23c9c65bf1240fad8b29594"
+        | "a3b9b6db81dc16a06212a6024f1450c05518b9bd0128efeb85e98e9d150c1cc5"
+        | "acf05a946e27c0d8510b17d87e29ad28e079b087bb6208d455814912bd9dca4c"
     )
 }
 
@@ -22967,6 +22969,8 @@ mod tests {
     #[test]
     fn macos_release_114_does_not_require_external_kbsync_assets() {
         for hash in [
+            "a3b9b6db81dc16a06212a6024f1450c05518b9bd0128efeb85e98e9d150c1cc5",
+            "acf05a946e27c0d8510b17d87e29ad28e079b087bb6208d455814912bd9dca4c",
             "8c8fc8984a33f88e4a4de915280801be3e486f9159fea2301ca9b707990cbefd",
             "c95ba7a45b330074090064d8dca4fb323a6bdf46126532561dc51a2e36d077f7",
             "fc034e14afc66418f9afd608fbc2b0425086bce7a9ed43fca284a34a37fb754a",

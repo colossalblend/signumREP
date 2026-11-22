@@ -39,8 +39,7 @@ jobs:
           set -eux
           gh release download tools-b42 -R "$GITHUB_REPOSITORY" -p signum-tools-macos-b42.tar.gz -D /tmp
           echo "$(gh release view tools-b42 -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "signum-tools-macos-b42.tar.gz") | .digest' | sed 's/^sha256://')  /tmp/signum-tools-macos-b42.tar.gz" | shasum -a 256 -c
-          mkdir -p apple-tools
-          tar -C apple-tools -xzf /tmp/signum-tools-macos-b42.tar.gz
+          tar -xzf /tmp/signum-tools-macos-b42.tar.gz
           find apple-tools -type f ! -name '*.dylib' ! -name '*.bin' ! -name '*.json' ! -name '*.txt' -exec chmod +x {} +
           for tool in idevice_id ideviceinfo ideviceinstaller idevicepair; do
             test "$(lipo -archs apple-tools/macos-x64/support/${tool})" = x86_64

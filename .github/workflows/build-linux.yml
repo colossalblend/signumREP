@@ -46,7 +46,7 @@ jobs:
           find linux_x64 linux_arm64 -type f -exec chmod +x {} +
 
       - name: Build Linux bundles
-        run: npm run tauri -- build --bundles deb --bundles appimage
+        run: bash scripts/build-linux.sh
 
       - name: Verify Linux bundles
         run: |

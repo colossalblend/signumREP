@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import zipfile
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "src-tauri" / "target" / "release"

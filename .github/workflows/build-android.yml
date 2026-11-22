@@ -41,9 +41,12 @@ jobs:
           java-version: "21"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: "platform-tools"
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v5
@@ -51,10 +54,10 @@ jobs:
       # Релизный ключ в репозиторий не попадает: debug-сборка подписывается
       # отладочным ключом Gradle, этого достаточно для проверки компиляции.
       - name: Unit tests
-        run: ./gradlew --no-daemon :app:testDebugUnitTest
+        run: bash ./gradlew --no-daemon :app:testDebugUnitTest
 
       - name: Build debug APK
-        run: ./gradlew --no-daemon :app:assembleDebug
+        run: bash ./gradlew --no-daemon :app:assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
