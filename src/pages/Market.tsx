@@ -1,9 +1,8 @@
 import {
-  AlertTriangle, ArrowDownUp, BadgeCheck, Check, CheckCircle2, CreditCard, FlaskConical, KeyRound,
-  LoaderCircle, RotateCcw, Search, Send, ShieldCheck, Smartphone, Star, Users, Wallet, X,
+  AlertTriangle, ArrowDownUp, ArrowRight, BadgeCheck, Check, CheckCircle2, ChevronRight, CreditCard, FlaskConical,
+  KeyRound, LoaderCircle, RotateCcw, Search, Send, ShieldCheck, Smartphone, Star, Users, Wallet, X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import PageHeader from "../components/PageHeader";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import SelectMenu from "../components/SelectMenu";
 import {
   categoryLabel, EMPTY_FILTER, filterMarket, findConnectedDevice, formatPrice, iosAtLeast, isAppInstalled,
@@ -12,6 +11,40 @@ import {
   type DeviceSnapshot, type MarketApp, type MarketFilter, type MarketSeller, type MarketSellerSummary,
   type MarketSort, type PurchaseStage,
 } from "../lib/market";
+
+// ───────────────────────── Анимация ─────────────────────────
+
+/** Номер элемента для «лесенки» появления (см. .market-rise в index.css). */
+const stagger = (i: number) => ({ "--i": i } as CSSProperties);
+
+function motionAllowed(): boolean {
+  if (typeof window === "undefined") return false;
+  if (document.documentElement.classList.contains("lite-reduce-motion")) return false;
+  return !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+}
+
+/** Плавный счётчик для цифр в шапке: от прежнего значения к новому. */
+function useCountUp(target: number, duration = 700): number {
+  const [value, setValue] = useState(() => (motionAllowed() ? 0 : target));
+  const from = useRef(value);
+  useEffect(() => {
+    if (!motionAllowed()) { setValue(target); from.current = target; return; }
+    const start = performance.now();
+    const origin = from.current;
+    let frame = 0;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const next = Math.round(origin + (target - origin) * eased);
+      setValue(next);
+      from.current = next;
+      if (t < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [target, duration]);
+  return value;
+}
 
 // ───────────────────────── Карточка приложения ─────────────────────────
 
@@ -56,15 +89,15 @@ function SellerAvatar({ name, size = 44, className = "" }: { name: string; size?
   );
 }
 
-function MarketCard({ app, sellers, onOpen }: { app: MarketApp; sellers: MarketSeller[]; onOpen: (app: MarketApp) => void }) {
+function MarketCard({ app, sellers, index, onOpen }: { app: MarketApp; sellers: MarketSeller[]; index: number; onOpen: (app: MarketApp) => void }) {
   const cheapest = sellers.reduce((a, b) => (b.price < a.price ? b : a));
   const bestRating = Math.max(...sellers.map(s => s.rating));
   const single = sellers.length === 1;
   return (
-    <button type="button" onClick={() => onOpen(app)} className="panel app-card group">
-      <div className="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full opacity-20 blur-3xl transition group-hover:opacity-35" style={{ background: app.color }} />
+    <button type="button" onClick={() => onOpen(app)} className="panel app-card market-rise group" style={stagger(index)}>
+      <div className="market-card-blob pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full opacity-20 blur-3xl" style={{ background: app.color }} />
       <div className="flex items-start justify-between gap-3">
-        <div className="relative h-[86px] w-[86px]">
+        <div className="market-card-icon relative h-[86px] w-[86px]">
           <div className="absolute inset-2 translate-y-3 rounded-[24px] opacity-30 blur-xl" style={{ background: app.color }} />
           <div className="absolute inset-1 translate-x-2 translate-y-2 rounded-[22px] bg-black/35" />
           <MarketIcon app={app} />
@@ -92,9 +125,12 @@ function MarketCard({ app, sellers, onOpen }: { app: MarketApp; sellers: MarketS
             <span className="text-xs font-semibold text-slate-400">+{sellers.length - 3}</span>
           ) : null}
         </div>
-        <div className="shrink-0 text-right">
-          {!single && <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">от</div>}
-          <div className="text-lg font-bold leading-none tabular-nums text-theme">{formatPrice(cheapest.price)}</div>
+        <div className="flex shrink-0 items-end gap-2">
+          <div className="market-card-price text-right">
+            {!single && <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">от</div>}
+            <div className="text-lg font-bold leading-none tabular-nums text-theme">{formatPrice(cheapest.price)}</div>
+          </div>
+          <span className="market-card-go" aria-hidden><ArrowRight size={15} strokeWidth={2.5} /></span>
         </div>
       </div>
     </button>
@@ -126,32 +162,62 @@ function stepState(step: PurchaseStage, current: PurchaseStage): "done" | "activ
 }
 
 function Stepper({ stage }: { stage: PurchaseStage }) {
+  const states = STEPS.map(({ stage: step }) => stepState(step, stage));
+  const done = states.filter(s => s === "done").length;
+  const activeIdx = states.indexOf("active");
+  // Линия доходит до текущего этапа (или до последнего пройденного).
+  const reach = activeIdx >= 0 ? activeIdx : Math.max(0, done - 1);
+  const percent = Math.round(((done + (activeIdx >= 0 ? 0.5 : 0)) / STEPS.length) * 100);
   return (
-    <ol className="mt-5 space-y-1.5">
-      {STEPS.map(({ stage: step, label, icon: Icon }) => {
-        const state = stepState(step, stage);
-        return (
-          <li
-            key={step}
-            className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition ${state === "active" ? "bg-brand-500/10 text-theme ring-1 ring-brand-400/20" : state === "done" ? "text-slate-300" : "text-slate-500"}`}
-          >
-            <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg ${state === "done" ? "bg-emerald-400/15 text-emerald-300" : state === "active" ? "bg-brand-500/20 text-brand-300" : "bg-white/[0.05] text-slate-500"}`}>
-              {state === "done" ? <Check size={15} /> : state === "active" ? <LoaderCircle size={15} className="animate-spin" /> : <Icon size={15} />}
-            </span>
-            {label}
-          </li>
-        );
-      })}
-    </ol>
+    <div className="mt-5">
+      <div className="mb-3 flex items-center justify-between text-xs">
+        <span className="font-semibold text-slate-400">Установка</span>
+        <span className="font-bold tabular-nums text-slate-400">{percent}%</span>
+      </div>
+      <div className="market-progress"><span style={{ width: `${percent}%` }} /></div>
+      <ol className="market-stepper mt-3 space-y-1">
+        {STEPS.map(({ stage: step, label, icon: Icon }, i) => {
+          const state = states[i];
+          return (
+            <li
+              key={step}
+              className={`market-step is-${state} flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${state === "active" ? "bg-brand-500/10 font-semibold text-theme ring-1 ring-brand-400/20" : state === "done" ? "text-slate-300" : "text-slate-500"}`}
+            >
+              <span className={`market-step-glyph grid h-7 w-7 shrink-0 place-items-center rounded-lg ${state === "done" ? "text-emerald-300" : state === "active" ? "text-brand-300" : "text-slate-500"}`}>
+                {state === "done" ? <Check key="done" size={15} strokeWidth={2.75} /> : state === "active" ? <LoaderCircle size={15} className="animate-spin" /> : <Icon size={15} />}
+              </span>
+              <span className="flex-1">{label}</span>
+              {state === "done" && <span className="market-fade text-[11px] font-semibold text-emerald-300">Готово</span>}
+            </li>
+          );
+        })}
+        <span className="market-stepper-track" aria-hidden />
+        <span className="market-stepper-fill" aria-hidden style={{ height: `calc((100% - 48px) * ${reach / (STEPS.length - 1)})` }} />
+      </ol>
+    </div>
   );
 }
 
-function SellerRow({ seller, onPick, cheapest }: { seller: MarketSeller; onPick: (s: MarketSeller) => void; cheapest: boolean }) {
+function SuccessMark() {
+  return (
+    <div className="market-success">
+      <span className="market-success-ring" aria-hidden />
+      <span className="market-success-core">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M5 12.5l4.5 4.5L19 7.5" />
+        </svg>
+      </span>
+    </div>
+  );
+}
+
+function SellerRow({ seller, onPick, cheapest, index }: { seller: MarketSeller; onPick: (s: MarketSeller) => void; cheapest: boolean; index: number }) {
   return (
     <button
       type="button"
       onClick={() => onPick(seller)}
-      className="panel flex w-full items-center gap-4 p-4 text-left transition hover:border-white/[0.12] hover:bg-white/[0.04]"
+      style={stagger(index)}
+      className="panel market-row market-rise flex w-full items-center gap-4 p-4 text-left"
     >
       <SellerAvatar name={seller.name} />
       <div className="min-w-0 flex-1">
@@ -166,6 +232,7 @@ function SellerRow({ seller, onPick, cheapest }: { seller: MarketSeller; onPick:
         </div>
       </div>
       <span className="shrink-0 text-base font-bold tabular-nums text-theme">{formatPrice(seller.price)}</span>
+      <ChevronRight size={18} className="market-row-arrow shrink-0 text-slate-500" />
     </button>
   );
 }
@@ -281,12 +348,29 @@ function PurchaseSheet({ app, sellers, onClose }: { app: MarketApp; sellers: Mar
   const busy = ["connect", "check_ios", "paying", "forming", "transferring", "verifying"].includes(stage) && !noDevice;
   const closeLocked = ["paying", "forming", "transferring", "verifying"].includes(stage);
 
+  // Закрытие с короткой анимацией: окно сначала уезжает, потом размонтируется.
+  const [closing, setClosing] = useState(false);
+  const requestClose = useCallback(() => {
+    if (closing) return;
+    if (!motionAllowed()) { onClose(); return; }
+    setClosing(true);
+    window.setTimeout(onClose, 170);
+  }, [closing, onClose]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !closeLocked) requestClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [closeLocked, requestClose]);
+
+  const sortIndex = (["price", "rating", "sales"] as const).indexOf(sellerSort);
+
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-6 backdrop-blur-md"
-      onMouseDown={() => { if (!closeLocked) onClose(); }}
+      className={`market-backdrop fixed inset-0 z-50 grid place-items-center bg-black/70 p-6 backdrop-blur-md ${closing ? "is-closing" : ""}`}
+      onMouseDown={() => { if (!closeLocked) requestClose(); }}
     >
-      <div className="panel max-h-[calc(100vh-3rem)] w-full max-w-lg overflow-y-auto overscroll-contain p-6" onMouseDown={e => e.stopPropagation()}>
+      <div className="panel market-sheet max-h-[calc(100vh-3rem)] w-full max-w-lg overflow-y-auto overscroll-contain p-6" onMouseDown={e => e.stopPropagation()}>
         <div className="flex items-start gap-4">
           <MarketIcon app={app} size={64} />
           <div className="min-w-0 flex-1">
@@ -302,7 +386,7 @@ function PurchaseSheet({ app, sellers, onClose }: { app: MarketApp; sellers: Mar
             type="button"
             aria-label="Закрыть"
             disabled={closeLocked}
-            onClick={onClose}
+            onClick={requestClose}
             className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-white/[0.06] hover:text-theme disabled:opacity-30"
           >
             <X size={18} />
@@ -310,31 +394,37 @@ function PurchaseSheet({ app, sellers, onClose }: { app: MarketApp; sellers: Mar
         </div>
 
         {stage === "select_seller" ? (
-          <div className="mt-6">
+          <div className="market-fade mt-6">
             <p className="text-sm text-slate-400">Выберите продавца. Он устанавливает приложение со своего Apple ID — цена у каждого своя.</p>
-            <div className="mt-4 flex gap-1 rounded-xl border border-subtle p-1 text-sm">
+            <div className="market-segment mt-4" role="tablist">
+              <span className="market-segment-thumb" aria-hidden style={{ width: "calc((100% - 8px) / 3)", transform: `translateX(${sortIndex * 100}%)` }} />
               {([["price", "Дешевле"], ["rating", "Рейтинг"], ["sales", "Популярнее"]] as const).map(([value, label]) => (
                 <button
                   key={value}
                   type="button"
+                  role="tab"
+                  aria-selected={sellerSort === value}
                   onClick={() => setSellerSort(value)}
-                  className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition ${sellerSort === value ? "bg-brand-500/15 text-brand-300" : "text-slate-400 hover:text-theme"}`}
+                  className={sellerSort === value ? "is-active" : ""}
                 >
                   {label}
                 </button>
               ))}
             </div>
-            <div className="mt-3 space-y-2.5">
-              {[...sellers].sort((a, b) => sellerSort === "price" ? a.price - b.price : sellerSort === "rating" ? b.rating - a.rating : b.sales - a.sales).map(s => (
-                <SellerRow key={s.id} seller={s} cheapest={s.id === cheapestId} onPick={pickSeller} />
+            <div key={sellerSort} className="mt-3 space-y-2.5">
+              {[...sellers].sort((a, b) => sellerSort === "price" ? a.price - b.price : sellerSort === "rating" ? b.rating - a.rating : b.sales - a.sales).map((s, i) => (
+                <SellerRow key={s.id} seller={s} index={i} cheapest={s.id === cheapestId} onPick={pickSeller} />
               ))}
             </div>
           </div>
         ) : (
-          <>
+          <div className="market-fade">
             {seller && (
-              <div className="mt-5 flex items-center justify-between rounded-xl border border-subtle px-4 py-3 text-sm">
-                <span className="text-slate-400">Продавец <span className="font-semibold text-theme">{seller.name}</span></span>
+              <div className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-subtle px-4 py-3 text-sm">
+                <span className="flex min-w-0 items-center gap-2.5 text-slate-400">
+                  <SellerAvatar name={seller.name} size={28} />
+                  <span className="truncate">Продавец <span className="font-semibold text-theme">{seller.name}</span></span>
+                </span>
                 <span className="font-bold tabular-nums text-theme">{formatPrice(seller.price)}</span>
               </div>
             )}
@@ -342,7 +432,7 @@ function PurchaseSheet({ app, sellers, onClose }: { app: MarketApp; sellers: Mar
             {stage !== "installed" && stage !== "failed" && stage !== "ios_too_low" && <Stepper stage={stage} />}
 
             {noDevice && (
-              <div className="mt-5 rounded-xl border border-amber-400/20 bg-amber-400/[0.06] p-4">
+              <div className="market-fade mt-5 rounded-xl border border-amber-400/20 bg-amber-400/[0.06] p-4">
                 <div className="flex items-start gap-3">
                   <AlertTriangle size={18} className="mt-0.5 shrink-0 text-amber-300" />
                   <div className="text-sm">
@@ -365,7 +455,7 @@ function PurchaseSheet({ app, sellers, onClose }: { app: MarketApp; sellers: Mar
             )}
 
             {stage === "ios_too_low" && (
-              <div className="mt-5 rounded-xl border border-rose-400/20 bg-rose-400/[0.06] p-4">
+              <div className="market-fade mt-5 rounded-xl border border-rose-400/20 bg-rose-400/[0.06] p-4">
                 <div className="flex items-start gap-3">
                   <AlertTriangle size={18} className="mt-0.5 shrink-0 text-rose-300" />
                   <div className="text-sm">
@@ -380,8 +470,8 @@ function PurchaseSheet({ app, sellers, onClose }: { app: MarketApp; sellers: Mar
             )}
 
             {stage === "confirm" && seller && (
-              <div className="mt-5">
-                <button type="button" className="btn-primary w-full py-3" onClick={() => void runInstall()}>
+              <div className="market-fade mt-5">
+                <button type="button" className="btn-primary w-full py-3 transition-transform active:scale-[0.98]" onClick={() => void runInstall()}>
                   <CreditCard size={16} />Оплатить {formatPrice(seller.price)} через ЮKassa
                 </button>
                 <p className="mt-2 text-center text-xs text-slate-500">Тестовый платёж: деньги не списываются.</p>
@@ -389,27 +479,25 @@ function PurchaseSheet({ app, sellers, onClose }: { app: MarketApp; sellers: Mar
             )}
 
             {stage === "installed" && (
-              <div className="mt-6 flex flex-col items-center text-center">
-                <div className="grid h-16 w-16 place-items-center rounded-2xl bg-emerald-400/15 text-emerald-300">
-                  <CheckCircle2 size={32} />
-                </div>
+              <div className="market-fade mt-6 flex flex-col items-center text-center">
+                <SuccessMark />
                 <h3 className="mt-4 text-lg font-bold text-theme">Приложение установлено</h3>
                 <p className="mt-1 text-sm text-slate-400">{app.title} уже на {device?.name ?? "iPhone"}. Можно открывать.</p>
                 <div className="mt-6 grid w-full grid-cols-2 gap-2">
                   <button type="button" className="btn-secondary" onClick={() => void runInstall()}><RotateCcw size={15} />Повторить</button>
-                  <button type="button" className="btn-primary" onClick={onClose}><Check size={15} />Завершить установку</button>
+                  <button type="button" className="btn-primary" onClick={requestClose}><Check size={15} />Завершить установку</button>
                 </div>
               </div>
             )}
 
             {stage === "failed" && (
-              <div className="mt-6 rounded-xl border border-rose-400/20 bg-rose-400/[0.06] p-4">
+              <div className="market-fade mt-6 rounded-xl border border-rose-400/20 bg-rose-400/[0.06] p-4">
                 <div className="flex items-start gap-3">
                   <AlertTriangle size={18} className="mt-0.5 shrink-0 text-rose-300" />
                   <p className="text-sm text-slate-300">{error || "Не удалось завершить установку."}</p>
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-2">
-                  <button type="button" className="btn-secondary" onClick={onClose}>Закрыть</button>
+                  <button type="button" className="btn-secondary" onClick={requestClose}>Закрыть</button>
                   <button type="button" className="btn-primary" onClick={() => void runInstall()}><RotateCcw size={15} />Повторить</button>
                 </div>
               </div>
@@ -418,7 +506,7 @@ function PurchaseSheet({ app, sellers, onClose }: { app: MarketApp; sellers: Mar
             {busy && !noDevice && stage !== "confirm" && (
               <p className="mt-4 text-center text-xs text-slate-500">Не отключайте iPhone до конца установки.</p>
             )}
-          </>
+          </div>
         )}
       </div>
     </div>
@@ -441,18 +529,19 @@ const PRICE_OPTIONS = [
   { value: "200", label: "До 200 ₽" },
 ];
 
-function SellerChip({ seller, active, onToggle }: { seller: MarketSellerSummary; active: boolean; onToggle: (id: string) => void }) {
+function SellerChip({ seller, active, index, onToggle }: { seller: MarketSellerSummary; active: boolean; index: number; onToggle: (id: string) => void }) {
   return (
     <button
       type="button"
       onClick={() => onToggle(seller.id)}
       aria-pressed={active}
-      className={`panel flex w-[220px] shrink-0 items-center gap-3 p-3 text-left transition ${active ? "border-brand-400/50 bg-brand-500/10 ring-1 ring-brand-400/30" : "hover:border-white/[0.12]"}`}
+      style={stagger(index)}
+      className={`panel market-seller market-rise flex w-[220px] shrink-0 items-center gap-3 p-3 text-left ${active ? "is-active" : ""}`}
     >
-      <div className="relative">
+      <div className="market-seller-avatar relative">
         <SellerAvatar name={seller.name} size={40} />
         {active && (
-          <span className="absolute -bottom-1 -right-1 grid h-4 w-4 place-items-center rounded-full bg-brand-500 text-white ring-2 ring-[color:var(--app-surface)]">
+          <span className="market-seller-check absolute -bottom-1 -right-1 grid h-4 w-4 place-items-center rounded-full bg-brand-500 text-white ring-2 ring-[color:var(--app-surface)]">
             <Check size={10} strokeWidth={3} />
           </span>
         )}
@@ -466,6 +555,16 @@ function SellerChip({ seller, active, onToggle }: { seller: MarketSellerSummary;
         </div>
       </div>
     </button>
+  );
+}
+
+function HeroStat({ value, label, format }: { value: number; label: string; format?: (n: number) => string }) {
+  const shown = useCountUp(value);
+  return (
+    <div className="market-stat">
+      <div className="text-2xl font-bold leading-none tracking-tight tabular-nums text-theme">{format ? format(shown) : shown}</div>
+      <div className="mt-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">{label}</div>
+    </div>
   );
 }
 
@@ -484,35 +583,64 @@ export default function Market() {
   const openApp = useCallback((app: MarketApp) => setSelected(app), []);
   const filtered = filter.query !== "" || filter.category !== "all" || filter.sellerIds.length > 0 || filter.maxPrice !== 0;
   const minAll = Math.min(...sellers.map(s => s.minPrice));
+  // Лесенка карточек — только при открытии страницы. Карточки, вернувшиеся
+  // после смены фильтра, появляются сразу, без задержки.
+  const firstPaint = useRef(true);
+  useEffect(() => {
+    const t = window.setTimeout(() => { firstPaint.current = false; }, 900);
+    return () => window.clearTimeout(t);
+  }, []);
+  // Счётчики у категорий учитывают все фильтры, кроме самой категории.
+  const categoryCounts = useMemo(() => {
+    const pool = filterMarket(apps, { ...filter, category: "all" });
+    const counts: Record<string, number> = { all: pool.length };
+    for (const app of pool) counts[app.category] = (counts[app.category] ?? 0) + 1;
+    return counts;
+  }, [apps, filter]);
 
   return (
     <div className="mx-auto max-w-[1500px] p-7 lg:p-9">
-      <PageHeader
-        title="Маркет"
-        subtitle={`${apps.length} ${pluralRu(apps.length, "приложение", "приложения", "приложений")} · ${sellers.length} ${pluralRu(sellers.length, "продавец", "продавца", "продавцов")} · от ${formatPrice(minAll)}`}
-        actions={
-          <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/25 bg-amber-400/10 px-2.5 py-1.5 text-xs font-semibold text-amber-300">
-            <FlaskConical size={13} />Тестовый режим
-          </span>
-        }
-      />
-
-      <section className="mt-7 grid grid-cols-2 gap-3 xl:grid-cols-4">
-        {HOW_IT_WORKS.map(({ icon: Icon, title, text }, index) => (
-          <div key={title} className="panel relative flex items-center gap-3 overflow-hidden p-4">
-            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-500/15 text-brand-300"><Icon size={19} /></div>
-            <div className="min-w-0">
-              <div className="text-sm font-semibold text-theme">{title}</div>
-              <div className="line-clamp-2 text-xs leading-snug text-slate-500">{text}</div>
+      <section className="panel market-hero market-rise p-6 lg:p-7">
+        <div className="market-hero-dots" aria-hidden />
+        <div className="relative flex flex-wrap items-start justify-between gap-6">
+          <div className="min-w-0 max-w-xl">
+            <div className="flex items-center gap-3">
+              <h1 className="page-title">Маркет</h1>
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/25 bg-amber-400/10 px-2.5 py-1 text-xs font-semibold text-amber-300">
+                <FlaskConical size={13} />Тестовый режим
+              </span>
             </div>
-            <span className="pointer-events-none absolute right-3 top-1 text-[40px] font-black leading-none text-white/[0.04]">{index + 1}</span>
+            <p className="mt-2 text-sm leading-relaxed text-slate-400">
+              Приложения от продавцов, которые устанавливают их со своего Apple ID. Выберите приложение и продавца — Signum сам проверит iPhone, проведёт оплату и перенесёт приложение.
+            </p>
           </div>
-        ))}
+          <div className="flex flex-wrap gap-2.5">
+            <HeroStat value={apps.length} label={pluralRu(apps.length, "приложение", "приложения", "приложений")} />
+            <HeroStat value={sellers.length} label={pluralRu(sellers.length, "продавец", "продавца", "продавцов")} />
+            <HeroStat value={minAll} label="минимальная цена" format={formatPrice} />
+          </div>
+        </div>
+
+        <ol className="market-steps relative mt-7 grid grid-cols-2 gap-x-4 gap-y-5 xl:grid-cols-4">
+          <span className="market-steps-line hidden xl:block" aria-hidden />
+          {HOW_IT_WORKS.map(({ icon: Icon, title, text }, index) => (
+            <li key={title} className="market-rise relative flex items-start gap-3 xl:flex-col xl:gap-2.5" style={stagger(index + 2)}>
+              <div className="market-step-dot shrink-0">
+                <Icon size={18} />
+                <span className="market-step-num">{index + 1}</span>
+              </div>
+              <div className="min-w-0 pt-0.5 xl:pt-0">
+                <div className="text-sm font-semibold text-theme">{title}</div>
+                <div className="mt-0.5 line-clamp-2 text-xs leading-snug text-slate-500">{text}</div>
+              </div>
+            </li>
+          ))}
+        </ol>
       </section>
 
-      <div className="mt-6 flex flex-wrap items-stretch gap-2">
-        <div className="panel flex min-w-[260px] flex-1 items-center gap-3 px-4 py-3 transition focus-within:border-brand-400/40">
-          <Search size={18} className="shrink-0 text-slate-500" />
+      <div className="market-rise mt-6 flex flex-wrap items-stretch gap-2" style={stagger(3)}>
+        <div className="panel market-search flex min-w-[260px] flex-1 items-center gap-3 px-4 py-3">
+          <Search size={18} className="market-search-icon shrink-0 text-slate-500" />
           <input
             value={filter.query}
             onChange={e => update({ query: e.target.value })}
@@ -520,7 +648,7 @@ export default function Market() {
             className="min-w-0 flex-1 bg-transparent text-sm text-theme outline-none placeholder:text-slate-600"
           />
           {filter.query && (
-            <button type="button" aria-label="Очистить" onClick={() => update({ query: "" })} className="text-slate-500 transition hover:text-theme">
+            <button type="button" aria-label="Очистить" onClick={() => update({ query: "" })} className="market-fade text-slate-500 transition hover:text-theme">
               <X size={16} />
             </button>
           )}
@@ -543,19 +671,19 @@ export default function Market() {
         />
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <div className="flex flex-wrap gap-2">
-          {([{ id: "all" as const, label: "Все" }, ...MARKET_CATEGORIES]).map(c => (
-            <button
-              key={c.id}
-              type="button"
-              onClick={() => update({ category: c.id })}
-              className={`rounded-xl px-3.5 py-2 text-sm font-medium transition ${filter.category === c.id ? "bg-brand-500/15 text-brand-300 ring-1 ring-brand-400/20" : "nav-link hover:bg-black/5 dark:hover:bg-white/[0.04]"}`}
-            >
-              {c.label}
-            </button>
-          ))}
-        </div>
+      <div className="market-rise mt-4 flex flex-wrap gap-1.5" style={stagger(4)}>
+        {([{ id: "all" as const, label: "Все" }, ...MARKET_CATEGORIES]).map(c => (
+          <button
+            key={c.id}
+            type="button"
+            onClick={() => update({ category: c.id })}
+            aria-pressed={filter.category === c.id}
+            className={`market-cat ${filter.category === c.id ? "is-active" : ""}`}
+          >
+            {c.label}
+            <span className="market-cat-count">{categoryCounts[c.id] ?? 0}</span>
+          </button>
+        ))}
       </div>
 
       <section className="mt-7">
@@ -563,35 +691,40 @@ export default function Market() {
           <div className="flex items-center gap-2">
             <h2 className="section-title">Продавцы</h2>
             <span className="section-count">{sellers.length}</span>
+            {filter.sellerIds.length > 0 && (
+              <span className="market-fade rounded-md bg-brand-500/15 px-1.5 py-0.5 text-[11px] font-semibold text-brand-300">
+                выбрано {filter.sellerIds.length}
+              </span>
+            )}
           </div>
           {filter.sellerIds.length > 0 && (
-            <button type="button" onClick={() => update({ sellerIds: [] })} className="text-xs font-semibold text-brand-300 transition hover:text-brand-200">
+            <button type="button" onClick={() => update({ sellerIds: [] })} className="market-fade text-xs font-semibold text-brand-300 transition hover:text-brand-200">
               Все продавцы
             </button>
           )}
         </div>
-        <div className="-mx-1 flex gap-3 overflow-x-auto px-1 pb-2">
-          {sellers.map(s => (
-            <SellerChip key={s.id} seller={s} active={filter.sellerIds.includes(s.id)} onToggle={toggleSeller} />
+        <div className="-mx-1 -my-1 flex gap-3 overflow-x-auto px-1 py-1 pb-3">
+          {sellers.map((s, i) => (
+            <SellerChip key={s.id} seller={s} index={i + 4} active={filter.sellerIds.includes(s.id)} onToggle={toggleSeller} />
           ))}
         </div>
       </section>
 
-      <section className="mt-6">
+      <section className="mt-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <h2 className="section-title">Приложения</h2>
             <span className="section-count">{visible.length}</span>
           </div>
           {filtered && (
-            <button type="button" onClick={() => setFilter(f => ({ ...EMPTY_FILTER, sort: f.sort }))} className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-400 transition hover:text-theme">
+            <button type="button" onClick={() => setFilter(f => ({ ...EMPTY_FILTER, sort: f.sort }))} className="market-fade inline-flex items-center gap-1.5 text-xs font-semibold text-slate-400 transition hover:text-theme">
               <RotateCcw size={13} />Сбросить фильтры
             </button>
           )}
         </div>
         {visible.length === 0 ? (
-          <div className="panel flex flex-col items-center gap-3 px-6 py-12 text-center">
-            <Search size={22} className="text-slate-500" />
+          <div className="panel market-fade flex flex-col items-center gap-3 px-6 py-12 text-center">
+            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-white/[0.05] text-slate-500"><Search size={22} /></div>
             <p className="text-sm text-slate-400">
               Ничего не нашлось{filter.query ? ` по запросу «${filter.query}»` : ""}. Измените фильтры или выберите других продавцов.
             </p>
@@ -601,8 +734,8 @@ export default function Market() {
           </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4">
-            {visible.map(app => (
-              <MarketCard key={app.id} app={app} sellers={matchingSellers(app, filter)} onOpen={openApp} />
+            {visible.map((app, i) => (
+              <MarketCard key={app.id} app={app} index={firstPaint.current ? i + 6 : 0} sellers={matchingSellers(app, filter)} onOpen={openApp} />
             ))}
           </div>
         )}
