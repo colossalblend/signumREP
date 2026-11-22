@@ -10535,48 +10535,21 @@ fn catalog_app_store_ids(item: &JsonValue) -> Vec<String> {
     };
     if let Some(list) = item.get("app_store_ids").and_then(|v| v.as_array()) {
         for value in list {
-            if let Some(text) = json_id_text(value) {
-                push(&text);
+            if let Some(text) = value.as_str() {
+                push(text);
+            } else if let Some(number) = value.as_u64() {
+                push(&number.to_string());
             }
         }
     }
-    if let Some(text) = item.get("app_store_id").and_then(json_id_text) {
-        push(&text);
+    if let Some(text) = item.get("app_store_id").and_then(|v| v.as_str()) {
+        push(text);
     }
     if let Some(url) = item.get("app_store_url").and_then(|v| v.as_str()) {
         if let Some(pos) = url.rfind("/id") {
             let digits: String = url[pos + 3..].chars().take_while(|c| c.is_ascii_digit()).collect();
             push(&digits);
         }
-    }
-    out
-}
-
-/// An id the server may send either as a string or as a bare number.
-fn json_id_text(value: &JsonValue) -> Option<String> {
-    if let Some(text) = value.as_str() {
-        return Some(text.trim().to_string());
-    }
-    value.as_u64().map(|number| number.to_string())
-}
-
-/// Bundle ids of a catalogue card (summary field plus every version), lower-
-/// cased: the fallback key for merging with an App Store hit that has no id
-/// match, e.g. when an older server sent no App Store ids at all.
-fn catalog_bundle_ids<'a>(item: &JsonValue, versions: impl IntoIterator<Item = &'a JsonValue>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |value: Option<&str>| {
-        let Some(id) = value.map(str::trim).filter(|id| !id.is_empty()) else {
-            return;
-        };
-        let id = id.to_ascii_lowercase();
-        if !out.contains(&id) {
-            out.push(id);
-        }
-    };
-    push(item.get("bundle_id").and_then(|v| v.as_str()));
-    for version in versions {
-        push(version.get("bundle_id").and_then(|v| v.as_str()));
     }
     out
 }
@@ -10608,8 +10581,8 @@ async fn enrich_catalog_apps(app: &AppHandle, list: &[JsonValue]) -> Vec<JsonVal
             };
             missing("version") || missing("min_ios") || catalog_app_store_ids(item).is_empty()
         })
-        .filter_map(|item| item.get("id").and_then(json_id_text))
-        .filter(|id| !id.is_empty())
+        .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
+        .map(str::to_string)
         .collect();
     let extra = fetch_catalog_versions_batch(app, &needs_info)
         .await
@@ -10620,28 +10593,23 @@ async fn enrich_catalog_apps(app: &AppHandle, list: &[JsonValue]) -> Vec<JsonVal
         // same app into one card. Newer servers send them in the summary; an
         // older one only has them inside info.php versions.
         let mut store_ids = catalog_app_store_ids(item);
-        let extra_versions: &[JsonValue] = item
+        if let Some((_, versions)) = item
             .get("id")
-            .and_then(json_id_text)
-            .and_then(|id| extra.get(&id))
-            .map(|(_, versions)| versions.as_slice())
-            .unwrap_or(&[]);
-        for version in extra_versions {
-            let raw = version.get("app_store_id").and_then(json_id_text);
-            if let Some(id) = normalized_app_store_id(raw.as_deref()) {
-                if !store_ids.iter().any(|known| known == id) {
-                    store_ids.push(id.to_string());
+            .and_then(|value| value.as_str())
+            .and_then(|id| extra.get(id))
+        {
+            for version in versions {
+                if let Some(id) = normalized_app_store_id(version.get("app_store_id").and_then(|v| v.as_str())) {
+                    if !store_ids.iter().any(|known| known == id) {
+                        store_ids.push(id.to_string());
+                    }
                 }
             }
         }
-        let bundle_ids = catalog_bundle_ids(item, extra_versions);
         let Some(obj) = item.as_object_mut() else {
             continue;
         };
         obj.insert("app_store_ids".into(), serde_json::json!(store_ids));
-        if !bundle_ids.is_empty() {
-            obj.insert("bundle_ids".into(), serde_json::json!(bundle_ids));
-        }
         if let Some(icon) = obj
             .get("icon_url")
             .and_then(|v| v.as_str())
@@ -22848,29 +22816,6 @@ Download error: storefront blocked";
         let by_url = serde_json::json!({"app_store_url": "https://apps.apple.com/app/id6789069556"});
         assert_eq!(catalog_app_store_ids(&by_url), vec!["6789069556".to_string()]);
         assert!(catalog_app_store_ids(&serde_json::json!({"app_store_url": null})).is_empty());
-    }
-
-    #[test]
-    fn catalog_store_ids_accept_numbers() {
-        let item = serde_json::json!({"app_store_ids": [564177498u64, "564177498"], "app_store_id": 1234567890u64});
-        assert_eq!(
-            catalog_app_store_ids(&item),
-            vec!["564177498".to_string(), "1234567890".to_string()]
-        );
-    }
-
-    #[test]
-    fn catalog_bundle_ids_merge_summary_and_versions() {
-        let item = serde_json::json!({"bundle_id": "com.Vk.Vkclient"});
-        let versions = [
-            serde_json::json!({"bundle_id": "com.vk.vkclient"}),
-            serde_json::json!({"bundle_id": " ru.vk.lite "}),
-            serde_json::json!({"bundle_id": ""}),
-        ];
-        assert_eq!(
-            catalog_bundle_ids(&item, versions.iter()),
-            vec!["com.vk.vkclient".to_string(), "ru.vk.lite".to_string()]
-        );
     }
 
     #[test]
