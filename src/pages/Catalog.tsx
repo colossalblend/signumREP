@@ -341,6 +341,12 @@ export default function Catalog() {
     });
   }, []);
 
+  // В разделе App Store карточка каталога всегда открывает установку: режим
+  // выбора относится к сетке каталога выше.
+  const onStoreCatalogCardClick = useCallback((app: CatalogApp) => {
+    void latestRef.current.openInstallOffer(app);
+  }, []);
+
   const onCardFavorite = useCallback((app: CatalogApp) => {
     void latestRef.current.toggleFavorite(app.id);
   }, []);
@@ -1049,7 +1055,9 @@ export default function Catalog() {
             tourShowHits={tourShowHits}
             catalogApps={apps}
             shownCatalogIds={shownCatalogIds}
-            onOpenCatalogApp={app => void openInstallOffer(app)}
+            onOpenCatalogApp={onStoreCatalogCardClick}
+            favoriteIds={favorites}
+            onToggleFavorite={onCardFavorite}
             onSearchingChange={setStoreSearching}
           />
         </section>
