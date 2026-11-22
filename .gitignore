@@ -76,6 +76,7 @@ android/keystore/
 android/**/*.jks
 android/**/*.keystore
 backups/
+archive/
 tmp/
 *.apk
 *.aab
