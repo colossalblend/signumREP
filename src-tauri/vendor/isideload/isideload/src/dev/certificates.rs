@@ -136,15 +136,34 @@ pub trait CertificatesApi {
             "serialNumber": serial_number,
         });
 
-        self.developer_session()
+        match self
+            .developer_session()
             .send_dev_request_no_response(
                 &dev_url("revokeDevelopmentCert", device_type),
                 Some(body),
             )
             .await
-            .context("Failed to revoke development certificate")?;
-
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Signum patch: 7252 = no certificate with this serial on the
+                // team (already revoked / stale list). Treat as success so the
+                // max-certs recovery can submit a new CSR.
+                let missing = e
+                    .iter_reports()
+                    .find_map(|node| node.downcast_current_context::<crate::SideloadError>())
+                    .is_some_and(|err| matches!(err, crate::SideloadError::DeveloperError(7252, _)));
+                if missing {
+                    tracing::info!(
+                        "Certificate serial {} already absent on team (7252), continuing",
+                        serial_number
+                    );
+                    Ok(())
+                } else {
+                    Err(e).context("Failed to revoke development certificate")?
+                }
+            }
+        }
     }
 
     async fn submit_development_csr(

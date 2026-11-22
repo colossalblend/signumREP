@@ -2,7 +2,6 @@ use crate::dev::{
     app_ids::AppId,
     developer_session::DeveloperSession,
     device_type::{DeveloperDeviceType, dev_url},
-    normalize_app_names,
     teams::DeveloperTeam,
 };
 use plist_macro::plist;
@@ -54,7 +53,7 @@ pub trait AppGroupsApi {
     ) -> Result<AppGroup, Report> {
         let body = plist!(dict {
             "teamId": &team.team_id,
-            "name": normalize_app_names(name),
+            "name": crate::dev::sanitize_developer_name(name, identifier),
             "identifier": identifier,
         });
 

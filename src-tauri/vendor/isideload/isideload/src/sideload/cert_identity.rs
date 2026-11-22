@@ -344,6 +344,7 @@ impl CertificateIdentity {
                                 );
                             }
                             Self::revoke_others(
+                                &machine_name,
                                 developer_session,
                                 team,
                                 max_certs_behavior,
@@ -357,6 +358,11 @@ impl CertificateIdentity {
                         } else {
                             return Err(e);
                         }
+                    } else {
+                        // Signum patch: network/parse errors used to be swallowed
+                        // here; the loop then retried blindly and finally
+                        // reported "Reached max attempts", hiding the cause.
+                        return Err(e);
                     }
                 }
             };
@@ -385,6 +391,7 @@ impl CertificateIdentity {
     }
 
     async fn revoke_others<C: MaxCertsCallback>(
+        machine_name: &str,
         developer_session: &mut DeveloperSession,
         team: &DeveloperTeam,
         max_certs_behavior: &MaxCertsBehavior<C>,
@@ -393,19 +400,28 @@ impl CertificateIdentity {
     ) -> Result<(), Report> {
         match max_certs_behavior {
             MaxCertsBehavior::Revoke => {
-                if let Some(cert) = existing_certs.pop() {
+                // Signum patch: revoke our own stale certificates first, then
+                // other isideload-based tools, and only then certificates of
+                // third-party tools (AltStore, Sideloadly, Xcode...), whose
+                // apps on the phone would stop launching. `pop()` takes the
+                // last element, so the highest priority must sort last.
+                existing_certs.sort_by_key(|c| revoke_priority(c, machine_name));
+                while let Some(cert) = existing_certs.pop() {
+                    let serial = match cert.serial_number.as_deref().map(str::trim) {
+                        Some(s) if !s.is_empty() => s.to_string(),
+                        _ => continue,
+                    };
                     info!(
-                        "Revoking certificate with name: {:?} ({:?})",
-                        cert.name, cert.machine_name
+                        "Revoking certificate with name: {:?} ({:?}) serial={}",
+                        cert.name, cert.machine_name, serial
                     );
                     developer_session
-                        .revoke_development_cert(team, &cert.serial_number.ok_or_report()?, None)
+                        .revoke_development_cert(team, &serial, None)
                         .await?;
-                    Ok(())
-                } else {
-                    error!("No more certificates to revoke but still hitting max certs error");
-                    Err(error.into())
+                    return Ok(());
                 }
+                error!("No more certificates to revoke but still hitting max certs error");
+                Err(error.into())
             }
             MaxCertsBehavior::Error => Err(error.into()),
             MaxCertsBehavior::Prompt(prompt_fn) => {
@@ -424,5 +440,80 @@ impl CertificateIdentity {
                 Ok(())
             }
         }
+    }
+}
+
+/// Signum patch: order in which certificates are revoked when the team hit
+/// the certificate limit (free Apple ID: 2-3 development certificates).
+/// Higher value = revoked earlier. Within a group, the certificate that
+/// expires first goes first.
+fn revoke_priority(
+    cert: &DevelopmentCertificate,
+    own_machine_name: &str,
+) -> (u8, std::cmp::Reverse<u64>) {
+    let machine = cert
+        .machine_name
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let own = own_machine_name.trim().to_ascii_lowercase();
+    let group = if !own.is_empty() && machine == own {
+        3
+    } else if machine.contains("signum")
+        || machine.contains("isideload")
+        || machine.contains("iloader")
+    {
+        2
+    } else {
+        1
+    };
+    // Earlier expiry => larger key => popped first.
+    let expires = cert
+        .expiration_date
+        .map(|d| {
+            std::time::SystemTime::from(d)
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|v| v.as_secs())
+                .unwrap_or(0)
+        })
+        .unwrap_or(u64::MAX);
+    (group, std::cmp::Reverse(expires))
+}
+
+#[cfg(test)]
+mod revoke_order_tests {
+    use super::*;
+
+    fn cert(machine: &str, serial: &str) -> DevelopmentCertificate {
+        DevelopmentCertificate {
+            name: None,
+            certificate_id: None,
+            serial_number: Some(serial.to_string()),
+            machine_id: None,
+            machine_name: Some(machine.to_string()),
+            cert_content: None,
+            certificate_platform: None,
+            certificate_type: None,
+            status: None,
+            status_code: None,
+            expiration_date: None,
+        }
+    }
+
+    #[test]
+    fn own_certificates_are_revoked_before_third_party_ones() {
+        let mut certs = vec![
+            cert("Signum", "A"),
+            cert("AltStore", "B"),
+            cert("iloader", "C"),
+            cert("Sideloadly", "D"),
+        ];
+        certs.sort_by_key(|c| revoke_priority(c, "Signum"));
+        let order: Vec<_> = std::iter::from_fn(|| certs.pop())
+            .map(|c| c.serial_number.unwrap())
+            .collect();
+        assert_eq!(order[0], "A");
+        assert_eq!(order[1], "C");
     }
 }

@@ -2,7 +2,6 @@ use crate::{
     dev::{
         developer_session::DeveloperSession,
         device_type::{DeveloperDeviceType, dev_url},
-        normalize_app_names,
         teams::DeveloperTeam,
     },
     util::plist::{PlistDataExtract, SensitivePlistAttachment},
@@ -67,7 +66,7 @@ pub trait AppIdsApi {
         let body = plist!(dict {
             "teamId": &team.team_id,
             "identifier": identifier,
-            "name": normalize_app_names(name),
+            "name": crate::dev::sanitize_developer_name(name, identifier),
         });
 
         let app_id: AppId = self
