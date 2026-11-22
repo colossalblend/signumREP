@@ -135,6 +135,7 @@ fn strip_team_prefix(app_identifier: &str, team_id: &str) -> String {
 }
 
 impl ProfileInfo {
+    #[cfg(test)]
     pub fn is_wildcard(&self) -> bool {
         self.bundle_pattern.ends_with('*')
     }

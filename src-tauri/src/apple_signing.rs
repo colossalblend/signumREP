@@ -296,6 +296,7 @@ pub fn save_custom_cert(
     if !is_safe_cert_file_name(name) {
         return Err("Недопустимое имя сертификата.".into());
     }
+    validate_cert_pair(p12_src, prov_src, password)?;
     let dir = saved_certs_dir(app_data).join(name);
     fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать папку сертификата: {e}"))?;
     fs::copy(p12_src, dir.join("cert.p12")).map_err(|e| format!("Не удалось сохранить .p12: {e}"))?;
@@ -309,6 +310,30 @@ pub fn save_custom_cert(
         set_custom_cert_password(name, password)?;
     }
     Ok(dir)
+}
+
+/// Проверить пару .p12 + .mobileprovision ещё при сохранении: неверный
+/// пароль или профиль от другого сертификата раньше всплывали только при
+/// подписи, а то и при установке на iPhone.
+fn validate_cert_pair(p12: &Path, prov: &Path, password: &str) -> Result<(), String> {
+    let raw = fs::read(prov).map_err(|e| format!("Не удалось прочитать профиль: {e}"))?;
+    let profile = crate::signing_profile::parse_profile(&raw)
+        .map_err(|e| format!("Файл .mobileprovision не читается ({e})."))?;
+    match read_p12(p12, password) {
+        P12Check::WrongPassword => Err(p12_shape_message(p12).into()),
+        P12Check::Ok(identity) => {
+            if profile.includes_certificate(&identity.cert_der) {
+                Ok(())
+            } else {
+                Err("Сертификат .p12 и профиль .mobileprovision не пара: профиль выписан на другой сертификат.".into())
+            }
+        }
+        // Редкий формат шифрования: не мешаем сохранить, zsign может справиться.
+        P12Check::Unreadable(_) => match p12_shape(p12) {
+            P12Shape::LooksLikeP12 => Ok(()),
+            _ => Err(p12_shape_message(p12).into()),
+        },
+    }
 }
 
 /// Пути к файлам сохранённого сертификата + пароль из Credential Manager.
@@ -2144,5 +2169,248 @@ mod outage_tests {
         assert!(is_apple_outage("gsa.apple.com returned 503"));
         assert!(is_apple_outage("http status: 502 bad gateway"));
         assert!(is_apple_outage("service temporarily unavailable"));
+    }
+}
+
+#[cfg(test)]
+mod signing_flow_tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "signum-signing-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_plist(path: &Path, pairs: &[(&str, &str)]) {
+        let mut dict = plist::Dictionary::new();
+        for (k, v) in pairs {
+            dict.insert((*k).into(), plist::Value::String((*v).into()));
+        }
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        plist::Value::Dictionary(dict).to_file_binary(path).unwrap();
+    }
+
+    fn read_id(path: &Path, key: &str) -> String {
+        plist::Value::from_file(path)
+            .unwrap()
+            .as_dictionary()
+            .unwrap()
+            .get(key)
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn rebase_only_touches_children_of_the_old_id() {
+        assert_eq!(rebase_id("com.a.app", "com.a.app", "x.y"), Some("x.y".into()));
+        assert_eq!(
+            rebase_id("com.a.app.widget", "com.a.app", "x.y"),
+            Some("x.y.widget".into())
+        );
+        assert_eq!(rebase_id("com.a.application", "com.a.app", "x.y"), None);
+        assert_eq!(rebase_id("org.other", "com.a.app", "x.y"), None);
+    }
+
+    #[test]
+    fn changing_the_bundle_id_moves_extensions_along() {
+        let dir = temp_dir("rebase");
+        let app = dir.join("Payload/Bank.app");
+        write_plist(&app.join("Info.plist"), &[("CFBundleIdentifier", "ru.bank")]);
+        let ext = app.join("PlugIns/Widget.appex/Info.plist");
+        write_plist(&ext, &[("CFBundleIdentifier", "ru.bank.widget")]);
+        let watch = app.join("Watch/W.app/Info.plist");
+        write_plist(
+            &watch,
+            &[
+                ("CFBundleIdentifier", "ru.bank.watchkitapp"),
+                ("WKCompanionAppBundleIdentifier", "ru.bank"),
+            ],
+        );
+        let framework = app.join("Frameworks/Lib.framework/Info.plist");
+        write_plist(&framework, &[("CFBundleIdentifier", "ru.bank.lib")]);
+
+        set_bundle_id(&app, "ru.bank", "ru.bank.u1").unwrap();
+
+        assert_eq!(read_id(&app.join("Info.plist"), "CFBundleIdentifier"), "ru.bank.u1");
+        assert_eq!(read_id(&ext, "CFBundleIdentifier"), "ru.bank.u1.widget");
+        assert_eq!(read_id(&watch, "CFBundleIdentifier"), "ru.bank.u1.watchkitapp");
+        assert_eq!(read_id(&watch, "WKCompanionAppBundleIdentifier"), "ru.bank.u1");
+        // Фреймворки не обязаны быть «детьми» приложения — их не трогаем.
+        assert_eq!(read_id(&framework, "CFBundleIdentifier"), "ru.bank.lib");
+        assert_eq!(nested_bundle_ids(&app), vec!["ru.bank.u1.widget".to_string()]);
+
+        strip_unsignable_nested(&app);
+        assert!(!app.join("Watch").exists());
+        assert!(app.join("PlugIns").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wildcard_entitlements_get_the_concrete_bundle_id() {
+        let mut base = plist::Dictionary::new();
+        base.insert(
+            "application-identifier".into(),
+            plist::Value::String("TEAM123456.*".into()),
+        );
+        base.insert("get-task-allow".into(), plist::Value::Boolean(true));
+        let ent = entitlements_for_bundle(&base, "TEAM123456", "ru.bank.widget");
+        assert_eq!(
+            ent.get("application-identifier").unwrap().as_string(),
+            Some("TEAM123456.ru.bank.widget")
+        );
+        assert_eq!(ent.get("get-task-allow").unwrap().as_boolean(), Some(true));
+
+        let mut explicit = plist::Dictionary::new();
+        explicit.insert(
+            "application-identifier".into(),
+            plist::Value::String("TEAM123456.com.foo".into()),
+        );
+        let ent = entitlements_for_bundle(&explicit, "TEAM123456", "com.foo");
+        assert_eq!(
+            ent.get("application-identifier").unwrap().as_string(),
+            Some("TEAM123456.com.foo")
+        );
+    }
+
+    #[test]
+    fn executables_keep_the_exec_bit_in_the_archive() {
+        let dir = temp_dir("perm");
+        let file = dir.join("data.txt");
+        fs::write(&file, b"hello").unwrap();
+        assert!(is_macho(&[0xcf, 0xfa, 0xed, 0xfe, 0x0c]));
+        assert!(is_macho(&[0xca, 0xfe, 0xba, 0xbe]));
+        assert!(!is_macho(b"hello"));
+        assert!(is_executable_file(&file, &[0xcf, 0xfa, 0xed, 0xfe]));
+        #[cfg(unix)]
+        assert!(!is_executable_file(&file, b"hello"));
+
+        // Упаковка .app: у Mach-O в архиве 0755, у ресурсов 0644.
+        let app = dir.join("A.app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("A"), [0xcf, 0xfa, 0xed, 0xfe, 0, 0]).unwrap();
+        fs::write(app.join("Info.plist"), b"<plist/>").unwrap();
+        let ipa = dir.join("out.ipa");
+        pack_app_dir_to_ipa(&app, &ipa).unwrap();
+        let mut zip = ZipArchive::new(fs::File::open(&ipa).unwrap()).unwrap();
+        let exe_mode = zip.by_name("Payload/A.app/A").unwrap().unix_mode().unwrap();
+        let res_mode = zip
+            .by_name("Payload/A.app/Info.plist")
+            .unwrap()
+            .unix_mode()
+            .unwrap();
+        assert_eq!(exe_mode & 0o777, 0o755);
+        assert_eq!(res_mode & 0o777, 0o644);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn errors_are_classified_for_the_user() {
+        // Обрыв сети внутри выпуска сертификата — это сеть, а не сертификат.
+        assert!(map_isideload_err(
+            "Failed to retrieve certificate identity: error sending request for url (https://developerservices2.apple.com)"
+        )
+        .starts_with("SIGN_IPA_NETWORK"));
+        // Подменённый TLS — не «сертификат разработки».
+        assert!(map_isideload_err("invalid peer certificate: UnknownIssuer")
+            .contains("антивирус"));
+        assert!(map_isideload_err(
+            "Not enough available app IDs. 3 are required, but only 1 is available."
+        )
+        .starts_with("SIGN_IPA_APP_ID_LIMIT"));
+        assert!(map_isideload_err("Developer error 7460: Maximum number of certificates reached")
+            .starts_with("SIGN_IPA_CERT_FAILED"));
+        assert!(map_isideload_err("No 2FA code provided, aborting")
+            .contains("2FA"));
+        assert!(map_isideload_err(
+            "Extension Widget is not part of the main app bundle identifier: x"
+        )
+        .starts_with("SIGN_IPA_BUNDLE_INVALID"));
+        // «team» в произвольном тексте больше не означает «нет команды».
+        assert!(!map_isideload_err("Failed to list app IDs for the developer team: no response")
+            .starts_with("SIGN_IPA_TEAM_NONE"));
+        assert_eq!(map_isideload_err("No developer teams available"), "SIGN_IPA_TEAM_NONE");
+    }
+
+    #[test]
+    fn personal_team_counts_as_free() {
+        let team = |name: &str, ty: Option<&str>| isideload::dev::teams::DeveloperTeam {
+            name: Some(name.into()),
+            team_id: name.into(),
+            r#type: ty.map(str::to_string),
+            status: None,
+        };
+        let teams = vec![
+            team("Ivan Petrov (Personal Team)", Some("Individual")),
+            team("Company LLC", Some("Company/Organization")),
+        ];
+        assert_eq!(team_kind_label(&teams[0]), "free");
+        assert_eq!(team_kind_label(&teams[1]), "paid");
+        assert_eq!(pick_team(&teams, CertMode::Free).unwrap().team_id, teams[0].team_id);
+        assert_eq!(pick_team(&teams, CertMode::Paid).unwrap().team_id, teams[1].team_id);
+        assert_eq!(pick_team(&teams, CertMode::Auto).unwrap().team_id, teams[1].team_id);
+    }
+
+    #[test]
+    fn two_factor_code_is_six_digits() {
+        assert_eq!(only_code_digits(" 123-456 "), "123456");
+        assert_eq!(only_code_digits("12345"), "12345");
+        assert_eq!(only_code_digits("1234567"), "123456");
+    }
+}
+
+#[cfg(test)]
+mod custom_cert_tests {
+    use super::*;
+
+    fn make_p12(password: &str) -> (Vec<u8>, Vec<u8>) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["signum.test".into()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let cert_der = cert.der().to_vec();
+        let chain = p12_keystore::PrivateKeyChain::new(
+            vec![1, 2, 3, 4],
+            p12_keystore::PrivateKey::from_der(&key.serialize_der()).unwrap(),
+            vec![p12_keystore::Certificate::from_der(&cert_der).unwrap()],
+        );
+        let mut store = p12_keystore::KeyStore::new();
+        store.add_entry("test", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+        (store.writer(password).write().unwrap(), cert_der)
+    }
+
+    #[test]
+    fn p12_password_and_certificate_are_checked_natively() {
+        let dir = std::env::temp_dir().join(format!("signum-p12-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cert.p12");
+        let (p12, cert_der) = make_p12("секрет 1");
+        fs::write(&path, p12).unwrap();
+
+        match read_p12(&path, "секрет 1") {
+            P12Check::Ok(identity) => {
+                assert_eq!(identity.cert_der, cert_der);
+                assert!(!identity.key_der.is_empty());
+                let not_after =
+                    crate::signing_profile::certificate_not_after(&identity.cert_der).unwrap();
+                assert!(not_after > crate::signing_profile::unix_now());
+            }
+            _ => panic!("valid p12 not read"),
+        }
+        assert!(matches!(read_p12(&path, "wrong"), P12Check::WrongPassword));
+        // Пробелы по краям — часть пароля, обрезать их нельзя.
+        assert!(matches!(read_p12(&path, "секрет 1 "), P12Check::WrongPassword));
+
+        let garbage = dir.join("not.p12");
+        fs::write(&garbage, b"-----BEGIN CERTIFICATE-----").unwrap();
+        assert!(matches!(read_p12(&garbage, ""), P12Check::Unreadable(_)));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

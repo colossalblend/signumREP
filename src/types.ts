@@ -520,6 +520,8 @@ export interface SignedAppRecord {
   expires_at?: string | null;
   expires_unix?: number | null;
   signed_at: number;
+  cert_mode?: string | null;
+  last_renew_attempt?: number | null;
 }
 
 export interface AppSettings {

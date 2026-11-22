@@ -1134,6 +1134,22 @@ struct SignedAppRecord {
     #[serde(default)]
     expires_unix: Option<u64>,
     signed_at: u64,
+    /// How it was signed, so a renewal repeats it exactly (Free/Paid/Custom).
+    #[serde(default)]
+    cert_mode: Option<apple_signing::CertMode>,
+    /// Signing options with the bundle id pinned: a renewal must replace the
+    /// installed app, not install a second copy under a new random id.
+    #[serde(default)]
+    options: Option<apple_signing::SignOptions>,
+    /// A custom certificate picked by path rather than saved under a name.
+    #[serde(default)]
+    custom_p12_path: Option<String>,
+    #[serde(default)]
+    custom_prov_path: Option<String>,
+    /// Last automatic renewal attempt — failures are retried with a pause
+    /// instead of every ten minutes.
+    #[serde(default)]
+    last_renew_attempt: Option<u64>,
 }
 
 /// A free Apple ID signing profile is good for a week.
@@ -1192,11 +1208,10 @@ fn saved_cert_expiry(app: &AppHandle, name: &str) -> Option<String> {
 fn remember_signed_app(
     app: &AppHandle,
     input: &apple_signing::SignAndInstallInput,
-    bundle_id: &str,
-    title: &str,
-    team_kind: &str,
+    udid: Option<&str>,
+    result: &apple_signing::SignedIpaResult,
 ) {
-    let bundle_id = bundle_id.trim();
+    let bundle_id = result.metadata.bundle_id.trim();
     if !input.install || bundle_id.is_empty() {
         return;
     }
@@ -1207,31 +1222,53 @@ fn remember_signed_app(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let expires_at = cert_name
-        .as_deref()
-        .and_then(|name| saved_cert_expiry(app, name));
-    let expires_unix = expires_at
-        .as_deref()
-        .and_then(parse_iso_seconds)
-        // ponytail: the free-team week is a known Apple rule, not something the
-        // signer reports back. Read it off the generated profile if that ever
-        // becomes available here.
-        .or_else(|| (team_kind == "free").then(|| signed_at + FREE_PROFILE_DAYS * 86_400));
+    // The signer now reports the real expiry (profile / certificate). The
+    // saved-certificate date and the free-team week are only fallbacks.
+    let expires_at = result.expires_at.clone().or_else(|| {
+        cert_name
+            .as_deref()
+            .and_then(|name| saved_cert_expiry(app, name))
+    });
+    let expires_unix = result
+        .expires_unix
+        .or_else(|| expires_at.as_deref().and_then(parse_iso_seconds))
+        .or_else(|| {
+            (result.team_kind == "free").then(|| signed_at + FREE_PROFILE_DAYS * 86_400)
+        });
     let record = SignedAppRecord {
         bundle_id: bundle_id.to_string(),
-        title: title.to_string(),
+        title: result.metadata.name.clone(),
         ipa_path: input.ipa_path.clone(),
-        udid: input.udid.clone(),
-        cert_name,
-        team_kind: team_kind.to_string(),
+        udid: udid.map(str::to_string).or_else(|| input.udid.clone()),
+        cert_name: cert_name.clone(),
+        team_kind: result.team_kind.clone(),
         expires_at,
         expires_unix,
         signed_at,
+        cert_mode: Some(input.cert_mode),
+        options: Some(pinned_renewal_options(&input.options, bundle_id)),
+        custom_p12_path: input.custom_p12_path.clone().filter(|_| cert_name.is_none()),
+        custom_prov_path: input.custom_prov_path.clone().filter(|_| cert_name.is_none()),
+        last_renew_attempt: None,
     };
     let mut cache = load_cache(app);
     cache.signed_apps.retain(|item| item.bundle_id != record.bundle_id);
     cache.signed_apps.push(record);
     let _ = save_cache(app, &cache);
+}
+
+/// The options of the original signing, with the bundle id fixed to the one
+/// that ended up on the phone. "Unique bundle id" would otherwise mint a new
+/// id on every renewal: a second copy of the app and one more App ID gone.
+fn pinned_renewal_options(
+    options: &apple_signing::SignOptions,
+    bundle_id: &str,
+) -> apple_signing::SignOptions {
+    let mut pinned = options.clone();
+    pinned.auto_bundle_id = false;
+    pinned.custom_bundle_id = Some(bundle_id.to_string());
+    pinned.force_unique_bundle = false;
+    pinned
 }
 
 /// Signed apps whose profile is about to die, newest signature first.
@@ -1246,6 +1283,52 @@ fn list_signed_apps(app: AppHandle) -> Result<Vec<SignedAppRecord>, String> {
 #[serde(rename_all = "camelCase")]
 struct RenewSignedAppInput {
     bundle_id: String,
+}
+
+/// The sign job that would redo this record, as it was first done.
+fn renewal_input(record: &SignedAppRecord) -> Result<apple_signing::SignAndInstallInput, String> {
+    let cert_mode = record.cert_mode.unwrap_or(if record.cert_name.is_some() {
+        apple_signing::CertMode::Custom
+    } else {
+        apple_signing::CertMode::Auto
+    });
+    let custom = matches!(cert_mode, apple_signing::CertMode::Custom);
+    if custom
+        && record.cert_name.is_none()
+        && (record.custom_p12_path.is_none() || record.custom_prov_path.is_none())
+    {
+        return Err(
+            "Сертификат, которым подписано приложение, не сохранён в Signum. Подпишите заново, выбрав .p12 и .mobileprovision.".into(),
+        );
+    }
+    let options = record
+        .options
+        .clone()
+        .unwrap_or_default();
+    Ok(apple_signing::SignAndInstallInput {
+        ipa_path: record.ipa_path.clone(),
+        udid: record.udid.clone(),
+        install: true,
+        save_signed: false,
+        output_dir: None,
+        cert_mode,
+        cert_name: record.cert_name.clone(),
+        custom_p12_path: record.custom_p12_path.clone().filter(|_| custom),
+        custom_prov_path: record.custom_prov_path.clone().filter(|_| custom),
+        custom_cert_password: None,
+        options: pinned_renewal_options(&options, &record.bundle_id),
+    })
+}
+
+/// A sign job for this IPA is already waiting or running.
+async fn sign_job_pending(state: &AppState, ipa_path: &str) -> bool {
+    state.jobs.lock().await.values().any(|job| {
+        matches!(job.status, JobStatus::Queued | JobStatus::Running)
+            && matches!(
+                &job.retry_payload,
+                Some(RetryPayload::SignAndInstall(input)) if input.ipa_path == ipa_path
+            )
+    })
 }
 
 /// Sign and install the same IPA again with the same certificate.
@@ -1266,29 +1349,36 @@ async fn renew_signed_app(
             "Исходный IPA-файл больше не лежит по прежнему пути. Выберите его заново.".into(),
         );
     }
-    let cert_mode = if record.cert_name.is_some() {
-        apple_signing::CertMode::Custom
-    } else {
-        apple_signing::CertMode::Auto
-    };
-    enqueue_sign_and_install(
-        app.clone(),
-        state,
-        apple_signing::SignAndInstallInput {
-            ipa_path: record.ipa_path,
-            udid: record.udid,
-            install: true,
-            save_signed: false,
-            output_dir: None,
-            cert_mode,
-            cert_name: record.cert_name,
-            custom_p12_path: None,
-            custom_prov_path: None,
-            custom_cert_password: None,
-            options: Default::default(),
-        },
-    )
-    .await
+    if sign_job_pending(&state, &record.ipa_path).await {
+        return Err("Подпись этого приложения уже в очереди.".into());
+    }
+    let sign_input = renewal_input(&record)?;
+    enqueue_sign_and_install(app.clone(), state, sign_input).await
+}
+
+/// Pause between automatic renewal attempts of one app after a failure, so a
+/// missing iPhone or an unanswered 2FA prompt is not retried every 10 minutes.
+const RESIGN_RETRY_SECS: u64 = 6 * 3600;
+
+fn renewal_due(record: &SignedAppRecord, now: u64) -> bool {
+    record
+        .expires_unix
+        .is_some_and(|at| at <= now + RESIGN_LEAD_SECS)
+        && record
+            .last_renew_attempt
+            .is_none_or(|at| now >= at + RESIGN_RETRY_SECS)
+}
+
+fn mark_renew_attempt(app: &AppHandle, bundle_id: &str, at: u64) {
+    let mut cache = load_cache(app);
+    if let Some(record) = cache
+        .signed_apps
+        .iter_mut()
+        .find(|item| item.bundle_id == bundle_id)
+    {
+        record.last_renew_attempt = Some(at);
+        let _ = save_cache(app, &cache);
+    }
 }
 
 /// Re-sign whatever is about to expire. Opt-in, and silent when off.
@@ -1303,18 +1393,19 @@ async fn renew_expiring_signatures(app: &AppHandle) {
     let due: Vec<SignedAppRecord> = load_cache(app)
         .signed_apps
         .into_iter()
-        .filter(|record| {
-            record
-                .expires_unix
-                .is_some_and(|at| at <= now + RESIGN_LEAD_SECS)
-        })
+        .filter(|record| renewal_due(record, now))
         .filter(|record| PathBuf::from(&record.ipa_path).is_file())
         .collect();
     for record in due {
         let title = record.title.clone();
+        let state = app.state::<AppState>();
+        if sign_job_pending(&state, &record.ipa_path).await {
+            continue;
+        }
+        mark_renew_attempt(app, &record.bundle_id, now);
         let queued = renew_signed_app(
             app.clone(),
-            app.state::<AppState>(),
+            state,
             RenewSignedAppInput {
                 bundle_id: record.bundle_id.clone(),
             },
@@ -23267,5 +23358,97 @@ mod signature_expiry_tests {
         assert_eq!(parse_iso_seconds("not a date at all"), None);
         // Before the epoch there is nothing to renew.
         assert_eq!(parse_iso_seconds("1969-01-01T00:00:00Z"), None);
+    }
+}
+
+#[cfg(test)]
+mod signed_app_renewal_tests {
+    use super::*;
+
+    fn record(expires_unix: Option<u64>) -> SignedAppRecord {
+        SignedAppRecord {
+            bundle_id: "ru.bank.app.ab12cd".into(),
+            title: "Bank".into(),
+            ipa_path: "/tmp/bank.ipa".into(),
+            udid: Some("00008110-001A".into()),
+            cert_name: None,
+            team_kind: "free".into(),
+            expires_at: None,
+            expires_unix,
+            signed_at: 1_000,
+            cert_mode: None,
+            options: None,
+            custom_p12_path: None,
+            custom_prov_path: None,
+            last_renew_attempt: None,
+        }
+    }
+
+    #[test]
+    fn renewal_keeps_the_installed_bundle_id() {
+        let options = apple_signing::SignOptions {
+            force_unique_bundle: true,
+            strip_plugins: true,
+            ..Default::default()
+        };
+        let pinned = pinned_renewal_options(&options, "ru.bank.app.ab12cd");
+        assert!(!pinned.force_unique_bundle);
+        assert!(!pinned.auto_bundle_id);
+        assert_eq!(pinned.custom_bundle_id.as_deref(), Some("ru.bank.app.ab12cd"));
+        // The rest of the original choices survive.
+        assert!(pinned.strip_plugins);
+    }
+
+    #[test]
+    fn renewal_repeats_mode_and_options() {
+        let mut item = record(Some(10));
+        item.cert_mode = Some(apple_signing::CertMode::Paid);
+        item.options = Some(apple_signing::SignOptions {
+            strip_plugins: true,
+            ..Default::default()
+        });
+        let input = renewal_input(&item).unwrap();
+        assert_eq!(input.cert_mode, apple_signing::CertMode::Paid);
+        assert!(input.options.strip_plugins);
+        assert_eq!(
+            input.options.custom_bundle_id.as_deref(),
+            Some("ru.bank.app.ab12cd")
+        );
+        assert!(input.install);
+    }
+
+    #[test]
+    fn old_records_still_renew_with_a_pinned_bundle() {
+        let input = renewal_input(&record(Some(10))).unwrap();
+        assert_eq!(input.cert_mode, apple_signing::CertMode::Auto);
+        assert!(!input.options.auto_bundle_id);
+        assert_eq!(
+            input.options.custom_bundle_id.as_deref(),
+            Some("ru.bank.app.ab12cd")
+        );
+    }
+
+    #[test]
+    fn custom_renewal_needs_a_certificate() {
+        let mut item = record(Some(10));
+        item.cert_mode = Some(apple_signing::CertMode::Custom);
+        assert!(renewal_input(&item).is_err());
+        item.custom_p12_path = Some("/c/cert.p12".into());
+        item.custom_prov_path = Some("/c/p.mobileprovision".into());
+        let input = renewal_input(&item).unwrap();
+        assert_eq!(input.custom_p12_path.as_deref(), Some("/c/cert.p12"));
+    }
+
+    #[test]
+    fn renewal_is_due_early_and_backs_off_after_a_failure() {
+        let now = 1_000_000;
+        assert!(!renewal_due(&record(None), now));
+        assert!(!renewal_due(&record(Some(now + RESIGN_LEAD_SECS + 60)), now));
+        let mut item = record(Some(now + 3600));
+        assert!(renewal_due(&item, now));
+        item.last_renew_attempt = Some(now - 60);
+        assert!(!renewal_due(&item, now));
+        item.last_renew_attempt = Some(now - RESIGN_RETRY_SECS);
+        assert!(renewal_due(&item, now));
     }
 }
