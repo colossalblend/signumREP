@@ -365,7 +365,16 @@ data class AppSettings(
     val proxyPort: Int = 0,
     val proxyUser: String = "",
     val proxyPassword: String = "",
-)
+) {
+    /**
+     * Что на самом деле включено из упрощённого вида. Отдельные флажки по
+     * умолчанию стоят «вкл», поэтому без проверки liteDesign анимации
+     * выключались у всех — даже у тех, кто упрощённый вид не включал.
+     */
+    val motionReduced: Boolean get() = liteDesign && liteReduceMotion
+    val staticLoaders: Boolean get() = liteDesign && (liteStaticLoaders || liteReduceMotion)
+    val flatBackground: Boolean get() = liteDesign && liteFlatBackgrounds
+}
 
 data class OtaUpdateInfo(
     val hasUpdate: Boolean = false,
@@ -377,6 +386,9 @@ data class OtaUpdateInfo(
     // Обновление — это файл, который мы сами предложим установить. Сверять
     // его с тем, что обещал сервер, обязательно.
     val sha256: String? = null,
+    /** Сервер больше не принимает эту версию: работать без обновления нельзя. */
+    val clientSupported: Boolean = true,
+    val minClientVersion: String? = null,
 )
 
 data class CachedIpa(

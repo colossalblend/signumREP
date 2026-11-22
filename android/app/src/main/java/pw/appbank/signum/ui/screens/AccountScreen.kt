@@ -24,7 +24,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.InstallMobile
-import androidx.compose.material.icons.outlined.Logout
+import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Visibility
@@ -218,7 +218,7 @@ private fun ActiveAccountCard(s: UiState, onRefresh: () -> Unit, onAdd: () -> Un
             SecondaryButton("Добавить", onClick = onAdd, icon = Icons.Outlined.Add, modifier = Modifier.weight(1f))
         }
         Spacer(Modifier.height(8.dp))
-        DangerButton("Выйти", onClick = onLogout, icon = Icons.Outlined.Logout, modifier = Modifier.fillMaxWidth())
+        DangerButton("Выйти", onClick = onLogout, icon = Icons.AutoMirrored.Outlined.Logout, modifier = Modifier.fillMaxWidth())
     }
 }
 

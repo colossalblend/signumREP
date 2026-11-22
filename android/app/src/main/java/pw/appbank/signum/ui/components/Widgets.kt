@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.outlined.ErrorOutline
@@ -66,6 +67,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import kotlinx.coroutines.launch
 import pw.appbank.signum.ui.theme.Brand500
 import pw.appbank.signum.ui.theme.signumColors
 
@@ -938,4 +940,120 @@ fun StatusLine(text: String, error: Boolean = false) {
     ) {
         Text(text, color = if (error) c.danger else c.muted, fontSize = 13.sp, lineHeight = 18.sp)
     }
+}
+
+/**
+ * Копирование текста в буфер обмена.
+ *
+ * Новый LocalClipboard работает через suspend-функцию, поэтому возвращаем
+ * обычную лямбду, которая сама запускает запись в области экрана.
+ */
+@Composable
+fun rememberCopyText(): (String) -> Unit {
+    val clipboard = androidx.compose.ui.platform.LocalClipboard.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    return remember(clipboard, scope) {
+        { text: String ->
+            scope.launch {
+                runCatching {
+                    clipboard.setClipEntry(
+                        androidx.compose.ui.platform.ClipEntry(
+                            android.content.ClipData.newPlainText("Signum", text),
+                        ),
+                    )
+                }
+            }
+            Unit
+        }
+    }
+}
+
+/**
+ * Строка-переход внутри панели: значок, заголовок, пояснение и стрелка.
+ * Для «О приложении», ссылок и прочего, что открывает другой экран.
+ */
+@Composable
+fun NavRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String? = null,
+    trailingIcon: ImageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+    onClick: () -> Unit,
+) {
+    val c = signumColors
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(38.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .background(c.brand.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = null, tint = c.brandSoft, modifier = Modifier.size(20.dp))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!subtitle.isNullOrBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(subtitle, color = c.muted, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        Icon(trailingIcon, contentDescription = null, tint = c.muted, modifier = Modifier.size(18.dp))
+    }
+}
+
+/**
+ * Поле настроек, которое держит текст у себя.
+ *
+ * Если отдавать полю значение прямо из StateFlow настроек, оно приходит
+ * с опозданием на кадр: при быстром наборе буквы терялись, а курсор прыгал
+ * в конец. Здесь набор идёт в локальное состояние, а наружу уходит копия.
+ */
+@Composable
+fun SettingsTextField(
+    value: String,
+    onCommit: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    placeholder: String = "",
+    visual: VisualTransformation = VisualTransformation.None,
+    keyboard: KeyboardOptions = KeyboardOptions.Default,
+    filter: (String) -> String = { it },
+) {
+    var text by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(value) }
+    // Что мы сами недавно отдали наружу. Запоздавшее эхо любого из этих
+    // значений пропускаем, иначе оно стирало бы только что набранные буквы.
+    val recent = remember { ArrayDeque<String>() }
+    // Значение поменялось снаружи (сброс, другая учётка) — подхватываем.
+    androidx.compose.runtime.LaunchedEffect(value) {
+        if (value != text && value !in recent) {
+            text = value
+            recent.clear()
+        }
+    }
+    SignumField(
+        value = text,
+        onValueChange = { raw ->
+            val next = filter(raw)
+            text = next
+            recent.addLast(next)
+            while (recent.size > 32) recent.removeFirst()
+            onCommit(next)
+        },
+        modifier = modifier,
+        placeholder = placeholder,
+        label = label,
+        visual = visual,
+        keyboard = keyboard,
+    )
 }

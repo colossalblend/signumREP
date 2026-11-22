@@ -87,7 +87,6 @@ import pw.appbank.signum.ui.SignumViewModel
 import androidx.compose.ui.graphics.Brush
 import pw.appbank.signum.data.models.CatalogBanner
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.lazy.LazyColumn
@@ -1142,7 +1141,7 @@ private fun SolidCard(content: @Composable () -> Unit) {
     ) { content() }
 }
 
-private val RU_COLLATOR: java.text.Collator = java.text.Collator.getInstance(java.util.Locale("ru"))
+private val RU_COLLATOR: java.text.Collator = java.text.Collator.getInstance(java.util.Locale.forLanguageTag("ru"))
 
 /** Тон чипа фильтра: обычный, «подходит» (зелёный), «не подходит» (янтарный) — как на ПК. */
 private enum class ChipTone { Brand, Good, Warn }
@@ -1679,11 +1678,11 @@ private fun plural(count: Int, one: String, few: String, many: String): String {
 /** Строка «подпись — значение» с копированием: вводить это придётся на iPhone. */
 @Composable
 private fun CopyRow(label: String, value: String) {
-    val clipboard = LocalClipboardManager.current
+    val copy = pw.appbank.signum.ui.components.rememberCopyText()
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable { clipboard.setText(AnnotatedString(value)) },
+            .clickable { copy(value) },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {

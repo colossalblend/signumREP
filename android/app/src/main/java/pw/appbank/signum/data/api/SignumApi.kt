@@ -2,6 +2,7 @@ package pw.appbank.signum.data.api
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -97,14 +98,18 @@ class SignumApi {
         val url = root.str("download_url") ?: root.str("url")
         val notes = root.str("notes") ?: root.str("message")
         val has = latest != null && latest != APP_VERSION
+        // Как на ПК: нет поля — значит версия поддерживается.
+        val supported = (root["client_supported"] as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull ?: true
         return OtaUpdateInfo(
-            hasUpdate = has || root.bool("has_update"),
+            hasUpdate = has || root.bool("has_update") || !supported,
             version = latest,
             build = build,
             downloadUrl = url,
             notes = notes,
-            mandatory = root.bool("mandatory"),
+            mandatory = root.bool("mandatory") || !supported,
             sha256 = root.str("sha256"),
+            clientSupported = supported,
+            minClientVersion = root.str("min_client_version"),
         )
     }
 
@@ -228,9 +233,12 @@ class SignumApi {
             if (!resp.isSuccessful) {
                 val err = root.str("error").orEmpty()
                 if (resp.code == 426 || err == "client_outdated") {
-                    throw SignumApiException(
-                        root.str("message") ?: "Приложение недоступно. Обновите Signum.",
+                    val message = root.str("message") ?: "Приложение недоступно. Обновите Signum."
+                    clientOutdated.value = ClientOutdated(
+                        message = message,
+                        minClientVersion = root.str("min_client_version"),
                     )
+                    throw SignumApiException(message)
                 }
                 throw SignumApiException(
                     root.str("message")
@@ -243,9 +251,17 @@ class SignumApi {
     }
 
     companion object {
+        /**
+         * Сервер ответил «клиент устарел» на любом запросе. Экран слушает это
+         * и закрывает приложение окном обновления — как ClientOutdatedGate на ПК.
+         */
+        val clientOutdated = kotlinx.coroutines.flow.MutableStateFlow<ClientOutdated?>(null)
+
         fun decodeActivation(obj: JsonObject?): AppActivation? {
             if (obj == null) return null
             return runCatching { SignumJson.decodeFromJsonElement<AppActivation>(obj) }.getOrNull()
         }
     }
 }
+
+data class ClientOutdated(val message: String, val minClientVersion: String? = null)
