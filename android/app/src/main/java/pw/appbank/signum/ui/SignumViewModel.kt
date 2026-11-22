@@ -315,7 +315,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                                     payload = live.payload,
                                     hint = item.hint?.takeIf { it.isNotBlank() } ?: live.hint?.takeIf { it.isNotBlank() }
                                         ?: "Отсканируйте QR камерой iPhone. Код действует 10 минут, затем обновляется.",
-                                    expiresAt = System.currentTimeMillis() + live.expiresInSec * 1000L,
+                                    // Без срока (0) код считаем бессрочным, иначе окно обновляло бы его без конца.
+                                    expiresAt = if (live.expiresInSec > 0) System.currentTimeMillis() + live.expiresInSec * 1000L else null,
                                 )
                             },
                             { e ->
