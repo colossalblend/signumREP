@@ -13,13 +13,24 @@ if (!in_array($platform, ['windows', 'macos', 'linux', 'android'], true)
     exit('Выберите платформу для скачивания Signum.');
 }
 try {
-    $release = signum_site_releases()[$platform] ?? [];
-    $url = $release[$format === 'deb' ? 'deb_download_url' : 'download_url'] ?? null;
-    if (!$url) {
+    $path = signum_site_release_path($platform, $format === 'deb');
+    if ($path === null) {
         throw new RuntimeException('Release unavailable');
     }
+    $file = basename($path);
 
-    header('Location: ' . $url, true, 302);
+    // Prefer serving from this host: /releases/ is a link to the release
+    // storage, so the browser stays on appbank.pw and the web server handles
+    // Content-Length, Range/206 and resumed downloads without PHP limits.
+    $localFile = __DIR__ . '/releases/' . $file;
+    if (is_file($localFile) && filesize($localFile) > 0) {
+        header('Location: /signum/releases/' . rawurlencode($file), true, 302);
+        header('Content-Length: 0');
+        exit;
+    }
+
+    // Fallback: the API host serves the same versioned file.
+    header('Location: https://api.appbank.pw/signum' . $path, true, 302);
     header('Content-Length: 0');
 } catch (Throwable $error) {
     http_response_code(503);

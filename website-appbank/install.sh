@@ -34,14 +34,14 @@ URL="$(printf '%s\n' "$INFO" | sed -n 1p)"
 SHA="$(printf '%s\n' "$INFO" | sed -n 2p)"
 VERSION="$(printf '%s\n' "$INFO" | sed -n 3p)"
 case "$URL" in
-  https://api.appbank.pw/signum/*|https://apiz.appbank.pw/signum/*) ;;
+  https://appbank.pw/signum/*|https://api.appbank.pw/signum/*|https://apiz.appbank.pw/signum/*) ;;
   *) fail "сайт не дал ссылку на загрузку для macOS." ;;
 esac
 printf '%s' "$SHA" | grep -Eq '^[a-f0-9]{64}$' || fail "сайт не дал контрольную сумму файла."
 
 say "Скачиваем Signum ${VERSION}…"
 DMG="$TMP/Signum.dmg"
-MIRROR="${URL/https:\/\/api.appbank.pw\//https://apiz.appbank.pw/}"
+MIRROR="${URL/https:\/\/appbank.pw\//https://apiz.appbank.pw/}"
 curl -fL --retry 2 --progress-bar -o "$DMG" "$URL" \
   || curl -fL --retry 2 --progress-bar -o "$DMG" "$MIRROR" \
   || fail "не удалось скачать Signum. Проверьте интернет и повторите."
