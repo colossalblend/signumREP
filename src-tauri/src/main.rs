@@ -5,6 +5,7 @@ mod apple_region;
 mod apple_signing;
 mod apple_store;
 mod app_transfer;
+mod auth_cache;
 mod bank_creds_page;
 mod bank_otp;
 mod diag_log;
@@ -10887,6 +10888,7 @@ fn ipatool_data_dir() -> Option<PathBuf> {
 }
 
 fn reset_ipatool_local_store() {
+    auth_cache::invalidate_all();
     // Живая ConPTY-сессия входа после сброса не должна дописать аккаунт:
     // процесс умрёт, пока не записал ничего.
     pty_login::cancel_parked("local store reset");
@@ -11693,7 +11695,7 @@ pub(crate) fn format_login_error(output: &str, password: &str) -> String {
         );
     }
     if is_corrupt_cookie_error(&sanitized) {
-        return "Сохранённый вход повреждён. Нажмите «Войти снова».".into();
+        return CORRUPT_SAVED_LOGIN_MESSAGE.into();
     }
     if is_keychain_passphrase_required_error(&sanitized) {
         return with_technical_detail(
@@ -11860,7 +11862,39 @@ fn format_session_verify_error(error: &str) -> String {
     with_technical_detail("Не удалось проверить вход в Apple ID.", &clean)
 }
 
+/// Ключ кэша `auth info`: движок, ключ сессии и байты файлов сессии.
+fn auth_info_cache_key(program: &str, secret: &str) -> Option<u64> {
+    let dir = ipatool_data_dir()?;
+    auth_cache::fingerprint(
+        program,
+        secret,
+        &[
+            fs::read(dir.join("account")).ok(),
+            fs::read(dir.join("keyring").join("account")).ok(),
+        ],
+    )
+}
+
+/// `auth info` с кэшем: ответ зависит только от локального файла сессии,
+/// поэтому повторно ipatool запускается лишь когда файл поменялся (вход,
+/// выход, смена аккаунта, сброс). Одновременные вызовы ждут первый.
 async fn run_auth_info_once(program: &str, keychain: &IpatoolKeychain) -> Result<String, String> {
+    let IpatoolKeychain::Passphrase(secret) = keychain;
+    let _flight = auth_cache::flight().lock().await;
+    if let Some(email) = auth_info_cache_key(program, secret).and_then(auth_cache::lookup) {
+        return Ok(email);
+    }
+    let result = run_auth_info_uncached(program, keychain).await;
+    if let (Ok(email), Some(key)) = (&result, auth_info_cache_key(program, secret)) {
+        auth_cache::store(key, email);
+    }
+    result
+}
+
+async fn run_auth_info_uncached(
+    program: &str,
+    keychain: &IpatoolKeychain,
+) -> Result<String, String> {
     // Global flags must come before the subcommand. Putting --format after
     // `auth info` can confuse argument parsing on some ipatool-cpp builds.
     let mut args = ipatool_args(keychain);
@@ -11876,6 +11910,7 @@ async fn run_auth_info_once(program: &str, keychain: &IpatoolKeychain) -> Result
         Err(error)
             if is_corrupt_cookie_error(&error) || is_keychain_integrity_error(&error) =>
         {
+            move_libcurl_jar_aside_for(program);
             sanitize_ipatool_session_files();
             cleanup_stale_cookie_lock(true);
             run()
@@ -11885,6 +11920,7 @@ async fn run_auth_info_once(program: &str, keychain: &IpatoolKeychain) -> Result
         Err(error) => return Err(format_session_verify_error(&error)),
     };
     if is_corrupt_cookie_error(&output) || is_keychain_integrity_error(&output) {
+        move_libcurl_jar_aside_for(program);
         sanitize_ipatool_session_files();
         cleanup_stale_cookie_lock(true);
         match run().await {
@@ -12119,10 +12155,48 @@ async fn run_ipatool_login_once(
     result
 }
 
+/// The message `format_login_error` gives for an unreadable cookie jar. The raw
+/// ipatool text is gone by the time `run_ipatool_login` sees the error, so the
+/// automatic repair has to recognise the formatted one too — otherwise it
+/// never ran and the user was told to press «Войти снова» over and over.
+const CORRUPT_SAVED_LOGIN_MESSAGE: &str = "Сохранённый вход повреждён. Нажмите «Войти снова».";
+
+fn is_corrupt_saved_login_error(error: &str) -> bool {
+    error.starts_with(CORRUPT_SAVED_LOGIN_MESSAGE) || is_corrupt_cookie_error(error)
+}
+
+/// Go engines (everything but ipatool-cpp) parse `~/.ipatool/cookies` as JSON
+/// and panic with `cannot load cookies: invalid character '#'` on the libcurl
+/// (Netscape) jar ipatool-cpp leaves behind. Before such an engine runs, move
+/// that jar to `cookies.netscape.bak`; the cpp account lives in its own file.
+fn move_libcurl_jar_aside_for(program: &str) -> bool {
+    if is_cpp_ipatool(program) {
+        return false;
+    }
+    let Some(dir) = ipatool_data_dir() else {
+        return false;
+    };
+    let jar = dir.join("cookies");
+    let is_libcurl = fs::read(&jar)
+        .map(|raw| ipatool_cookie_bytes_are_libcurl(&raw))
+        .unwrap_or(false);
+    if !is_libcurl {
+        return false;
+    }
+    let _ = fs::remove_file(dir.join("cookies.netscape.bak"));
+    if fs::rename(&jar, dir.join("cookies.netscape.bak")).is_err() {
+        let _ = fs::remove_file(&jar);
+    }
+    ipatool_debug_log("cookies: libcurl jar moved aside before a Go engine");
+    true
+}
+
 async fn run_ipatool_login(program: &str, args: &[String], password: &str) -> Result<(), String> {
+    move_libcurl_jar_aside_for(program);
     match run_ipatool_login_once(program, args, password).await {
         Ok(()) => Ok(()),
-        Err(error) if is_corrupt_cookie_error(&error) => {
+        Err(error) if is_corrupt_saved_login_error(&error) => {
+            ipatool_debug_log("login: unreadable session store, resetting and retrying once");
             reset_ipatool_local_store();
             cleanup_stale_cookie_lock(true);
             run_ipatool_login_once(program, args, password).await
@@ -12273,6 +12347,9 @@ async fn login_catalog_with_fallback(
     two_factor_code: Option<&str>,
     resending: bool,
 ) -> Result<String, String> {
+    // Ok carries the Apple ID the saved session belongs to — normally `email`,
+    // but Apple answers with the primary address when the person signed in
+    // with an alias (another address or phone number of the same account).
     auth_stage(
         "catalog-start",
         email,
@@ -12403,7 +12480,7 @@ async fn login_catalog_with_fallback(
                     ));
                     auth_stage("catalog-session-saved", email, &format!("engine={engine}"));
                     remember_login_engine(app, &engine);
-                    return Ok(engine.clone());
+                    return Ok(email.to_string());
                 }
                 if !current_ipatool_session_exists() {
                     let detail = format!(
@@ -12430,12 +12507,29 @@ async fn login_catalog_with_fallback(
                         }
                         remember_login_engine(app, engine);
                         auth_stage("catalog-session-saved", email, &format!("engine={engine}"));
-                        return Ok(engine.clone());
+                        return Ok(email.to_string());
                     }
-                    Ok(actual) => {
-                        last_error = format!(
-                            "Вход подтверждён для другого Apple ID ({actual}), ожидался {email}."
-                        );
+                    // ipatool только что вошёл с этим паролем, и файл сессии
+                    // записан этим входом — значит, это тот же аккаунт, просто
+                    // человек ввёл другой адрес (псевдоним или телефон), а Apple
+                    // вернул основной. Раньше вход отклонялся «подтверждён для
+                    // другого Apple ID», затем запускался запасной движок, падал
+                    // на чужом файле cookies, и человек видел «Сохранённый вход
+                    // повреждён». Принимаем вход под адресом, который вернул Apple.
+                    Ok(actual) if !actual.trim().is_empty() => {
+                        let canonical = normalize_account_email(&actual);
+                        ipatool_debug_log(&format!(
+                            "login saved engine={engine}: Apple returned the primary Apple ID for an alias"
+                        ));
+                        if let Ok(mut engines) = state.login_2fa_engine.lock() {
+                            engines.remove(email);
+                        }
+                        remember_login_engine(app, engine);
+                        auth_stage("catalog-session-saved", &canonical, &format!("engine={engine} alias=1"));
+                        return Ok(canonical);
+                    }
+                    Ok(_) => {
+                        last_error = "Вход не удалось сохранить. Войдите в Apple ID снова.".into();
                     }
                     Err(error) => {
                         ipatool_debug_log(&format!(
@@ -13032,10 +13126,24 @@ async fn resolve_session_state(
 /// `auth info` on one engine: the Apple ID it owns, or the raw English error
 /// (ipatool's own `error` field when it answered, the process output otherwise).
 async fn auth_info_owner(program: &str, args: &[String]) -> Result<String, String> {
-    match run_process_raw_error(program, args, Duration::from_secs(30), None).await {
+    let secret = args
+        .iter()
+        .position(|arg| arg == "--keychain-passphrase")
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+        .unwrap_or_default();
+    let _flight = auth_cache::flight().lock().await;
+    if let Some(email) = auth_info_cache_key(program, &secret).and_then(auth_cache::lookup) {
+        return Ok(email);
+    }
+    let result = match run_process_raw_error(program, args, Duration::from_secs(30), None).await {
         Ok(output) => parse_ipatool_auth_info_email(&output),
         Err(error) => Err(error),
+    };
+    if let (Ok(email), Some(key)) = (&result, auth_info_cache_key(program, &secret)) {
+        auth_cache::store(key, email);
     }
+    result
 }
 
 #[tauri::command]
