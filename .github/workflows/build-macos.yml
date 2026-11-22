@@ -40,7 +40,7 @@ jobs:
           gh release download tools-b42 -R "$GITHUB_REPOSITORY" -p signum-tools-macos-b42.tar.gz -D "$RUNNER_TEMP"
           tar -xzf "$RUNNER_TEMP/signum-tools-macos-b42.tar.gz"
           find apple-tools -type f ! -name '*.dylib' ! -name '*.bin' ! -name '*.json' ! -name '*.txt' -exec chmod +x {} +
-          for tool in ideviceinfo ideviceinstaller idevicepair; do
+          for tool in idevice_id ideviceinfo ideviceinstaller idevicepair; do
             test "$(lipo -archs apple-tools/macos-x64/support/${tool})" = x86_64
             test "$(lipo -archs apple-tools/macos-arm64/support/${tool})" = arm64
             if otool -L apple-tools/macos-x64/support/${tool} apple-tools/macos-arm64/support/${tool} | grep -q /opt/homebrew; then
@@ -55,8 +55,24 @@ jobs:
             chmod +x "apple-tools/macos-${arch}/v2/sapsigner"
           done
 
-      - name: Check embedded login resources
-        run: cargo test --manifest-path src-tauri/Cargo.toml macos_release_114 -- --nocapture
+      - name: Verify bundled Mac tools
+        run: |
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          for arch in ("macos-arm64", "macos-x64"):
+              root = Path("apple-tools") / arch
+              source = json.loads((root / "SOURCE.json").read_text())
+              for key, rel in (("v5_sha256", "v5/ipatool"),
+                               ("idevice_id_sha256", "support/idevice_id"),
+                               ("ideviceinstaller_sha256", "support/ideviceinstaller")):
+                  digest = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+                  if digest != source[key]:
+                      raise SystemExit(f"{arch}/{rel}: sha256 mismatch")
+              for rel in ("v5/kbsync", "v5/libunicorn.2.dylib", "v5/assets.bin"):
+                  if not (root / rel).is_file():
+                      raise SystemExit(f"{arch}/{rel}: missing tool sidecar")
+          PY
 
       - name: Build macOS DMG
         run: |

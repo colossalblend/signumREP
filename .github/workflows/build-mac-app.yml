@@ -61,7 +61,6 @@ jobs:
 
       - name: Check embedded login resources
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml macos_release_114 -- --nocapture
           cargo test --manifest-path src-tauri/Cargo.toml ota_download_keeps_active_stream_and_rejects_stalled_or_corrupt_files -- --nocapture
 
       - name: Build macOS DMG

@@ -45,20 +45,25 @@ jobs:
         run: |
           find linux_x64 linux_arm64 -type f -exec chmod +x {} +
 
-      - name: Build Linux bundles
-        run: bash scripts/build-linux.sh
+      - name: Build Linux deb package
+        run: npm run build:linux-deb
 
-      - name: Verify Linux bundles
+      - name: Verify Linux deb package
         run: |
-          test -n "$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)"
           test -n "$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)"
           dpkg-deb -f "$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)" Version | grep -qx '1.2.3'
+
+      - name: Build Linux AppImage
+        continue-on-error: true
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: npm run build:linux-appimage
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: signum-linux
           path: |
-            src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: warn

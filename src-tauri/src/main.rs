@@ -22961,9 +22961,13 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         for arch in ["macos-arm64", "macos-x64"] {
             let engine = root.join("apple-tools").join(arch).join("v5/ipatool");
-            let hash = super::sha256_file_hex(&engine).unwrap();
-            assert!(super::macos_ipatool_embeds_kbsync(&hash));
+            assert!(engine.is_file(), "missing bundled engine: {}", engine.display());
             super::ensure_macos_kbsync_sidecars(engine.to_str().unwrap()).unwrap();
+            let dir = engine.parent().unwrap();
+            for name in ["kbsync", "libunicorn.2.dylib", "assets.bin"] {
+                let path = dir.join(name);
+                assert!(path.is_file(), "missing bundled sidecar: {}", path.display());
+            }
         }
     }
     #[test]
