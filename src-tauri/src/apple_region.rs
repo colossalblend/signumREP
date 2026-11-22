@@ -1885,7 +1885,7 @@ impl CommerceClient {
             builder
         };
         let resp = builder.send().await.map_err(|e| {
-            crate::diag_log::http_err(method, url, &e.to_string());
+            crate::diag_log::http_err(method, url, &crate::diag_log::error_chain(&e));
             "Нет связи с Apple. Проверьте интернет.".to_string()
         })?;
         let status = resp.status().as_u16();

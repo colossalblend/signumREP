@@ -1642,7 +1642,16 @@ fn backup_ipatool_session_for_account(app: &AppHandle, email: &str) -> Result<()
     let target = account_session_dir(app, email)?;
     fs::create_dir_all(&target).map_err(|e| e.to_string())?;
     copy_file_if_exists(&src_account, &target.join("account"))?;
-    let cookies = ipatool_dir.join("cookies");
+    let mut cookies = ipatool_dir.join("cookies");
+    // A Go engine ran after ipatool-cpp and parked the cpp jar: the cpp
+    // account must be saved with its own jar, not the Go one.
+    let parked = ipatool_dir.join(LIBCURL_JAR_BACKUP);
+    if fs::read(&src_account).is_ok_and(|raw| ipatool_account_bytes_are_cpp(&raw))
+        && !file_is_libcurl_jar(&cookies)
+        && file_is_libcurl_jar(&parked)
+    {
+        cookies = parked;
+    }
     if cookies.is_file() && !ipatool_cookie_file_is_corrupt(&cookies) {
         copy_file_if_exists(&cookies, &target.join("cookies"))?;
     }
@@ -1684,6 +1693,11 @@ fn restore_ipatool_session_for_account(app: &AppHandle, email: &str) -> Result<(
         }
     }
     copy_file_if_exists(&source.join("cookies"), &ipatool_dir.join("cookies"))?;
+    // Jars parked for the other engine family belong to whatever was here
+    // before; the restored account brought its own.
+    let _ = fs::remove_file(ipatool_dir.join(LIBCURL_JAR_BACKUP));
+    let _ = fs::remove_file(ipatool_dir.join(GO_JAR_BACKUP));
+    auth_cache::invalidate_all();
     sanitize_ipatool_session_files();
     Ok(())
 }
@@ -2809,11 +2823,8 @@ fn auth_stage(stage: &str, email: &str, detail: &str) {
 }
 
 fn save_last_catalog_error(msg: &str) {
-    let msg = msg
-        .strip_prefix("SIGNUM_APPLE_UNAVAILABLE:")
-        .or_else(|| msg.strip_prefix("SIGNUM_LOGIN_OPAQUE:"))
-        .map(str::trim_start)
-        .unwrap_or(msg);
+    let msg = strip_internal_error_markers(msg);
+    let msg = msg.as_str();
     let Some(dir) = store_session_dir() else {
         return;
     };
@@ -5840,37 +5851,63 @@ async fn api_get_json(
     endpoint: &str,
 ) -> Result<(reqwest::StatusCode, JsonValue), String> {
     let mut last_error = "Не удалось получить данные".to_string();
-    for url in urls {
-        let response = match client.get(url).query(query).send().await {
-            Ok(response) => response,
-            Err(error) => {
-                diag_log::http_err("GET", url, &error.to_string());
-                last_error = http_transport_message(&error, "Не удалось получить данные");
-                continue;
-            }
-        };
-        let status = response.status();
-        if retry_api_status(status) {
-            last_error = http_status_message(status, "Не удалось получить данные");
-            diag_log::note("api", &format!("API returned HTTP {}; trying next server", status.as_u16()));
-            continue;
+    for round in 0..=API_RETRY_DELAYS.len() {
+        if round > 0 {
+            let delay = API_RETRY_DELAYS[round - 1];
+            diag_log::note("api", &format!("{endpoint}: все серверы недоступны, повтор {round} через {} мс", delay.as_millis()));
+            tokio::time::sleep(delay).await;
         }
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                last_error = http_transport_message(&error, "Не удалось прочитать ответ сервиса");
+        let started = Instant::now();
+        // Повторяем круг, только если каждый сервер отвалился быстро на уровне
+        // сети (DNS, отказ в подключении, обрыв TLS): так бывает, пока VPN
+        // переподключается или машина просыпается. Таймаут уже стоил 15+ с, а
+        // ответ сервера (HTTP-статус, кривое тело) повтор не исправит.
+        let mut transient = true;
+        for url in urls {
+            let response = match client.get(url).query(query).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    diag_log::http_err("GET", url, &diag_log::error_chain(&error));
+                    if error.is_timeout() {
+                        transient = false;
+                    }
+                    last_error = http_transport_message(&error, "Не удалось получить данные");
+                    continue;
+                }
+            };
+            transient = false;
+            let status = response.status();
+            if retry_api_status(status) {
+                last_error = http_status_message(status, "Не удалось получить данные");
+                diag_log::note("api", &format!("API returned HTTP {}; trying next server", status.as_u16()));
                 continue;
             }
-        };
-        diag_log::http("GET", url, status.as_u16(), "", &bytes);
-        match serde_json::from_slice::<JsonValue>(&bytes) {
-            Ok(value) if value.is_object() && (!status.is_success() || !matches!(endpoint, "main.php" | "info.php") || valid_catalog_response(endpoint, &value)) => return Ok((status, value)),
-            _ if status.as_u16() == 426 => return Ok((status, serde_json::json!({"error":"client_outdated", "message": http_status_message(status, "Не удалось получить данные")}))),
-            _ => last_error = "Не удалось обработать ответ сервиса".into(),
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    diag_log::http_err("GET", url, &diag_log::error_chain(&error));
+                    last_error = http_transport_message(&error, "Не удалось прочитать ответ сервиса");
+                    continue;
+                }
+            };
+            diag_log::http("GET", url, status.as_u16(), "", &bytes);
+            match serde_json::from_slice::<JsonValue>(&bytes) {
+                Ok(value) if value.is_object() && (!status.is_success() || !matches!(endpoint, "main.php" | "info.php") || valid_catalog_response(endpoint, &value)) => return Ok((status, value)),
+                _ if status.as_u16() == 426 => return Ok((status, serde_json::json!({"error":"client_outdated", "message": http_status_message(status, "Не удалось получить данные")}))),
+                _ => last_error = "Не удалось обработать ответ сервиса".into(),
+            }
+        }
+        if !transient || urls.is_empty() || started.elapsed() > API_RETRY_MAX_ROUND {
+            break;
         }
     }
     Err(last_error)
 }
+
+/// Паузы перед повторными кругами по серверам API при быстрых сетевых сбоях.
+const API_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(600), Duration::from_millis(1800)];
+/// Круг дольше этого уже упёрся в таймауты — повтор только затянет ожидание.
+const API_RETRY_MAX_ROUND: Duration = Duration::from_secs(8);
 
 fn update_platform() -> &'static str {
     #[cfg(target_os = "windows")]
@@ -10898,6 +10935,10 @@ fn reset_ipatool_local_store() {
     for name in [
         "account",
         "cookies",
+        // Parked jars of the other engine family: after a reset they belong
+        // to nobody, and putting one back later would mix two accounts.
+        LIBCURL_JAR_BACKUP,
+        GO_JAR_BACKUP,
         "account.json.bak",
         "account.export.json",
     ] {
@@ -11591,6 +11632,59 @@ fn is_network_unreachable_error(lowered: &str) -> bool {
         || lowered.contains("could not resolve")
         || lowered.contains("couldn't connect")
         || lowered.contains("couldn't resolve")
+        // ipatool-cpp (libcurl): «HTTP request failed: Could not connect to
+        // server» / «SSL connect error» раньше уходили в «проверьте пароль».
+        || lowered.contains("could not connect")
+        || lowered.contains("ssl connect error")
+}
+
+/// Windows WSAEACCES (10013): the socket itself was refused by the local
+/// machine — a firewall, antivirus «web protection» or a VPN/proxy client
+/// blocking Signum's ipatool.exe. Go engines print
+/// `connectex: An attempt was made to access a socket in a way forbidden by
+/// its access permissions`; it is not an Apple or password problem.
+fn is_local_socket_blocked_error(lowered: &str) -> bool {
+    lowered.contains("forbidden by its access permissions")
+        || lowered.contains("wsaeacces")
+        || (lowered.contains("connectex") && lowered.contains("10013"))
+}
+
+fn local_socket_blocked_message() -> &'static str {
+    "Windows не дал Signum выйти в интернет: соединение ipatool.exe заблокировал \
+     брандмауэр, антивирус или VPN/прокси. Разрешите Signum (и ipatool.exe в папке \
+     Signum) в брандмауэре и антивирусе или временно отключите VPN, затем повторите."
+}
+
+/// ipatool-cpp re-runs the password step together with `--auth-code`; Apple
+/// answers a wrong or expired code with the same «Did you forget your
+/// password?» dialog it uses for a bad password. After the code screen the
+/// password has already been accepted (that is what made Apple ask for a code),
+/// so in the code step this text means the code, not the password.
+fn is_bad_password_dialog(lowered: &str) -> bool {
+    lowered.contains("forget your password")
+        || lowered.contains("forgot your password")
+        || lowered.contains("forgotten your password")
+}
+
+const STALE_2FA_CODE_MESSAGE: &str =
+    "Код неверный или устарел — запросите новый. Нажмите «Запросить новый код» и введите код, который придёт после этого.";
+
+/// Signum-internal prefixes that steer the backend/UI and must never reach
+/// the person (they leaked as «SIGNUM_LOGIN_OPAQUE: Apple отклонил вход…»).
+fn strip_internal_error_markers(text: &str) -> String {
+    let mut out = text.to_string();
+    for marker in [
+        "SIGNUM_LOGIN_OPAQUE:",
+        "SIGNUM_APPLE_UNAVAILABLE:",
+        "SIGNUM_BAD_CREDENTIALS:",
+    ] {
+        while let Some(pos) = out.find(marker) {
+            let end = pos + marker.len();
+            let skip = out[end..].len() - out[end..].trim_start().len();
+            out.replace_range(pos..end + skip, "");
+        }
+    }
+    out
 }
 
 fn apple_unreachable_message() -> &'static str {
@@ -11627,6 +11721,9 @@ pub(crate) fn format_login_error(output: &str, password: &str) -> String {
     // ipatool-cpp не достучался до Apple: WinHTTP 12029 и т. п. на Windows,
     // ошибки curl на Mac и Linux. Раньше это уходило в «проверьте email и
     // пароль», и люди меняли пароль, хотя дело было в сети или VPN.
+    if is_local_socket_blocked_error(&lowered) {
+        return with_technical_detail(local_socket_blocked_message(), &sanitized);
+    }
     if is_network_unreachable_error(&lowered) {
         return with_technical_detail(apple_unreachable_message(), &sanitized);
     }
@@ -11683,6 +11780,15 @@ pub(crate) fn format_login_error(output: &str, password: &str) -> String {
         || lowered.contains("failed to sign in")
     {
         return with_technical_detail("Неверный Apple ID или пароль.", &sanitized);
+    }
+    // «Login error: Did you forget your password?» — Apple's BadLogin dialog.
+    // On the first (password) step it is a wrong password; login_apple turns
+    // it into «код неверный или устарел» when a 2FA code was submitted.
+    if is_bad_password_dialog(&lowered) {
+        return with_technical_detail(
+            "Неверный пароль Apple ID. Проверьте пароль (без кода и пробелов) и войдите снова.",
+            &sanitized,
+        );
     }
     if lowered.contains("too many")
         || lowered.contains("rate limit")
@@ -11746,14 +11852,13 @@ pub(crate) fn format_login_error(output: &str, password: &str) -> String {
             &sanitized,
         );
     }
-    // Opaque ipatool-cpp body. The caller may turn this into a 2FA retry only
-    // when it actually submitted a code; an initial login remains a generic
-    // transient Apple error.
+    // Opaque ipatool-cpp body. No marker prefix: nothing in the backend keys
+    // on it, and the old «SIGNUM_LOGIN_OPAQUE:» prefix leaked into the UI.
     if lowered.contains("something went wrong")
         || (lowered.contains("status=200") && lowered.contains("login error"))
     {
         return with_technical_detail(
-            "SIGNUM_LOGIN_OPAQUE: Apple отклонил вход (часто устаревший код 2FA или лимит попыток). Запросите новый код или подождите пару минут.",
+            "Apple отклонил вход без объяснения (часто устаревший код 2FA или лимит попыток). Запросите новый код или подождите пару минут.",
             &sanitized,
         );
     }
@@ -12169,26 +12274,139 @@ fn is_corrupt_saved_login_error(error: &str) -> bool {
 /// and panic with `cannot load cookies: invalid character '#'` on the libcurl
 /// (Netscape) jar ipatool-cpp leaves behind. Before such an engine runs, move
 /// that jar to `cookies.netscape.bak`; the cpp account lives in its own file.
+/// ipatool-cpp, in turn, needs its jar back (the pending-2FA state and the
+/// Store cookies live there), so before a cpp run the jar is put back and the
+/// Go one waits in `cookies.go.bak`. Called for every ipatool spawn from
+/// [`apply_ipatool_child_env`]; the explicit calls in the login/auth-info
+/// repair paths are kept as a belt-and-braces.
 fn move_libcurl_jar_aside_for(program: &str) -> bool {
-    if is_cpp_ipatool(program) {
+    if !is_ipatool_engine_binary(program) {
         return false;
     }
     let Some(dir) = ipatool_data_dir() else {
         return false;
     };
-    let jar = dir.join("cookies");
-    let is_libcurl = fs::read(&jar)
+    match swap_cookie_jars_for_engine(&dir, is_cpp_ipatool(program)) {
+        Some(action) => {
+            ipatool_debug_log(&format!("cookies: {action}"));
+            true
+        }
+        None => false,
+    }
+}
+
+const LIBCURL_JAR_BACKUP: &str = "cookies.netscape.bak";
+const GO_JAR_BACKUP: &str = "cookies.go.bak";
+
+/// ipatool itself (any engine), not ideviceinstaller, sapsigner and friends.
+fn is_ipatool_engine_binary(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("ipatool"))
+}
+
+fn file_is_libcurl_jar(path: &Path) -> bool {
+    fs::read(path)
         .map(|raw| ipatool_cookie_bytes_are_libcurl(&raw))
-        .unwrap_or(false);
-    if !is_libcurl {
-        return false;
+        .unwrap_or(false)
+}
+
+/// Puts the jar of the engine about to run at `dir/cookies` and parks the
+/// other one. Returns what was done, `None` when nothing had to move.
+fn swap_cookie_jars_for_engine(dir: &Path, cpp: bool) -> Option<&'static str> {
+    let jar = dir.join("cookies");
+    let libcurl_bak = dir.join(LIBCURL_JAR_BACKUP);
+    let go_bak = dir.join(GO_JAR_BACKUP);
+    let park = |from: &Path, to: &Path| {
+        let _ = fs::remove_file(to);
+        if fs::rename(from, to).is_err() {
+            let _ = fs::remove_file(from);
+        }
+    };
+    if cpp {
+        if file_is_libcurl_jar(&jar) || !file_is_libcurl_jar(&libcurl_bak) {
+            return None;
+        }
+        if jar.exists() {
+            park(&jar, &go_bak);
+        }
+        let _ = fs::rename(&libcurl_bak, &jar);
+        return Some("libcurl jar restored before ipatool-cpp");
     }
-    let _ = fs::remove_file(dir.join("cookies.netscape.bak"));
-    if fs::rename(&jar, dir.join("cookies.netscape.bak")).is_err() {
-        let _ = fs::remove_file(&jar);
+    if !file_is_libcurl_jar(&jar) {
+        return None;
     }
-    ipatool_debug_log("cookies: libcurl jar moved aside before a Go engine");
-    true
+    park(&jar, &libcurl_bak);
+    if go_bak.is_file() {
+        let _ = fs::rename(&go_bak, &jar);
+    }
+    Some("libcurl jar moved aside before a Go engine")
+}
+
+#[cfg(test)]
+mod cookie_jar_swap_tests {
+    use super::*;
+
+    const NETSCAPE: &[u8] = b"# Netscape HTTP Cookie File\n.apple.com\tTRUE\t/\tTRUE\t0\tX\t1\n";
+    const GO_JSON: &[u8] = b"[{\"Name\":\"X\"}]\n";
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("signum-jar-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn go_engine_gets_libcurl_jar_moved_aside_and_cpp_gets_it_back() {
+        let dir = scratch();
+        fs::write(dir.join("cookies"), NETSCAPE).unwrap();
+        // v5 (cpp) wrote its jar; v4 (Go) is about to run.
+        assert!(swap_cookie_jars_for_engine(&dir, false).is_some());
+        assert!(!dir.join("cookies").exists());
+        assert_eq!(fs::read(dir.join(LIBCURL_JAR_BACKUP)).unwrap(), NETSCAPE);
+        // Go writes its own JSON jar; a second Go run leaves it alone.
+        fs::write(dir.join("cookies"), GO_JSON).unwrap();
+        assert!(swap_cookie_jars_for_engine(&dir, false).is_none());
+        // cpp runs again: its jar is back, the Go one is parked.
+        assert!(swap_cookie_jars_for_engine(&dir, true).is_some());
+        assert_eq!(fs::read(dir.join("cookies")).unwrap(), NETSCAPE);
+        assert_eq!(fs::read(dir.join(GO_JAR_BACKUP)).unwrap(), GO_JSON);
+        assert!(swap_cookie_jars_for_engine(&dir, true).is_none());
+        // And Go again: the parked Go jar returns.
+        assert!(swap_cookie_jars_for_engine(&dir, false).is_some());
+        assert_eq!(fs::read(dir.join("cookies")).unwrap(), GO_JSON);
+        assert_eq!(fs::read(dir.join(LIBCURL_JAR_BACKUP)).unwrap(), NETSCAPE);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_moves_without_a_libcurl_jar() {
+        let dir = scratch();
+        assert!(swap_cookie_jars_for_engine(&dir, false).is_none());
+        assert!(swap_cookie_jars_for_engine(&dir, true).is_none());
+        fs::write(dir.join("cookies"), GO_JSON).unwrap();
+        assert!(swap_cookie_jars_for_engine(&dir, true).is_none());
+        assert_eq!(fs::read(dir.join("cookies")).unwrap(), GO_JSON);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_ipatool_binaries_take_part_in_the_swap() {
+        assert!(is_ipatool_engine_binary("/x/v4/ipatool"));
+        assert!(is_ipatool_engine_binary("/x/ipatool-v5-1.2.0"));
+        assert!(!is_ipatool_engine_binary("/x/ideviceinstaller"));
+        assert!(!is_ipatool_engine_binary("/x/sapsigner.exe"));
+    }
+
+    #[test]
+    fn formatted_corrupt_login_message_triggers_repair() {
+        assert!(is_corrupt_saved_login_error(CORRUPT_SAVED_LOGIN_MESSAGE));
+        assert!(is_corrupt_saved_login_error(
+            "panic: cannot load cookies: invalid character '#' looking for beginning of value"
+        ));
+        assert!(!is_corrupt_saved_login_error("Неверный пароль"));
+    }
 }
 
 async fn run_ipatool_login(program: &str, args: &[String], password: &str) -> Result<(), String> {
@@ -12293,6 +12511,13 @@ fn is_invalid_2fa_code_error(error: &str) -> bool {
         || lower.contains("the code you entered is incorrect")
         || lower.contains("-21669")
         || (lower.contains("неверный") && lower.contains("код"))
+}
+
+/// The code step failed because Apple rejected the code (BadLogin dialog
+/// «Did you forget your password?» after the password was already accepted).
+fn is_stale_2fa_code_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    is_bad_password_dialog(&lower) || error.starts_with("Неверный пароль Apple ID")
 }
 
 fn is_transient_2fa_check_error(error: &str) -> bool {
@@ -12453,6 +12678,9 @@ async fn login_catalog_with_fallback(
         };
         match login_result {
             Ok(()) => {
+                // A fresh login: the owner check below must ask the engine,
+                // never answer from a cached `auth info`.
+                auth_cache::invalidate_all();
                 if !current_ipatool_session_exists() {
                     tokio::time::sleep(Duration::from_millis(400)).await;
                 }
@@ -12703,7 +12931,19 @@ async fn login_apple(
         other => other,
     };
     return match login_result {
-        Ok(_) => {
+        Ok(account) => {
+            // Signed in with an alias (another address or the phone number):
+            // the session belongs to the primary Apple ID Apple returned. Save
+            // the account under that one, or every later `auth info` check
+            // would call the session "another Apple ID".
+            let account = normalize_account_email(&account);
+            let email = if account.is_empty() || account == email {
+                email
+            } else {
+                ipatool_debug_log("login: alias accepted, account saved under the primary Apple ID");
+                let _ = history_secrets::store_history_password(&account, &store_pw);
+                account
+            };
             auth_stage("catalog-login", &email, "ok");
             register_apple_account(&app, &email)?;
             set_active_account(&app, &email)?;
@@ -12758,6 +12998,27 @@ async fn login_apple(
                 catalog_error: None,
             })
         }
+        // Code step: ipatool-cpp replays the password together with the code,
+        // and Apple answers a wrong/expired code with «Did you forget your
+        // password?». The password was accepted a moment ago (that is what
+        // produced the code prompt), so do not wipe the saved password or
+        // leave the code screen — ask for a fresh code instead.
+        Err(error) if providing_2fa && is_stale_2fa_code_error(&error) => {
+            auth_stage("catalog-2fa-submit", &email, "code-stale");
+            ipatool_debug_log(&format!(
+                "login 2fa code rejected: {}",
+                technical_excerpt(&error, 400)
+            ));
+            Ok(LoginAppleResult {
+                email,
+                needs_2fa: true,
+                history_needs_2fa: false,
+                history_ready: false,
+                history_error: None,
+                message: Some(STALE_2FA_CODE_MESSAGE.into()),
+                catalog_error: Some(strip_internal_error_markers(&error)),
+            })
+        }
         Err(error) if providing_2fa && is_invalid_2fa_code_error(&error) => Ok(LoginAppleResult {
             email,
             needs_2fa: true,
@@ -12775,7 +13036,7 @@ async fn login_apple(
         // ╨┐╨╛╨║╨░╨╖╤Л╨▓╨░╨╡╨╝ ╨║╨░╨║ ╨╡╤Б╤В╤М: ╨┐╨╛╨┤╨╛╨╢╨┤╨░╤В╤М. ╨б╨╛╤Б╤В╨╛╤П╨╜╨╕╨╡ 2FA ╨╜╨╡ ╤В╤А╨╛╨│╨░╨╡╨╝.
         Err(error) if providing_2fa && is_apple_opaque_auth_response(&error) => {
             auth_stage("catalog-2fa-submit", &email, "apple-unavailable");
-            Err(error)
+            Err(strip_internal_error_markers(&error))
         }
         Err(error) if providing_2fa && !is_fatal_account_error(&error) => {
             ipatool_debug_log(&format!(
@@ -12792,7 +13053,11 @@ async fn login_apple(
             history_secrets::delete_all_history_secrets(&email);
             let _ = rollback_to_previous_active_session(&app, previous_active.as_deref());
             save_last_catalog_error(&error);
-            Err("Не удалось войти. Проверьте Apple ID и пароль.".into())
+            if error.starts_with("Неверный пароль Apple ID") {
+                Err(strip_internal_error_markers(&error))
+            } else {
+                Err("Не удалось войти. Проверьте Apple ID и пароль.".into())
+            }
         }
         Err(error) if is_setup_error(&error) => {
             save_last_catalog_error(&error);
@@ -12805,7 +13070,7 @@ async fn login_apple(
             // failure (for example, Windows rejected a large HTTP header). Only
             // explicit ipatool 2FA markers enter the code flow.
             save_last_catalog_error(&error);
-            Err(error)
+            Err(strip_internal_error_markers(&error))
         }
     };
 }
@@ -13284,9 +13549,13 @@ async fn revoke_active_ipatool_session(app: &AppHandle) -> Result<(), String> {
     let keychain = resolve_ipatool_keychain(app)?;
     let mut args = ipatool_args(&keychain);
     args.extend(["auth".into(), "revoke".into()]);
-    run_process(&tools.ipatool, &args, Duration::from_secs(60), None)
+    let result = run_process(&tools.ipatool, &args, Duration::from_secs(60), None)
         .await
-        .map(|_| ())
+        .map(|_| ());
+    // The cache is keyed by the session files and would notice on its own;
+    // dropping it on logout just leaves no answer about a revoked session.
+    auth_cache::invalidate_all();
+    result
 }
 
 async fn remove_apple_account_inner(app: &AppHandle, email: &str) -> Result<(), String> {
@@ -15180,6 +15449,10 @@ pub(crate) fn apply_ipatool_child_env(
         command,
         program_path.to_str().unwrap_or(program),
     );
+    // Every ipatool spawn (login, auth info, download, purchase, list-versions,
+    // kbsync, the PTY login) passes here: give the engine its own cookie jar
+    // before the Go/cpp heuristics in sanitize look at it.
+    move_libcurl_jar_aside_for(program);
     sanitize_ipatool_cookies();
     // macOS GUI apps: inject Homebrew/system bins so idevice* resolve.
     ensure_unix_tool_path_env(command);
@@ -21791,6 +22064,44 @@ mod tests {
         ] {
             assert_eq!(api_download_urls(external), [external]);
         }
+    }
+
+    #[tokio::test]
+    async fn api_json_retries_round_after_fast_network_failure() {
+        // Сервер «поднимается» после первого круга: отказ в подключении
+        // быстрый, поэтому круг повторяется, и второй запрос уже проходит.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let url = format!("http://{addr}/ota.php");
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            let listener = std::net::TcpListener::bind(addr).unwrap();
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}").unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap();
+        let (status, value) = api_get_json(&client, &[url], &[], "ota.php").await.unwrap();
+        assert!(status.is_success());
+        assert_eq!(value["ok"], true);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn error_chain_keeps_nested_causes() {
+        #[derive(Debug)]
+        struct Outer(std::io::Error);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("error sending request") }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.0) }
+        }
+        let error = Outer(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "dns error: no such host"));
+        assert_eq!(diag_log::error_chain(&error), "error sending request <- dns error: no such host");
     }
 
     #[tokio::test]

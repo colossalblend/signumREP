@@ -807,7 +807,7 @@ async fn post_plist(
         }
         builder = apply_common_headers(builder, session, ani, with_token);
         let resp = builder.send().await.map_err(|e| {
-            crate::diag_log::http_err("POST", &url, &e.to_string());
+            crate::diag_log::http_err("POST", &url, &crate::diag_log::error_chain(&e));
             "App Store не ответил. Проверьте интернет и повторите.".to_string()
         })?;
         let status = resp.status().as_u16();

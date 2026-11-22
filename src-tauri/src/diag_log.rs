@@ -162,6 +162,25 @@ pub fn http(method: &str, url: &str, status: u16, extra: &str, body: &[u8]) {
     );
 }
 
+/// Текст ошибки вместе со всей цепочкой причин (`source()`).
+///
+/// reqwest сверху пишет только «error sending request for url (...)», а что
+/// именно сломалось — DNS, TCP-подключение, TLS или прокси — лежит в причинах.
+/// Без них логи с Windows, где каталог не грузился, нельзя было разобрать.
+pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && !out.contains(&text) {
+            out.push_str(" <- ");
+            out.push_str(&text);
+        }
+        source = cause.source();
+    }
+    out
+}
+
 pub fn http_err(method: &str, url: &str, error: &str) {
     if !is_active() {
         return;
