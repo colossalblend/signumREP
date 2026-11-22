@@ -289,8 +289,6 @@ data class StoreDeveloper(
     val artistId: String,
     val name: String,
     val appCount: Int = 0,
-    /** До трёх значков его приложений — для строки разработчика, как на ПК. */
-    val icons: List<String> = emptyList(),
 )
 
 data class AppStoreSearchHit(
@@ -304,8 +302,6 @@ data class AppStoreSearchHit(
     val minIos: String? = null,
     val price: String? = null,
     val foundOnAccount: Boolean = false,
-    /** AppMagic знает приложение, но в App Store его уже нет — ставится только из покупок. */
-    val removedFromStore: Boolean = false,
 )
 
 data class SignOptions(
