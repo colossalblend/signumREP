@@ -96,8 +96,6 @@ export interface CatalogApp {
   aliases?: string[];
   /** App Store ids этого приложения — по ним карточка каталога объединяется с результатом App Store. */
   app_store_ids?: string[];
-  /** Bundle id версий — запасной ключ объединения, когда App Store ID неизвестен. */
-  bundle_ids?: string[];
                                         
   category?: string;
                                                   
@@ -127,8 +125,6 @@ export interface StoreSearchApp {
   publisher: string;
   iconUrl: string;
   appStoreId: string;
-  /** Есть у результатов iTunes; нужен, чтобы узнать приложение каталога без App Store ID. */
-  bundleId?: string;
                                                                    
   removedFromStore?: boolean;
   foundOnAccount?: boolean;

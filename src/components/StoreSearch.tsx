@@ -48,16 +48,6 @@ function pluralApps(count: number): string {
 
 import { tourSearchHits, useTourDemo } from "../lib/tourStore";
 
-/** App Store ID приходит и строкой, и числом; сравниваем только цифры. */
-function normalizeStoreId(value: unknown): string {
-  const text = value == null ? "" : String(value).trim();
-  return /^\d+$/.test(text) ? text.replace(/^0+(?=\d)/, "") : "";
-}
-
-function normalizeBundleId(value: unknown): string {
-  return value == null ? "" : String(value).trim().toLowerCase();
-}
-
 const VERSIONS_PAGE = 12;
 
 function versionMatchesSearch(version: string, externalVersionId: string, query: string): boolean {
@@ -154,17 +144,6 @@ function StoreHitCard({ hit, onClick, dataTour }: {
   );
 }
 
-/** Заглушка карточки на время первого поиска — той же высоты, что настоящая. */
-function CardSkeleton() {
-  return (
-    <div aria-hidden className="panel min-h-[270px] animate-pulse p-5">
-      <div className="h-[78px] w-[78px] rounded-[20px] bg-white/[0.06]" />
-      <div className="mt-8 h-4 w-3/4 rounded bg-white/[0.06]" />
-      <div className="mt-2 h-3 w-1/2 rounded bg-white/[0.04]" />
-    </div>
-  );
-}
-
 function formatAppStoreVersionLabel(version: string, externalVersionId: string): string {
   const v = (version || "").trim();
   const id = (externalVersionId || "").trim();
@@ -184,9 +163,6 @@ type StoreSearchProps = {
   /** Карточки каталога, уже показанные выше по этому запросу, — их дубли из App Store скрываем. */
   shownCatalogIds: ReadonlySet<string>;
   onOpenCatalogApp: (app: CatalogApp) => void;
-  /** Избранное каталога: объединённая карточка ведёт себя так же, как выше. */
-  favoriteIds?: readonly string[];
-  onToggleFavorite?: (app: CatalogApp) => void;
   /** Сообщаем странице, идёт ли сетевой поиск, — для спиннера в строке ввода. */
   onSearchingChange?: (searching: boolean) => void;
 };
@@ -199,7 +175,7 @@ type StoreSearchProps = {
  * вкладка «App Store» и введено от двух символов.
  */
 export default function StoreSearch({
-  query, tourShowHits, catalogApps, shownCatalogIds, onOpenCatalogApp, favoriteIds, onToggleFavorite, onSearchingChange,
+  query, tourShowHits, catalogApps, shownCatalogIds, onOpenCatalogApp, onSearchingChange,
 }: StoreSearchProps) {
   const navigate = useNavigate();
   const [storeHits, setStoreHits] = useState<StoreSearchApp[]>([]);
@@ -671,20 +647,7 @@ export default function StoreSearch({
     const map = new Map<string, CatalogApp>();
     for (const app of catalogApps) {
       for (const id of app.app_store_ids ?? []) {
-        const key = normalizeStoreId(id);
-        if (key && !map.has(key)) map.set(key, app);
-      }
-    }
-    return map;
-  }, [catalogApps]);
-  // Запасной путь для карточек без App Store ID (старый сервер, приложение
-  // снято с продажи): сверяем bundle id, если iTunes его отдал.
-  const catalogByBundleId = useMemo(() => {
-    const map = new Map<string, CatalogApp>();
-    for (const app of catalogApps) {
-      if ((app.app_store_ids ?? []).some(id => normalizeStoreId(id))) continue;
-      for (const bundle of app.bundle_ids ?? []) {
-        const key = normalizeBundleId(bundle);
+        const key = id.trim();
         if (key && !map.has(key)) map.set(key, app);
       }
     }
@@ -692,22 +655,9 @@ export default function StoreSearch({
   }, [catalogApps]);
   const mergedHits = useMemo(() => {
     const seenCatalog = new Set<string>();
-    const seenStore = new Set<string>();
     const out: Array<{ hit: StoreSearchApp; catalog: CatalogApp | null }> = [];
     for (const hit of shownHits) {
-      const storeId = normalizeStoreId(hit.appStoreId);
-      // AppMagic и iTunes могут вернуть одно и то же приложение дважды:
-      // показываем его один раз, в порядке первого появления.
-      if (storeId) {
-        if (seenStore.has(storeId)) continue;
-        seenStore.add(storeId);
-      }
-      const bundle = normalizeBundleId(hit.bundleId);
-      const catalog = tourShowHits
-        ? null
-        : (storeId ? catalogByStoreId.get(storeId) : undefined)
-          ?? (bundle ? catalogByBundleId.get(bundle) : undefined)
-          ?? null;
+      const catalog = tourShowHits ? null : catalogByStoreId.get(hit.appStoreId.trim()) ?? null;
       if (catalog) {
         if (shownCatalogIds.has(catalog.id) || seenCatalog.has(catalog.id)) continue;
         seenCatalog.add(catalog.id);
@@ -715,16 +665,10 @@ export default function StoreSearch({
       out.push({ hit, catalog });
     }
     return out;
-  }, [catalogByBundleId, catalogByStoreId, shownCatalogIds, shownHits, tourShowHits]);
+  }, [catalogByStoreId, shownCatalogIds, shownHits, tourShowHits]);
   const allMergedAbove = !storeSearching && shownHits.length > 0 && mergedHits.length === 0;
   const typed = query.trim().length >= 2;
-  const showEmpty = typed && !storeSearching && shownHits.length === 0 && !storeError && !tourDemo;
-  // Первый поиск: результатов ещё нет — рисуем заглушки карточек, чтобы
-  // раздел не «прыгал», когда ответ придёт.
-  const showSkeleton = typed && storeSearching && shownHits.length === 0;
-  // Повторный поиск: старые результаты остаются на месте, но приглушены,
-  // чтобы было видно, что они относятся к прошлому запросу.
-  const staleHits = storeSearching && shownHits.length > 0;
+  const showEmpty = typed && !storeSearching && storeHits.length === 0 && !storeError && !tourDemo;
 
   return (
     <div>
@@ -879,24 +823,13 @@ export default function StoreSearch({
       ) : (
         <>
           {/* ── Приложения ─────────────────────────────────────────────── */}
-          <div
-            aria-busy={storeSearching}
-            className={`mt-2 grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4 transition-opacity duration-200 ${staleHits ? "opacity-60" : ""}`}
-          >
-            {showSkeleton && Array.from({ length: 4 }, (_, k) => <CardSkeleton key={`skeleton-${k}`} />)}
-
+          <div className="mt-2 grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4">
             {mergedHits.map(({ hit, catalog }, i) => (
               catalog ? (
-                <AppCard
-                  key={`catalog-${catalog.id}`}
-                  app={catalog}
-                  onClick={onOpenCatalogApp}
-                  favorite={favoriteIds?.includes(catalog.id)}
-                  onToggleFavorite={onToggleFavorite}
-                />
+                <AppCard key={`catalog-${catalog.id}`} app={catalog} onClick={onOpenCatalogApp} />
               ) : (
                 <StoreHitCard
-                  key={`store-${normalizeStoreId(hit.appStoreId) || hit.appStoreId}-${i}`}
+                  key={hit.appStoreId}
                   hit={hit}
                   dataTour={tourShowHits && i === 0 ? "find-hit" : undefined}
                   onClick={() => { if (!tourShowHits) openHit(hit); }}
