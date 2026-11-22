@@ -19,7 +19,7 @@ import pw.appbank.signum.data.models.CatalogBanner
 import pw.appbank.signum.data.models.CatalogFeed
 import pw.appbank.signum.data.models.CatalogGroup
 import pw.appbank.signum.data.models.CatalogVersion
-import pw.appbank.signum.data.models.DEFAULT_API
+import pw.appbank.signum.data.models.API_BASES
 import pw.appbank.signum.data.models.OtaUpdateInfo
 
 class SignumApiException(message: String) : Exception(message)
@@ -229,42 +229,70 @@ class SignumApi {
         return "$url${sep}signum_cb=$bust"
     }
 
+    /**
+     * GET к API: сначала основной сервер, при сетевой ошибке, ответе 5xx или
+     * нечитаемом теле — запасной (как api_get_json на ПК). Ответ «клиент
+     * устарел» и прочие 4xx — окончательные, запасной сервер не спрашиваем.
+     */
     private fun get(endpoint: String, extra: Map<String, String> = emptyMap()): JsonObject {
-        val builder = DEFAULT_API.trimEnd('/').toHttpUrl()
-            .newBuilder()
-            .addPathSegment(endpoint.trimStart('/'))
-            .addQueryParameter("vers", APP_VERSION)
-            .addQueryParameter("build", APP_BUILD)
-            .addQueryParameter("platform", "android")
-            .addQueryParameter("devkey", "")
-        extra.forEach { (k, v) -> builder.addQueryParameter(k, v) }
-        val url = builder.build()
-        if (url.host != Hx.apiHost()) {
-            throw SignumApiException("Не удалось подключиться к каталогу")
-        }
-        val req = Request.Builder().url(url).get().header("Accept", "application/json").build()
-        Http.api.newCall(req).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            val root = runCatching { SignumJson.parseToJsonElement(body).jsonObject }
-                .getOrElse { throw SignumApiException("Сервис вернул некорректные данные") }
-            if (!resp.isSuccessful) {
-                val err = root.str("error").orEmpty()
-                if (resp.code == 426 || err == "client_outdated") {
-                    val message = root.str("message") ?: "Приложение недоступно. Обновите Signum."
-                    clientOutdated.value = ClientOutdated(
-                        message = message,
-                        minClientVersion = root.str("min_client_version"),
-                    )
-                    throw SignumApiException(message)
-                }
-                throw SignumApiException(
-                    root.str("message")
-                        ?: root.str("error")
-                        ?: "Не удалось получить данные (${resp.code})",
-                )
+        var lastError: SignumApiException? = null
+        for (base in API_BASES) {
+            val builder = base.trimEnd('/').toHttpUrl()
+                .newBuilder()
+                .addPathSegment(endpoint.trimStart('/'))
+                .addQueryParameter("vers", APP_VERSION)
+                .addQueryParameter("build", APP_BUILD)
+                .addQueryParameter("platform", "android")
+                .addQueryParameter("devkey", "")
+            extra.forEach { (k, v) -> builder.addQueryParameter(k, v) }
+            val url = builder.build()
+            if (!Hx.isApiHost(url.host)) continue
+            val req = Request.Builder().url(url).get().header("Accept", "application/json").build()
+            val outcome = try {
+                Http.api.newCall(req).execute().use { resp -> handleResponse(resp) }
+            } catch (e: java.io.IOException) {
+                lastError = SignumApiException("Не удалось подключиться к каталогу. Проверьте интернет.")
+                continue
             }
-            return root
+            when (outcome) {
+                is ApiOutcome.Ok -> return outcome.root
+                is ApiOutcome.Retry -> lastError = outcome.error
+                is ApiOutcome.Fail -> throw outcome.error
+            }
         }
+        throw lastError ?: SignumApiException("Не удалось подключиться к каталогу")
+    }
+
+    private sealed interface ApiOutcome {
+        data class Ok(val root: JsonObject) : ApiOutcome
+        /** Сбой сервера — стоит спросить запасной. */
+        data class Retry(val error: SignumApiException) : ApiOutcome
+        data class Fail(val error: SignumApiException) : ApiOutcome
+    }
+
+    private fun handleResponse(resp: okhttp3.Response): ApiOutcome {
+        val body = resp.body?.string().orEmpty()
+        val root = runCatching { SignumJson.parseToJsonElement(body).jsonObject }.getOrNull()
+        if (root == null) {
+            val error = SignumApiException("Сервис вернул некорректные данные")
+            return if (resp.isSuccessful || resp.code >= 500) ApiOutcome.Retry(error) else ApiOutcome.Fail(error)
+        }
+        if (resp.isSuccessful) return ApiOutcome.Ok(root)
+        val err = root.str("error").orEmpty()
+        if (resp.code == 426 || err == "client_outdated") {
+            val message = root.str("message") ?: "Приложение недоступно. Обновите Signum."
+            clientOutdated.value = ClientOutdated(
+                message = message,
+                minClientVersion = root.str("min_client_version"),
+            )
+            return ApiOutcome.Fail(SignumApiException(message))
+        }
+        val error = SignumApiException(
+            root.str("message")
+                ?: root.str("error")
+                ?: "Не удалось получить данные (${resp.code})",
+        )
+        return if (resp.code >= 500) ApiOutcome.Retry(error) else ApiOutcome.Fail(error)
     }
 
     companion object {

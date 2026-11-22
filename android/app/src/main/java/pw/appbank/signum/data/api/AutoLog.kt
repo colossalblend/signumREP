@@ -11,7 +11,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
 import pw.appbank.signum.data.models.APP_BUILD
 import pw.appbank.signum.data.models.APP_VERSION
-import pw.appbank.signum.data.models.DEFAULT_API
+import pw.appbank.signum.data.models.API_BASES
 import java.util.concurrent.ConcurrentHashMap
 
 object AutoLog {
@@ -107,8 +107,6 @@ object AutoLog {
     }
 
     private fun post(source: String, message: String, log: String) {
-        val url = "${DEFAULT_API.trimEnd('/')}/logs.php".toHttpUrlOrNull() ?: return
-        if (url.host != Hx.apiHost()) return
         val body = JSONObject()
             .put("kind", "auto")
             .put("source", source.take(32))
@@ -118,11 +116,19 @@ object AutoLog {
             .put("message", message)
             .put("log", log)
             .toString()
-        val req = Request.Builder()
-            .url(url)
-            .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .header("Accept", "application/json")
-            .build()
-        Http.api.newCall(req).execute().close()
+        // Основной сервер, затем запасной; только свои адреса.
+        for (base in API_BASES) {
+            val url = "${base.trimEnd('/')}/logs.php".toHttpUrlOrNull() ?: continue
+            if (!Hx.isApiHost(url.host)) continue
+            val req = Request.Builder()
+                .url(url)
+                .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .header("Accept", "application/json")
+                .build()
+            val delivered = runCatching {
+                Http.api.newCall(req).execute().use { it.isSuccessful || it.code < 500 }
+            }.getOrDefault(false)
+            if (delivered) return
+        }
     }
 }

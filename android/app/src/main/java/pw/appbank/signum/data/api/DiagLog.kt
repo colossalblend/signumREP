@@ -8,7 +8,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
 import pw.appbank.signum.data.models.APP_BUILD
 import pw.appbank.signum.data.models.APP_VERSION
-import pw.appbank.signum.data.models.DEFAULT_API
+import pw.appbank.signum.data.models.API_BASES
 import java.io.File
 
 /**
@@ -131,10 +131,6 @@ object DiagLog {
     fun send(): Boolean {
         val log = read()
         if (log.isBlank()) error("Запись пуста. Включите запись, повторите проблему и отправьте снова.")
-        val url = "${DEFAULT_API.trimEnd('/')}/logs.php".toHttpUrlOrNull() ?: return false
-        // Тот же предохранитель, что у автоотчётов: отправляем только на свой
-        // адрес, чтобы подменённая настройка не увела журнал на чужой сервер.
-        if (url.host != Hx.apiHost()) return false
         val body = JSONObject()
             .put("kind", "support")
             // Отличаем самостоятельную запись от включённой руками: в сводке
@@ -145,15 +141,28 @@ object DiagLog {
             .put("build", APP_BUILD)
             .put("log", log)
             .toString()
-        val req = Request.Builder()
-            .url(url)
-            .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .header("Accept", "application/json")
-            .build()
-        Http.api.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("Сервер не принял отчёт (${resp.code}).")
+        // Основной сервер, затем запасной. Отправляем только на свои адреса,
+        // чтобы подменённая настройка не увела журнал на чужой сервер.
+        var lastError: Throwable? = null
+        for (base in API_BASES) {
+            val url = "${base.trimEnd('/')}/logs.php".toHttpUrlOrNull() ?: continue
+            if (!Hx.isApiHost(url.host)) continue
+            val req = Request.Builder()
+                .url(url)
+                .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .header("Accept", "application/json")
+                .build()
+            try {
+                Http.api.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) return true
+                    lastError = IllegalStateException("Сервер не принял отчёт (${resp.code}).")
+                    if (resp.code < 500) throw lastError!!
+                }
+            } catch (e: java.io.IOException) {
+                lastError = e
+            }
         }
-        return true
+        throw lastError ?: IllegalStateException("Не удалось отправить отчёт.")
     }
 
     private fun prefs() = app?.getSharedPreferences("signum", Context.MODE_PRIVATE)

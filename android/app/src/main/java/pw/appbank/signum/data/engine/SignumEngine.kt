@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import pw.appbank.signum.data.api.Errors
-import pw.appbank.signum.data.models.DEFAULT_API
+import pw.appbank.signum.data.models.API_BASES
 import pw.appbank.signum.data.api.SignumApi
 import pw.appbank.signum.data.apple.AnisetteClient
 import pw.appbank.signum.data.apple.AppStoreClient
@@ -125,9 +125,13 @@ class SignumEngine(context: Context) {
     ): java.io.File = withContext(Dispatchers.IO) {
         val raw = info.downloadUrl?.trim().orEmpty()
         if (raw.isEmpty()) error("Сервер не дал ссылку на обновление.")
-        val base = DEFAULT_API.trimEnd('/').toHttpUrl()
-        val url = base.resolve(raw) ?: error("Не удалось разобрать ссылку на обновление.")
-        if (url.host != Hx.apiHost()) error("Обновление предлагают с чужого адреса — отменено.")
+        // Относительную ссылку пробуем на основном сервере, затем на запасном
+        // (как api_download_urls на ПК). Абсолютная ссылка на свой сервер
+        // остаётся первой. Чужие узлы по-прежнему отклоняются.
+        val urls = API_BASES.mapNotNull { base -> base.trimEnd('/').toHttpUrl().resolve(raw) }
+            .distinct()
+        if (urls.isEmpty()) error("Не удалось разобрать ссылку на обновление.")
+        if (urls.any { !Hx.isApiHost(it.host) }) error("Обновление предлагают с чужого адреса — отменено.")
 
         val target = java.io.File(settings.updatesDir(), "Signum-${info.version ?: "new"}-${info.build ?: "new"}.apk")
         val client = Http.api.newBuilder()
@@ -135,7 +139,19 @@ class SignumEngine(context: Context) {
             .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
-        pw.appbank.signum.data.api.UpdateDownloader.download(client, url, target, info.sha256, progress)
+        var lastError: Throwable? = null
+        var downloaded = false
+        for (url in urls) {
+            try {
+                pw.appbank.signum.data.api.UpdateDownloader.download(client, url, target, info.sha256, progress)
+                downloaded = true
+                break
+            } catch (e: java.io.IOException) {
+                lastError = e
+                DiagLog.note("app", "обновление: ${url.host} недоступен, пробуем другой сервер")
+            }
+        }
+        if (!downloaded) throw lastError ?: IllegalStateException("Не удалось скачать обновление.")
         DiagLog.note("app", "обновление скачано: ${target.name}")
         target
     }

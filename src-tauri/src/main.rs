@@ -5855,6 +5855,29 @@ pub(crate) fn api_http_client() -> Result<&'static reqwest::Client, String> {
     }
 }
 
+/// Клиент API через системный прокси (VPN-клиент), если он задан и не
+/// перекрыт своим прокси Signum или переменными окружения. Кэшируется по
+/// адресу прокси: человек может сменить VPN на ходу.
+fn api_system_proxy_client() -> Option<reqwest::Client> {
+    let proxy = child_proxy_url().filter(|proxy| proxy.system)?;
+    static CLIENT: OnceLock<std::sync::Mutex<Option<(String, reqwest::Client)>>> = OnceLock::new();
+    let slot = CLIENT.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = slot.lock().ok()?;
+    if let Some((url, client)) = guard.as_ref() {
+        if *url == proxy.url {
+            return Some(client.clone());
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(15))
+        .proxy(reqwest::Proxy::all(&proxy.url).ok()?)
+        .build()
+        .ok()?;
+    *guard = Some((proxy.url, client.clone()));
+    Some(client)
+}
+
 pub(crate) fn api_urls(endpoint: &str) -> Vec<String> {
     std::iter::once(DEFAULT_API)
         .chain(FALLBACK_API)
@@ -6004,7 +6027,20 @@ async fn api_get(
             query.push((key, value));
         }
     }
-    let reply = api_get_json(api_http_client()?, &api_urls(endpoint), &query, endpoint).await;
+    let mut reply = api_get_json(api_http_client()?, &api_urls(endpoint), &query, endpoint).await;
+    if reply.is_err() {
+        // Оба сервера недоступны напрямую. Свой прокси Signum и прокси из
+        // окружения reqwest уже учёл, а системный (его выставляет VPN-клиент)
+        // — нет: ipatool через него ходит, а каталог шёл мимо. Пробуем ещё
+        // раз через системный прокси; при успехе — его ответ.
+        if let Some(client) = api_system_proxy_client() {
+            diag_log::note("api", &format!("{endpoint}: серверы недоступны напрямую, пробуем через системный прокси"));
+            let proxied = api_get_json(&client, &api_urls(endpoint), &query, endpoint).await;
+            if proxied.is_ok() {
+                reply = proxied;
+            }
+        }
+    }
     let cache_file = if matches!(endpoint, "main.php" | "info.php") {
         catalog_response_path(_app, endpoint, extra).ok()
     } else { None };
