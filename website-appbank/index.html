@@ -362,22 +362,28 @@
             </div>
           </details>
           <details class="checksums mac-help reveal" id="mac-help">
-            <summary><i class="bi bi-apple" aria-hidden="true"></i><span>macOS пишет, что не&nbsp;может проверить Signum?</span><i class="checksums-chevron" aria-hidden="true"></i></summary>
+            <summary><i class="bi bi-apple" aria-hidden="true"></i><span>Как установить на&nbsp;Mac</span><i class="checksums-chevron" aria-hidden="true"></i></summary>
             <div class="checksums-panel">
-              <p class="checksums-note">Signum пока не&nbsp;прошёл платную проверку Apple (нотаризацию), поэтому macOS блокирует первый запуск скачанного файла. Файл при этом не&nbsp;повреждён&nbsp;— это можно сверить по&nbsp;отпечатку SHA-256. Разрешить запуск нужно один раз.</p>
+              <p class="checksums-note">Signum пока не&nbsp;прошёл платную проверку Apple (нотаризацию), поэтому при запуске скачанного .dmg macOS пишет, что «не&nbsp;может проверить» приложение. Проще всего поставить через Терминал&nbsp;— тогда этого окна не&nbsp;будет.</p>
+              <h3 class="mac-way"><span>Способ 1</span>Через Терминал <em>рекомендуем</em></h3>
               <ol class="mac-steps checksums-howto">
-                <li>Откройте скачанный .dmg и&nbsp;перетащите Signum в&nbsp;папку «Программы». Запускайте оттуда, а&nbsp;не&nbsp;из&nbsp;окна .dmg.</li>
-                <li>Откройте Signum. В&nbsp;предупреждении нажмите «Готово» или «OK»&nbsp;— <b>не</b>&nbsp;«Переместить в&nbsp;Корзину».</li>
-                <li>Откройте <b>Системные настройки → Конфиденциальность и&nbsp;безопасность</b>, прокрутите вниз и&nbsp;у&nbsp;сообщения о&nbsp;Signum нажмите <b>«Всё равно открыть»</b>, затем подтвердите паролем или Touch&nbsp;ID.</li>
-                <li>На&nbsp;macOS&nbsp;14 и&nbsp;старше можно проще: правый клик по&nbsp;Signum в&nbsp;«Программах» → «Открыть» → «Открыть».</li>
+                <li><b>Откройте Терминал</b>&nbsp;— Spotlight: <kbd>⌘</kbd>+<kbd>Пробел</kbd> → «Терминал».</li>
+                <li><b>Вставьте команду ниже</b>&nbsp;— скопируйте кнопкой, затем <kbd>⌘</kbd>+<kbd>V</kbd>.</li>
+                <li><b>Нажмите Enter</b>&nbsp;— Signum сам скачается, установится в&nbsp;«Программы» и&nbsp;запустится.</li>
               </ol>
-              <p class="checksums-note">Или одной командой в&nbsp;Терминале, после того как Signum лежит в&nbsp;«Программах»:</p>
               <div class="checksum mac-command">
                 <i class="bi bi-terminal" aria-hidden="true"></i>
                 <span class="checksum-name">Терминал</span>
-                <code class="checksum-hash">xattr -dr com.apple.quarantine /Applications/Signum.app</code>
-                <button class="checksum-copy" type="button" data-copy="xattr -dr com.apple.quarantine /Applications/Signum.app" aria-label="Скопировать команду"><i class="bi bi-copy" aria-hidden="true"></i><span>Копировать</span></button>
+                <code class="checksum-hash">curl -fsSL https://appbank.pw/signum/install.sh | bash</code>
+                <button class="checksum-copy" type="button" data-copy="curl -fsSL https://appbank.pw/signum/install.sh | bash" aria-label="Скопировать команду установки"><i class="bi bi-copy" aria-hidden="true"></i><span>Копировать</span></button>
               </div>
+              <p class="checksums-note mac-small">Команда скачивает Signum с&nbsp;нашего сервера и&nbsp;сверяет отпечаток SHA-256. Пароль Mac попросит, только если старую версию нельзя заменить без прав администратора.</p>
+              <h3 class="mac-way"><span>Способ 2</span>Через файл .dmg</h3>
+              <ol class="mac-steps checksums-howto">
+                <li>Скачайте .dmg, откройте его и&nbsp;<b>перетащите Signum в&nbsp;«Программы»</b>. Запускайте оттуда, а&nbsp;не&nbsp;из&nbsp;окна .dmg.</li>
+                <li><b>Правой кнопкой</b> (или <kbd>Control</kbd>+клик) по&nbsp;Signum в&nbsp;«Программах» → «Открыть» → в&nbsp;окне снова «Открыть».</li>
+                <li>Если кнопки «Открыть» нет (macOS&nbsp;15 и&nbsp;новее): нажмите «Готово»&nbsp;— <b>не</b>&nbsp;«Переместить в&nbsp;Корзину». Затем <b>Системные настройки → Конфиденциальность и&nbsp;безопасность</b>, внизу у&nbsp;сообщения о&nbsp;Signum&nbsp;— <b>«Всё равно открыть»</b>, подтвердите паролем или Touch&nbsp;ID.</li>
+              </ol>
             </div>
           </details>
         </div>
@@ -395,7 +401,7 @@
           <details class="faq-item reveal"><summary>Нужен ли кабель?<i aria-hidden="true"></i></summary><div class="faq-panel"><p>Для установки на&nbsp;iPhone — да: обычный USB-кабель к&nbsp;компьютеру или переходник OTG к&nbsp;Android-телефону. На&nbsp;iPhone нажмите «Доверять».</p></div></details>
           <details class="faq-item reveal"><summary>Можно просто сохранить приложение файлом?<i aria-hidden="true"></i></summary><div class="faq-panel"><p>Да. Выберите «Скачать файл» — Signum сохранит его в&nbsp;папку, которую вы укажете в&nbsp;настройках.</p></div></details>
           <details class="faq-item reveal"><summary>Приложения нет в&nbsp;App Store. Что делать?<i aria-hidden="true"></i></summary><div class="faq-panel"><p>Если оно когда-то было на&nbsp;вашем Apple ID, Signum найдёт его в&nbsp;покупках и&nbsp;покажет все доступные версии. А&nbsp;банковские приложения есть в&nbsp;каталоге Signum.</p></div></details>
-          <details class="faq-item reveal"><summary>macOS не&nbsp;открывает Signum: «Apple не&nbsp;может проверить на&nbsp;вредоносное&nbsp;ПО»<i aria-hidden="true"></i></summary><div class="faq-panel"><p>Так macOS встречает приложения без платной нотаризации Apple. Перенесите Signum в&nbsp;«Программы», попробуйте открыть и&nbsp;нажмите «Готово», затем в&nbsp;<b>Системных настройках → Конфиденциальность и&nbsp;безопасность</b> нажмите «Всё равно открыть». Подробно и&nbsp;с&nbsp;командой для Терминала&nbsp;— <a href="#mac-help">в&nbsp;разделе загрузки</a>.</p></div></details>
+          <details class="faq-item reveal"><summary>macOS не&nbsp;открывает Signum: «Apple не&nbsp;может проверить на&nbsp;вредоносное&nbsp;ПО»<i aria-hidden="true"></i></summary><div class="faq-panel"><p>Так macOS встречает приложения без платной нотаризации Apple. Проще всего установить Signum через Терминал одной командой&nbsp;— тогда окна не&nbsp;будет. Если уже скачали .dmg: правой кнопкой по&nbsp;Signum в&nbsp;«Программах» → «Открыть», или <b>Системные настройки → Конфиденциальность и&nbsp;безопасность → «Всё равно открыть»</b>. Пошагово&nbsp;— <a href="#mac-help">в&nbsp;разделе загрузки</a>.</p></div></details>
           <details class="faq-item reveal"><summary>Где получить помощь?<i aria-hidden="true"></i></summary><div class="faq-panel"><p>В&nbsp;Telegram-канале <a href="https://t.me/appbankRU" target="_blank" rel="noopener">@appbankRU</a>.</p></div></details>
         </div>
       </div>
