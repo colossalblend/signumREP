@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Signum service heartbeats
+After=signum-api.service signum-bot.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/signum-bot/venv/bin/python /opt/signum-bot/tools/server_health.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+data/
+apple_bridge/target/
+bin/signum-apple-bridge*
+native_store/build/
+native_store/sap_assets/
+bin/signum-store*
+bin/libunicorn*

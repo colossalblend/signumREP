@@ -1,0 +1,32 @@
+[
+  {
+    "name": "CommerceCore",
+    "offset": 56123568,
+    "size": 207744,
+    "sha256": "c5401e57402230f3c876409d295319ddf1e61287bc882683c5d61277be7bc1f2"
+  },
+  {
+    "name": "CommerceKit",
+    "offset": 56331312,
+    "size": 3271840,
+    "sha256": "b84ff12c21987856c0a17b78f1ad82b73195a6dec5f3b208a17d245555a2c8a2"
+  },
+  {
+    "name": "CoreFP",
+    "offset": 27108656,
+    "size": 29014912,
+    "sha256": "f19141336be4198d0f8991bb00017c915efc7aeaece36c345f7faa1237ea6074"
+  },
+  {
+    "name": "CoreFP.icxs",
+    "offset": 59603152,
+    "size": 5288352,
+    "sha256": "473e78af86979f5bd4f6269561caf770b3d16c098d918846eeac8cdd2fe6566a"
+  },
+  {
+    "name": "storeagent",
+    "offset": 64891504,
+    "size": 2580176,
+    "sha256": "70ce036f9dbcbc04db9511ebd08de0dd3cbc35ccc9d44b089c90170cb5453c59"
+  }
+]

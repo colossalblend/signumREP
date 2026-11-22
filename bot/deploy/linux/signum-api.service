@@ -1,0 +1,25 @@
+[Unit]
+Description=Signum API and hosting bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=signum
+Group=signum
+WorkingDirectory=/opt/signum-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+Environment=HOME=/opt/signum-bot/data
+ExecStart=/opt/signum-bot/venv/bin/python -m signum_bot.api_server
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/signum-bot/data
+
+[Install]
+WantedBy=multi-user.target

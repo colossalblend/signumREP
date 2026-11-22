@@ -1,0 +1,6 @@
+Options -Indexes
+RewriteEngine On
+RewriteCond %{HTTP:Authorization} .
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteRule ^(?:docs|panel|schema)\.json$ - [F,L]
+RewriteRule ^ index.php [L]
