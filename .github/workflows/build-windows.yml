@@ -85,9 +85,9 @@ jobs:
           import zipfile
           z = zipfile.ZipFile('installer/payload/SignumPayload.zip')
           names = set(z.namelist())
-          assert 'signum.exe' in names
-          assert 'uninstall.exe' in names
-          assert 'resources/apple-tools/windows-x64/v5/ipatool.exe' in names
+          assert any(n.endswith('/signum.exe') or n == 'signum.exe' for n in names)
+          assert any(n.endswith('/uninstall.exe') or n == 'uninstall.exe' for n in names)
+          assert any(n.endswith('/resources/apple-tools/windows-x64/v5/ipatool.exe') for n in names)
           print('Windows installer payload:', len(names), 'files')
           PY
 

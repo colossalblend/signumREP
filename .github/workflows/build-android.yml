@@ -47,7 +47,7 @@ jobs:
           sdkmanager="$(find "$ANDROID_HOME/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort -V | tail -n 1)"
           test -n "$sdkmanager"
           yes | "$sdkmanager" --licenses >/dev/null || true
-          "$sdkmanager" "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+          "$sdkmanager" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew

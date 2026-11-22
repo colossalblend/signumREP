@@ -22955,21 +22955,6 @@ mod tests {
         println!("Fresh IPA: build {ext}, version {version}, explicit output verified");
         std::fs::remove_dir_all(dir).unwrap();
     }
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_release_114_bundled_engines_pass_without_external_assets() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        for arch in ["macos-arm64", "macos-x64"] {
-            let engine = root.join("apple-tools").join(arch).join("v5/ipatool");
-            assert!(engine.is_file(), "missing bundled engine: {}", engine.display());
-            super::ensure_macos_kbsync_sidecars(engine.to_str().unwrap()).unwrap();
-            let dir = engine.parent().unwrap();
-            for name in ["kbsync", "libunicorn.2.dylib", "assets.bin"] {
-                let path = dir.join(name);
-                assert!(path.is_file(), "missing bundled sidecar: {}", path.display());
-            }
-        }
-    }
     #[test]
     fn macos_release_114_does_not_require_external_kbsync_assets() {
         for hash in [

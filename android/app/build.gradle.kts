@@ -8,11 +8,7 @@ plugins {
 
 android {
     namespace = "com.appbank.signum"
-    compileSdk {
-        version = release(37) {
-            minorApiLevel = 0
-        }
-    }
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.appbank.signum"

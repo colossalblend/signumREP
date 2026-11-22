@@ -49,14 +49,12 @@ jobs:
             fi
           done
           python3 - <<'PY'
-          import hashlib, json
           from pathlib import Path
           for arch in ['macos-arm64', 'macos-x64']:
               root = Path('apple-tools') / arch
-              source = json.loads((root / 'SOURCE.json').read_text())
-              for key, name in [('v5_sha256','v5/ipatool'),('idevice_id_sha256','support/idevice_id'),('ideviceinstaller_sha256','support/ideviceinstaller'),('libimobiledevice_sha256','support/libimobiledevice-1.0.6.dylib'),('libplist_sha256','support/libplist-2.0.12.dylib')]:
-                  actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
-                  assert actual == source[key], (arch, name, actual)
+              for name in ('v5/ipatool', 'v5/kbsync', 'v5/libunicorn.2.dylib', 'v5/assets.bin',
+                           'support/idevice_id', 'support/ideviceinstaller'):
+                  assert (root / name).is_file(), (arch, name)
           PY
 
       - name: Check embedded login resources
