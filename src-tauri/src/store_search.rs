@@ -155,7 +155,7 @@ async fn fetch_search_json(query: &str) -> Result<JsonValue, String> {
         .send()
         .await
         .map_err(|e| {
-            crate::diag_log::http_err("GET", SEARCH_URL, &e.to_string());
+            crate::diag_log::http_err("GET", SEARCH_URL, &crate::diag_log::error_chain(&e));
             "Не удалось выполнить поиск. Проверьте интернет и повторите.".to_string()
         })?;
     let status = response.status().as_u16();

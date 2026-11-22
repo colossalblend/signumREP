@@ -8,6 +8,8 @@ import kotlinx.serialization.json.JsonElement
 const val APP_VERSION = BuildConfig.VERSION_NAME
 const val APP_BUILD = BuildConfig.VERSION_CODE.toString()
 val DEFAULT_API: String get() = pw.appbank.signum.data.api.Hx.apiBase()
+/** Основной сервер, затем запасной (как api_urls на ПК). */
+val API_BASES: List<String> get() = pw.appbank.signum.data.api.Hx.apiBases()
 
 @Serializable
 data class CatalogFeed(

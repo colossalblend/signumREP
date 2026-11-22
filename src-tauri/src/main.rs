@@ -838,7 +838,60 @@ fn set_cached_account_versions(state: &AppState, app_id: &str, versions: Vec<Jso
         .insert(app_id.to_string(), versions);
 }
 
+/// When `list-versions` last answered per (Apple ID, app key), and whether
+/// the answer was «you must purchase this app first».
+///
+/// Each answer costs a 5–15 s ipatool spawn. Logs showed the same app asked
+/// again seconds later through «Обновить» / «Выбрать другую версию», which
+/// both drop the cached verdict first. A fresh answer is reused instead:
+/// ten seconds for any answer (a double click, a queued duplicate request),
+/// a minute for «not purchased» (nothing in Signum can change it meanwhile
+/// except a purchase or install, and those clear this memo).
+fn version_list_checks() -> &'static StdMutex<HashMap<String, (Instant, bool)>> {
+    static CHECKS: OnceLock<StdMutex<HashMap<String, (Instant, bool)>>> = OnceLock::new();
+    CHECKS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+const VERSION_LIST_RECHECK_SECS: u64 = 10;
+const NOT_PURCHASED_RECHECK_SECS: u64 = 60;
+
+fn version_list_check_key(app: &AppHandle, key: &str) -> Option<String> {
+    let email = active_account_email(app)?;
+    Some(format!("{}|{}", normalize_account_email(&email), key.trim()))
+}
+
+fn note_version_list_check(app: &AppHandle, key: &str, not_purchased: bool) {
+    let Some(key) = version_list_check_key(app, key) else { return; };
+    if let Ok(mut map) = version_list_checks().lock() {
+        map.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(NOT_PURCHASED_RECHECK_SECS));
+        map.insert(key, (Instant::now(), not_purchased));
+    }
+}
+
+fn version_list_recheck_window(checked: Option<(Instant, bool)>) -> Option<bool> {
+    let (at, not_purchased) = checked?;
+    let window = if not_purchased { NOT_PURCHASED_RECHECK_SECS } else { VERSION_LIST_RECHECK_SECS };
+    (at.elapsed() < Duration::from_secs(window)).then_some(not_purchased)
+}
+
+/// `Some(not_purchased)` while the last answer for this app is still fresh.
+fn recent_version_list_check(app: &AppHandle, key: &str) -> Option<bool> {
+    let key = version_list_check_key(app, key)?;
+    let checked = version_list_checks().lock().ok()?.get(&key).copied();
+    version_list_recheck_window(checked)
+}
+
+fn forget_version_list_checks(key: Option<&str>) {
+    if let Ok(mut map) = version_list_checks().lock() {
+        match key {
+            Some(key) => map.retain(|stored, _| !stored.ends_with(&format!("|{}", key.trim()))),
+            None => map.clear(),
+        }
+    }
+}
+
 fn clear_account_version_cache(state: &AppState) {
+    forget_version_list_checks(None);
     *state.account_cache_owner.lock().unwrap() = None;
     state.version_page_cache.lock().unwrap().clear();
     state.account_version_cache.lock().unwrap().clear();
@@ -1642,7 +1695,16 @@ fn backup_ipatool_session_for_account(app: &AppHandle, email: &str) -> Result<()
     let target = account_session_dir(app, email)?;
     fs::create_dir_all(&target).map_err(|e| e.to_string())?;
     copy_file_if_exists(&src_account, &target.join("account"))?;
-    let cookies = ipatool_dir.join("cookies");
+    let mut cookies = ipatool_dir.join("cookies");
+    // A Go engine ran after ipatool-cpp and parked the cpp jar: the cpp
+    // account must be saved with its own jar, not the Go one.
+    let parked = ipatool_dir.join(LIBCURL_JAR_BACKUP);
+    if fs::read(&src_account).is_ok_and(|raw| ipatool_account_bytes_are_cpp(&raw))
+        && !file_is_libcurl_jar(&cookies)
+        && file_is_libcurl_jar(&parked)
+    {
+        cookies = parked;
+    }
     if cookies.is_file() && !ipatool_cookie_file_is_corrupt(&cookies) {
         copy_file_if_exists(&cookies, &target.join("cookies"))?;
     }
@@ -1684,6 +1746,11 @@ fn restore_ipatool_session_for_account(app: &AppHandle, email: &str) -> Result<(
         }
     }
     copy_file_if_exists(&source.join("cookies"), &ipatool_dir.join("cookies"))?;
+    // Jars parked for the other engine family belong to whatever was here
+    // before; the restored account brought its own.
+    let _ = fs::remove_file(ipatool_dir.join(LIBCURL_JAR_BACKUP));
+    let _ = fs::remove_file(ipatool_dir.join(GO_JAR_BACKUP));
+    auth_cache::invalidate_all();
     sanitize_ipatool_session_files();
     Ok(())
 }
@@ -2809,11 +2876,8 @@ fn auth_stage(stage: &str, email: &str, detail: &str) {
 }
 
 fn save_last_catalog_error(msg: &str) {
-    let msg = msg
-        .strip_prefix("SIGNUM_APPLE_UNAVAILABLE:")
-        .or_else(|| msg.strip_prefix("SIGNUM_LOGIN_OPAQUE:"))
-        .map(str::trim_start)
-        .unwrap_or(msg);
+    let msg = strip_internal_error_markers(msg);
+    let msg = msg.as_str();
     let Some(dir) = store_session_dir() else {
         return;
     };
@@ -4476,6 +4540,8 @@ fn is_transient_ipatool_timeout(error: &str) -> bool {
         || lower.contains("cannot remove")
         || lower.contains(".ipa.tmp")
         || lower.contains("minizip: failed to open output ipa for append")
+        // CURLE_RECV_ERROR mid-download: the connection dropped, try again.
+        || lower.contains("failure when receiving data from the peer")
     {
         return true;
     }
@@ -5789,6 +5855,29 @@ pub(crate) fn api_http_client() -> Result<&'static reqwest::Client, String> {
     }
 }
 
+/// Клиент API через системный прокси (VPN-клиент), если он задан и не
+/// перекрыт своим прокси Signum или переменными окружения. Кэшируется по
+/// адресу прокси: человек может сменить VPN на ходу.
+fn api_system_proxy_client() -> Option<reqwest::Client> {
+    let proxy = child_proxy_url().filter(|proxy| proxy.system)?;
+    static CLIENT: OnceLock<std::sync::Mutex<Option<(String, reqwest::Client)>>> = OnceLock::new();
+    let slot = CLIENT.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = slot.lock().ok()?;
+    if let Some((url, client)) = guard.as_ref() {
+        if *url == proxy.url {
+            return Some(client.clone());
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(15))
+        .proxy(reqwest::Proxy::all(&proxy.url).ok()?)
+        .build()
+        .ok()?;
+    *guard = Some((proxy.url, client.clone()));
+    Some(client)
+}
+
 pub(crate) fn api_urls(endpoint: &str) -> Vec<String> {
     std::iter::once(DEFAULT_API)
         .chain(FALLBACK_API)
@@ -5840,37 +5929,63 @@ async fn api_get_json(
     endpoint: &str,
 ) -> Result<(reqwest::StatusCode, JsonValue), String> {
     let mut last_error = "Не удалось получить данные".to_string();
-    for url in urls {
-        let response = match client.get(url).query(query).send().await {
-            Ok(response) => response,
-            Err(error) => {
-                diag_log::http_err("GET", url, &error.to_string());
-                last_error = http_transport_message(&error, "Не удалось получить данные");
-                continue;
-            }
-        };
-        let status = response.status();
-        if retry_api_status(status) {
-            last_error = http_status_message(status, "Не удалось получить данные");
-            diag_log::note("api", &format!("API returned HTTP {}; trying next server", status.as_u16()));
-            continue;
+    for round in 0..=API_RETRY_DELAYS.len() {
+        if round > 0 {
+            let delay = API_RETRY_DELAYS[round - 1];
+            diag_log::note("api", &format!("{endpoint}: все серверы недоступны, повтор {round} через {} мс", delay.as_millis()));
+            tokio::time::sleep(delay).await;
         }
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                last_error = http_transport_message(&error, "Не удалось прочитать ответ сервиса");
+        let started = Instant::now();
+        // Повторяем круг, только если каждый сервер отвалился быстро на уровне
+        // сети (DNS, отказ в подключении, обрыв TLS): так бывает, пока VPN
+        // переподключается или машина просыпается. Таймаут уже стоил 15+ с, а
+        // ответ сервера (HTTP-статус, кривое тело) повтор не исправит.
+        let mut transient = true;
+        for url in urls {
+            let response = match client.get(url).query(query).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    diag_log::http_err("GET", url, &diag_log::error_chain(&error));
+                    if error.is_timeout() {
+                        transient = false;
+                    }
+                    last_error = http_transport_message(&error, "Не удалось получить данные");
+                    continue;
+                }
+            };
+            transient = false;
+            let status = response.status();
+            if retry_api_status(status) {
+                last_error = http_status_message(status, "Не удалось получить данные");
+                diag_log::note("api", &format!("API returned HTTP {}; trying next server", status.as_u16()));
                 continue;
             }
-        };
-        diag_log::http("GET", url, status.as_u16(), "", &bytes);
-        match serde_json::from_slice::<JsonValue>(&bytes) {
-            Ok(value) if value.is_object() && (!status.is_success() || !matches!(endpoint, "main.php" | "info.php") || valid_catalog_response(endpoint, &value)) => return Ok((status, value)),
-            _ if status.as_u16() == 426 => return Ok((status, serde_json::json!({"error":"client_outdated", "message": http_status_message(status, "Не удалось получить данные")}))),
-            _ => last_error = "Не удалось обработать ответ сервиса".into(),
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    diag_log::http_err("GET", url, &diag_log::error_chain(&error));
+                    last_error = http_transport_message(&error, "Не удалось прочитать ответ сервиса");
+                    continue;
+                }
+            };
+            diag_log::http("GET", url, status.as_u16(), "", &bytes);
+            match serde_json::from_slice::<JsonValue>(&bytes) {
+                Ok(value) if value.is_object() && (!status.is_success() || !matches!(endpoint, "main.php" | "info.php") || valid_catalog_response(endpoint, &value)) => return Ok((status, value)),
+                _ if status.as_u16() == 426 => return Ok((status, serde_json::json!({"error":"client_outdated", "message": http_status_message(status, "Не удалось получить данные")}))),
+                _ => last_error = "Не удалось обработать ответ сервиса".into(),
+            }
+        }
+        if !transient || urls.is_empty() || started.elapsed() > API_RETRY_MAX_ROUND {
+            break;
         }
     }
     Err(last_error)
 }
+
+/// Паузы перед повторными кругами по серверам API при быстрых сетевых сбоях.
+const API_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(600), Duration::from_millis(1800)];
+/// Круг дольше этого уже упёрся в таймауты — повтор только затянет ожидание.
+const API_RETRY_MAX_ROUND: Duration = Duration::from_secs(8);
 
 fn update_platform() -> &'static str {
     #[cfg(target_os = "windows")]
@@ -5912,7 +6027,20 @@ async fn api_get(
             query.push((key, value));
         }
     }
-    let reply = api_get_json(api_http_client()?, &api_urls(endpoint), &query, endpoint).await;
+    let mut reply = api_get_json(api_http_client()?, &api_urls(endpoint), &query, endpoint).await;
+    if reply.is_err() {
+        // Оба сервера недоступны напрямую. Свой прокси Signum и прокси из
+        // окружения reqwest уже учёл, а системный (его выставляет VPN-клиент)
+        // — нет: ipatool через него ходит, а каталог шёл мимо. Пробуем ещё
+        // раз через системный прокси; при успехе — его ответ.
+        if let Some(client) = api_system_proxy_client() {
+            diag_log::note("api", &format!("{endpoint}: серверы недоступны напрямую, пробуем через системный прокси"));
+            let proxied = api_get_json(&client, &api_urls(endpoint), &query, endpoint).await;
+            if proxied.is_ok() {
+                reply = proxied;
+            }
+        }
+    }
     let cache_file = if matches!(endpoint, "main.php" | "info.php") {
         catalog_response_path(_app, endpoint, extra).ok()
     } else { None };
@@ -6917,6 +7045,11 @@ async fn load_owned_version_ids(
         }
     };
     let region_blocked = ids.is_empty() && is_region_locked_owned_app_error(&output);
+    note_version_list_check(
+        app,
+        adam_id,
+        ids.is_empty() && !region_blocked && is_not_purchased_store_error(&strip_ansi(&output)),
+    );
     let ids = take_recent_version_ids(ids, None, usize::MAX);
     let latest_id = ids.first().cloned();
     Ok(VersionPickerList {
@@ -7458,12 +7591,15 @@ async fn fetch_app_store_versions(
     }
 
     let page_key = format!("{adam_id}:{offset}:{limit}");
-    if input.refresh {
+    // «Обновить» right after an answer (or a second request queued behind the
+    // first on ipatool_lock) re-uses it instead of another 5–15 s spawn.
+    let refresh = input.refresh && recent_version_list_check(&app, adam_id).is_none();
+    if refresh {
         state.version_page_cache.lock().unwrap().retain(|key, _| !key.starts_with(&format!("{adam_id}:")));
     } else if let Some(page) = state.version_page_cache.lock().unwrap().get(&page_key).cloned() {
         return Ok(page);
     }
-    let cached = if input.refresh {
+    let cached = if refresh {
         state.version_probe_cache.lock().unwrap().remove(adam_id);
         None
     } else {
@@ -7700,6 +7836,12 @@ async fn probe_version_on_account_for_catalog_version(
         }
     }
 
+    // «Выбрать другую версию» / «Обновить список» drop the cached verdicts
+    // first; a «not purchased» answered moments ago is still the answer.
+    if recent_version_list_check(app, &cache_key) == Some(true) {
+        return Some(version_available_on_account(version, &[]));
+    }
+
     let tools = match resolve_tool_paths(app) {
         Ok(value) => value,
         Err(_) => return None,
@@ -7803,6 +7945,11 @@ async fn probe_version_on_account_for_catalog_version(
         };
     }
     let result = version_available_on_account(version, &ids);
+    note_version_list_check(
+        app,
+        &cache_key,
+        ids.is_empty() && is_not_purchased_store_error(&strip_ansi(&output)),
+    );
 
     {
         let state = app.state::<AppState>();
@@ -10898,6 +11045,10 @@ fn reset_ipatool_local_store() {
     for name in [
         "account",
         "cookies",
+        // Parked jars of the other engine family: after a reset they belong
+        // to nobody, and putting one back later would mix two accounts.
+        LIBCURL_JAR_BACKUP,
+        GO_JAR_BACKUP,
         "account.json.bak",
         "account.export.json",
     ] {
@@ -11126,6 +11277,14 @@ fn is_already_owned_purchase_result(text: &str) -> bool {
         || lowered.contains("alreadyowned=true")
 }
 
+/// ipatool-cpp's generic purchase refusal (`Purchase error: failed to purchase
+/// app`): Apple declined to grant the licence — paid app, storefront, or an
+/// Apple ID not set up for the App Store. Fell through to the generic
+/// «проверьте интернет и вход» text before.
+fn is_purchase_refused_error(clean: &str) -> bool {
+    clean.to_ascii_lowercase().contains("failed to purchase app")
+}
+
 fn is_not_purchased_store_error(clean: &str) -> bool {
     let lowered = clean.to_ascii_lowercase();
     lowered.contains("empty songlist")
@@ -11140,6 +11299,9 @@ fn is_not_purchased_store_error(clean: &str) -> bool {
 }
 
 fn friendly_apple_store_error(clean: &str) -> Option<String> {
+    if is_local_socket_blocked_error(&clean.to_ascii_lowercase()) {
+        return Some(local_socket_blocked_message().into());
+    }
     if is_password_token_expired_error(clean) {
         return Some(password_token_expired_message());
     }
@@ -11177,9 +11339,21 @@ fn friendly_apple_store_error(clean: &str) -> Option<String> {
     }
     if is_app_not_found_store_error(clean) {
         return Some(
-            "Приложение не найдено в App Store — его удалили из магазина или оно недоступно в вашем регионе.\n\n\
-             Такую версию можно поставить только если она уже есть в покупках этого Apple ID.\n\
-             Выберите другую версию или войдите в Apple ID, на котором приложение уже покупалось."
+            "Приложение не найдено в App Store — его удалили из магазина или оно недоступно в вашем регионе \
+             (не продаётся в стране этого Apple ID).\n\n\
+             Если приложение уже есть в покупках этого Apple ID — выберите версию из покупок.\n\
+             Если нет — смените страну Apple ID на ту, где приложение продаётся («Аккаунт» → «Сменить страну»), \
+             или войдите в Apple ID другой страны."
+                .into(),
+        );
+    }
+    if is_purchase_refused_error(clean) {
+        return Some(
+            "Apple не выдала лицензию на это приложение.\n\n\
+             Частые причины: приложение платное; оно не продаётся в стране этого Apple ID; \
+             Apple ID ещё не настроен для покупок (не приняты условия App Store).\n\n\
+             Проверьте на iPhone, что этим Apple ID устанавливается любое бесплатное приложение из App Store. \
+             Если приложение не продаётся в вашей стране — смените страну Apple ID («Аккаунт» → «Сменить страну»)."
                 .into(),
         );
     }
@@ -11191,6 +11365,64 @@ fn friendly_apple_store_error(clean: &str) -> Option<String> {
         );
     }
     None
+}
+
+fn is_ideviceinstaller_program(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().contains("ideviceinstaller"))
+}
+
+/// Anisette/ADI failure in a tool's output.
+///
+/// Used to be `contains("adi") && contains("fail")`, which also matched
+/// ideviceinstaller's «Uploading … / Install failed» (upl-OADI-ng): a refused
+/// iPhone install was reported as «Не удалось подготовить вход в Apple ID».
+fn mentions_anisette_failure(lowered: &str) -> bool {
+    static ADI: OnceLock<Regex> = OnceLock::new();
+    let adi = ADI.get_or_init(|| Regex::new(r"(?:^|[^a-z0-9])adi(?:[^a-z0-9]|$)").unwrap());
+    lowered.contains("anisette")
+        || lowered.contains("x-apple-i-md")
+        || (adi.is_match(lowered) && lowered.contains("fail"))
+}
+
+/// iOS install refusal (`ideviceinstaller install/upgrade`) in plain Russian.
+///
+/// ideviceinstaller prints `ERROR: Install failed. Got error "<Code>" …`.
+/// Codes already handled further down in `format_process_error` return `None`.
+fn friendly_ideviceinstaller_error(clean: &str) -> Option<String> {
+    static GOT: OnceLock<Regex> = OnceLock::new();
+    let got = GOT.get_or_init(|| {
+        Regex::new(r#"(?i)(?:got error|error:)\s*"?([A-Za-z][A-Za-z0-9]+(?:Error|Failed|TooLow|TooHigh|Prohibited|Architecture|Mismatch|Missing|Invalid|Denied|Conflict|Installed|Locked)[A-Za-z0-9]*)"?"#)
+            .unwrap()
+    });
+    let code = got.captures(clean).and_then(|caps| caps.get(1)).map(|m| m.as_str().to_string())?;
+    let lowered = code.to_ascii_lowercase();
+    let message = match lowered.as_str() {
+        "deviceosversiontoolow" => "Эта версия приложения требует более новую iOS, чем установлена на iPhone. \
+             Выберите более раннюю версию приложения или обновите iOS."
+            .to_string(),
+        "incorrectarchitecture" => "Эта сборка не подходит процессору этого iPhone. Выберите другую версию приложения."
+            .to_string(),
+        "packageinspectionfailed" | "missingbundleexecutable" | "packageextractionfailed"
+        | "missinginfoplist" | "invalidinfoplist" => "iPhone не смог распаковать приложение — файл повреждён или скачан не полностью. \
+             Скачайте приложение заново и повторите установку."
+            .to_string(),
+        "installprohibited" | "installdenied" => "Установка приложений запрещена на этом iPhone \
+             (Экранное время → «Покупки в iTunes Store и App Store» или профиль управления). \
+             Разрешите установку и повторите попытку."
+            .to_string(),
+        "applicationverificationfailed" | "bundleidconflictwithotheridentifier"
+        | "mismatchedapplicationidentifierentitlement" | "applicationalreadyinstalled"
+        | "devicelocked" => return None,
+        _ => format!(
+            "iPhone отказался устанавливать приложение (ответ iOS: {code}). \
+             Переподключите iPhone, разблокируйте экран и повторите установку; \
+             если ошибка повторится — отправьте лог в поддержку."
+        ),
+    };
+    Some(message)
 }
 
 fn format_process_error(program: &str, code: i32, text: &str) -> String {
@@ -11234,10 +11466,14 @@ fn format_process_error(program: &str, code: i32, text: &str) -> String {
             condense_log(&clean, 12_000)
         );
     }
-    if lowered.contains("anisette")
-        || lowered.contains("x-apple-i-md")
-        || (lowered.contains("adi") && lowered.contains("fail"))
-    {
+    // iOS answered the install itself: say what it refused, before any of the
+    // Apple ID wording below can match the device log by accident.
+    if is_ideviceinstaller_program(program) {
+        if let Some(message) = friendly_ideviceinstaller_error(&clean) {
+            return message;
+        }
+    }
+    if !is_ideviceinstaller_program(program) && mentions_anisette_failure(&lowered) {
         return "Не удалось подготовить вход в Apple ID. Полностью закройте Signum и войдите снова. Если не поможет — переустановите приложение.".into();
     }
     if is_keychain_passphrase_required_error(&clean) {
@@ -11292,6 +11528,13 @@ fn format_process_error(program: &str, code: i32, text: &str) -> String {
     }
     if is_network_unreachable_error(&lowered) {
         return apple_unreachable_message().into();
+    }
+    // Was falling through to the generic ipatool text below.
+    if is_ipa_write_error(&lowered) {
+        return ipa_write_error_message(None);
+    }
+    if is_peer_transfer_error(&lowered) {
+        return peer_transfer_error_message().into();
     }
     if lowered.contains("timed out")
         || lowered.contains("timeout")
@@ -11376,6 +11619,36 @@ static LEGACY_LOGOUT_NOTICE: AtomicBool = AtomicBool::new(false);
 #[tauri::command]
 fn take_legacy_logout_notice() -> bool {
     LEGACY_LOGOUT_NOTICE.swap(false, Ordering::SeqCst)
+}
+
+/// Запущен ли Signum из копии только для чтения: прямо из «Загрузок»
+/// (App Translocation — `/private/var/folders/…/AppTranslocation/…`) или из
+/// смонтированного образа .dmg (`/Volumes/…`).
+///
+/// Движок v4 оттуда уже переезжает в Application Support, но каждый запуск
+/// идёт из новой случайной папки, обновление по воздуху не может заменить
+/// приложение, а из образа Signum пропадает после извлечения диска. Человеку
+/// достаточно перенести Signum в «Программы» — об этом и говорим.
+#[cfg(any(target_os = "macos", test))]
+fn macos_read_only_launch(exe: &Path) -> bool {
+    let text = exe.to_string_lossy();
+    text.contains("/AppTranslocation/") || text.starts_with("/Volumes/")
+}
+
+/// Подсказка для баннера: перенести Signum в «Программы». `None` — всё в порядке.
+#[tauri::command]
+fn macos_install_location_hint() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let exe = std::env::current_exe().ok()?;
+        if macos_read_only_launch(&exe) {
+            return Some(
+                "Signum открыт из «Загрузок» или образа диска — вход и обновления оттуда работают ненадёжно."
+                    .into(),
+            );
+        }
+    }
+    None
 }
 
 /// Apple ответила, что срок входа истёк.
@@ -11591,6 +11864,59 @@ fn is_network_unreachable_error(lowered: &str) -> bool {
         || lowered.contains("could not resolve")
         || lowered.contains("couldn't connect")
         || lowered.contains("couldn't resolve")
+        // ipatool-cpp (libcurl): «HTTP request failed: Could not connect to
+        // server» / «SSL connect error» раньше уходили в «проверьте пароль».
+        || lowered.contains("could not connect")
+        || lowered.contains("ssl connect error")
+}
+
+/// Windows WSAEACCES (10013): the socket itself was refused by the local
+/// machine — a firewall, antivirus «web protection» or a VPN/proxy client
+/// blocking Signum's ipatool.exe. Go engines print
+/// `connectex: An attempt was made to access a socket in a way forbidden by
+/// its access permissions`; it is not an Apple or password problem.
+fn is_local_socket_blocked_error(lowered: &str) -> bool {
+    lowered.contains("forbidden by its access permissions")
+        || lowered.contains("wsaeacces")
+        || (lowered.contains("connectex") && lowered.contains("10013"))
+}
+
+fn local_socket_blocked_message() -> &'static str {
+    "Windows не дал Signum выйти в интернет: соединение ipatool.exe заблокировал \
+     брандмауэр, антивирус или VPN/прокси. Разрешите Signum (и ipatool.exe в папке \
+     Signum) в брандмауэре и антивирусе или временно отключите VPN, затем повторите."
+}
+
+/// ipatool-cpp re-runs the password step together with `--auth-code`; Apple
+/// answers a wrong or expired code with the same «Did you forget your
+/// password?» dialog it uses for a bad password. After the code screen the
+/// password has already been accepted (that is what made Apple ask for a code),
+/// so in the code step this text means the code, not the password.
+fn is_bad_password_dialog(lowered: &str) -> bool {
+    lowered.contains("forget your password")
+        || lowered.contains("forgot your password")
+        || lowered.contains("forgotten your password")
+}
+
+const STALE_2FA_CODE_MESSAGE: &str =
+    "Код неверный или устарел — запросите новый. Нажмите «Запросить новый код» и введите код, который придёт после этого.";
+
+/// Signum-internal prefixes that steer the backend/UI and must never reach
+/// the person (they leaked as «SIGNUM_LOGIN_OPAQUE: Apple отклонил вход…»).
+fn strip_internal_error_markers(text: &str) -> String {
+    let mut out = text.to_string();
+    for marker in [
+        "SIGNUM_LOGIN_OPAQUE:",
+        "SIGNUM_APPLE_UNAVAILABLE:",
+        "SIGNUM_BAD_CREDENTIALS:",
+    ] {
+        while let Some(pos) = out.find(marker) {
+            let end = pos + marker.len();
+            let skip = out[end..].len() - out[end..].trim_start().len();
+            out.replace_range(pos..end + skip, "");
+        }
+    }
+    out
 }
 
 fn apple_unreachable_message() -> &'static str {
@@ -11627,6 +11953,9 @@ pub(crate) fn format_login_error(output: &str, password: &str) -> String {
     // ipatool-cpp не достучался до Apple: WinHTTP 12029 и т. п. на Windows,
     // ошибки curl на Mac и Linux. Раньше это уходило в «проверьте email и
     // пароль», и люди меняли пароль, хотя дело было в сети или VPN.
+    if is_local_socket_blocked_error(&lowered) {
+        return with_technical_detail(local_socket_blocked_message(), &sanitized);
+    }
     if is_network_unreachable_error(&lowered) {
         return with_technical_detail(apple_unreachable_message(), &sanitized);
     }
@@ -11683,6 +12012,15 @@ pub(crate) fn format_login_error(output: &str, password: &str) -> String {
         || lowered.contains("failed to sign in")
     {
         return with_technical_detail("Неверный Apple ID или пароль.", &sanitized);
+    }
+    // «Login error: Did you forget your password?» — Apple's BadLogin dialog.
+    // On the first (password) step it is a wrong password; login_apple turns
+    // it into «код неверный или устарел» when a 2FA code was submitted.
+    if is_bad_password_dialog(&lowered) {
+        return with_technical_detail(
+            "Неверный пароль Apple ID. Проверьте пароль (без кода и пробелов) и войдите снова.",
+            &sanitized,
+        );
     }
     if lowered.contains("too many")
         || lowered.contains("rate limit")
@@ -11746,14 +12084,13 @@ pub(crate) fn format_login_error(output: &str, password: &str) -> String {
             &sanitized,
         );
     }
-    // Opaque ipatool-cpp body. The caller may turn this into a 2FA retry only
-    // when it actually submitted a code; an initial login remains a generic
-    // transient Apple error.
+    // Opaque ipatool-cpp body. No marker prefix: nothing in the backend keys
+    // on it, and the old «SIGNUM_LOGIN_OPAQUE:» prefix leaked into the UI.
     if lowered.contains("something went wrong")
         || (lowered.contains("status=200") && lowered.contains("login error"))
     {
         return with_technical_detail(
-            "SIGNUM_LOGIN_OPAQUE: Apple отклонил вход (часто устаревший код 2FA или лимит попыток). Запросите новый код или подождите пару минут.",
+            "Apple отклонил вход без объяснения (часто устаревший код 2FA или лимит попыток). Запросите новый код или подождите пару минут.",
             &sanitized,
         );
     }
@@ -12169,26 +12506,139 @@ fn is_corrupt_saved_login_error(error: &str) -> bool {
 /// and panic with `cannot load cookies: invalid character '#'` on the libcurl
 /// (Netscape) jar ipatool-cpp leaves behind. Before such an engine runs, move
 /// that jar to `cookies.netscape.bak`; the cpp account lives in its own file.
+/// ipatool-cpp, in turn, needs its jar back (the pending-2FA state and the
+/// Store cookies live there), so before a cpp run the jar is put back and the
+/// Go one waits in `cookies.go.bak`. Called for every ipatool spawn from
+/// [`apply_ipatool_child_env`]; the explicit calls in the login/auth-info
+/// repair paths are kept as a belt-and-braces.
 fn move_libcurl_jar_aside_for(program: &str) -> bool {
-    if is_cpp_ipatool(program) {
+    if !is_ipatool_engine_binary(program) {
         return false;
     }
     let Some(dir) = ipatool_data_dir() else {
         return false;
     };
-    let jar = dir.join("cookies");
-    let is_libcurl = fs::read(&jar)
+    match swap_cookie_jars_for_engine(&dir, is_cpp_ipatool(program)) {
+        Some(action) => {
+            ipatool_debug_log(&format!("cookies: {action}"));
+            true
+        }
+        None => false,
+    }
+}
+
+const LIBCURL_JAR_BACKUP: &str = "cookies.netscape.bak";
+const GO_JAR_BACKUP: &str = "cookies.go.bak";
+
+/// ipatool itself (any engine), not ideviceinstaller, sapsigner and friends.
+fn is_ipatool_engine_binary(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("ipatool"))
+}
+
+fn file_is_libcurl_jar(path: &Path) -> bool {
+    fs::read(path)
         .map(|raw| ipatool_cookie_bytes_are_libcurl(&raw))
-        .unwrap_or(false);
-    if !is_libcurl {
-        return false;
+        .unwrap_or(false)
+}
+
+/// Puts the jar of the engine about to run at `dir/cookies` and parks the
+/// other one. Returns what was done, `None` when nothing had to move.
+fn swap_cookie_jars_for_engine(dir: &Path, cpp: bool) -> Option<&'static str> {
+    let jar = dir.join("cookies");
+    let libcurl_bak = dir.join(LIBCURL_JAR_BACKUP);
+    let go_bak = dir.join(GO_JAR_BACKUP);
+    let park = |from: &Path, to: &Path| {
+        let _ = fs::remove_file(to);
+        if fs::rename(from, to).is_err() {
+            let _ = fs::remove_file(from);
+        }
+    };
+    if cpp {
+        if file_is_libcurl_jar(&jar) || !file_is_libcurl_jar(&libcurl_bak) {
+            return None;
+        }
+        if jar.exists() {
+            park(&jar, &go_bak);
+        }
+        let _ = fs::rename(&libcurl_bak, &jar);
+        return Some("libcurl jar restored before ipatool-cpp");
     }
-    let _ = fs::remove_file(dir.join("cookies.netscape.bak"));
-    if fs::rename(&jar, dir.join("cookies.netscape.bak")).is_err() {
-        let _ = fs::remove_file(&jar);
+    if !file_is_libcurl_jar(&jar) {
+        return None;
     }
-    ipatool_debug_log("cookies: libcurl jar moved aside before a Go engine");
-    true
+    park(&jar, &libcurl_bak);
+    if go_bak.is_file() {
+        let _ = fs::rename(&go_bak, &jar);
+    }
+    Some("libcurl jar moved aside before a Go engine")
+}
+
+#[cfg(test)]
+mod cookie_jar_swap_tests {
+    use super::*;
+
+    const NETSCAPE: &[u8] = b"# Netscape HTTP Cookie File\n.apple.com\tTRUE\t/\tTRUE\t0\tX\t1\n";
+    const GO_JSON: &[u8] = b"[{\"Name\":\"X\"}]\n";
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("signum-jar-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn go_engine_gets_libcurl_jar_moved_aside_and_cpp_gets_it_back() {
+        let dir = scratch();
+        fs::write(dir.join("cookies"), NETSCAPE).unwrap();
+        // v5 (cpp) wrote its jar; v4 (Go) is about to run.
+        assert!(swap_cookie_jars_for_engine(&dir, false).is_some());
+        assert!(!dir.join("cookies").exists());
+        assert_eq!(fs::read(dir.join(LIBCURL_JAR_BACKUP)).unwrap(), NETSCAPE);
+        // Go writes its own JSON jar; a second Go run leaves it alone.
+        fs::write(dir.join("cookies"), GO_JSON).unwrap();
+        assert!(swap_cookie_jars_for_engine(&dir, false).is_none());
+        // cpp runs again: its jar is back, the Go one is parked.
+        assert!(swap_cookie_jars_for_engine(&dir, true).is_some());
+        assert_eq!(fs::read(dir.join("cookies")).unwrap(), NETSCAPE);
+        assert_eq!(fs::read(dir.join(GO_JAR_BACKUP)).unwrap(), GO_JSON);
+        assert!(swap_cookie_jars_for_engine(&dir, true).is_none());
+        // And Go again: the parked Go jar returns.
+        assert!(swap_cookie_jars_for_engine(&dir, false).is_some());
+        assert_eq!(fs::read(dir.join("cookies")).unwrap(), GO_JSON);
+        assert_eq!(fs::read(dir.join(LIBCURL_JAR_BACKUP)).unwrap(), NETSCAPE);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_moves_without_a_libcurl_jar() {
+        let dir = scratch();
+        assert!(swap_cookie_jars_for_engine(&dir, false).is_none());
+        assert!(swap_cookie_jars_for_engine(&dir, true).is_none());
+        fs::write(dir.join("cookies"), GO_JSON).unwrap();
+        assert!(swap_cookie_jars_for_engine(&dir, true).is_none());
+        assert_eq!(fs::read(dir.join("cookies")).unwrap(), GO_JSON);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_ipatool_binaries_take_part_in_the_swap() {
+        assert!(is_ipatool_engine_binary("/x/v4/ipatool"));
+        assert!(is_ipatool_engine_binary("/x/ipatool-v5-1.2.0"));
+        assert!(!is_ipatool_engine_binary("/x/ideviceinstaller"));
+        assert!(!is_ipatool_engine_binary("/x/sapsigner.exe"));
+    }
+
+    #[test]
+    fn formatted_corrupt_login_message_triggers_repair() {
+        assert!(is_corrupt_saved_login_error(CORRUPT_SAVED_LOGIN_MESSAGE));
+        assert!(is_corrupt_saved_login_error(
+            "panic: cannot load cookies: invalid character '#' looking for beginning of value"
+        ));
+        assert!(!is_corrupt_saved_login_error("Неверный пароль"));
+    }
 }
 
 async fn run_ipatool_login(program: &str, args: &[String], password: &str) -> Result<(), String> {
@@ -12295,6 +12745,13 @@ fn is_invalid_2fa_code_error(error: &str) -> bool {
         || (lower.contains("неверный") && lower.contains("код"))
 }
 
+/// The code step failed because Apple rejected the code (BadLogin dialog
+/// «Did you forget your password?» after the password was already accepted).
+fn is_stale_2fa_code_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    is_bad_password_dialog(&lower) || error.starts_with("Неверный пароль Apple ID")
+}
+
 fn is_transient_2fa_check_error(error: &str) -> bool {
     is_anisette_failure_text(error)
         || is_cookie_lock_error(error)
@@ -12311,7 +12768,10 @@ fn is_transient_2fa_check_error(error: &str) -> bool {
 
 fn is_fatal_account_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    lower.contains("signum_bad_credentials")
+    // to_ascii_lowercase keeps «Н» capital, so the Cyrillic checks below only
+    // see mid-sentence text; match our own headline explicitly.
+    error.starts_with("Неверный пароль Apple ID")
+        || lower.contains("signum_bad_credentials")
         || lower.contains("неверный пароль")
         || lower.contains("incorrect password")
         || lower.contains("wrong password")
@@ -12362,6 +12822,7 @@ async fn login_catalog_with_fallback(
         .ok()
         .and_then(|engines| engines.get(email).cloned());
     let mut candidates = login_tool_paths(app);
+    let engine_order: Vec<String> = candidates.iter().map(|(engine, _)| engine.clone()).collect();
     if continuing_two_factor {
         if let Some(engine) = preferred.as_deref() {
             candidates.retain(|(candidate, _)| candidate == engine);
@@ -12453,6 +12914,9 @@ async fn login_catalog_with_fallback(
         };
         match login_result {
             Ok(()) => {
+                // A fresh login: the owner check below must ask the engine,
+                // never answer from a cached `auth info`.
+                auth_cache::invalidate_all();
                 if !current_ipatool_session_exists() {
                     tokio::time::sleep(Duration::from_millis(400)).await;
                 }
@@ -12570,11 +13034,39 @@ async fn login_catalog_with_fallback(
                     auth_stage("catalog-account-rejected", email, "fallback=stopped");
                     return Err(error);
                 }
-                // Apple transport/auth endpoints returning an opaque 301/204/
-                // 403/404/500 response are not made better by submitting the
-                // same credentials through a second engine. The old fallback
-                // created extra attempts and could trigger Apple's rate limit.
+                // Opaque 403/500 from Apple's auth endpoints is not made better
+                // by a second engine (extra attempts only feed the rate limit).
+                // 301/204/404 are different: ipatool-cpp does not follow the
+                // location-less pod redirect Apple sends some accounts, while
+                // the Go engine (net/http, other bag/endpoint) signs in fine —
+                // user logs show v4 succeeding right after v5 «status=301».
                 if is_apple_opaque_auth_response(&error) {
+                    let next_engine = next_login_engine(&engine_order, engine);
+                    let engine_specific = is_engine_specific_opaque_auth_error(&error);
+                    if engine_specific && !continuing_two_factor && index + 1 < candidates.len() {
+                        auth_stage("catalog-apple-opaque", email, "fallback=next-engine");
+                        last_error = error;
+                        continue;
+                    }
+                    if engine_specific && continuing_two_factor {
+                        if let Some(next) = next_engine {
+                            // The code belongs to this engine's sign-in, so a
+                            // fallback engine cannot reuse it. Point the
+                            // «Запросить новый код» step at the next engine:
+                            // it signs in afresh and Apple sends a new code.
+                            if let Ok(mut engines) = state.login_2fa_engine.lock() {
+                                engines.insert(email.into(), next.clone());
+                            }
+                            auth_stage(
+                                "catalog-apple-opaque",
+                                email,
+                                &format!("fallback=on-resend engine={next}"),
+                            );
+                            return Err(format!(
+                                "{APPLE_UNAVAILABLE_MARKER} Apple не принял вход этим способом. Нажмите «Запросить новый код» — Signum войдёт другим способом, и Apple пришлёт новый код."
+                            ));
+                        }
+                    }
                     auth_stage("catalog-apple-opaque", email, "fallback=stopped");
                     return Err(error);
                 }
@@ -12703,7 +13195,19 @@ async fn login_apple(
         other => other,
     };
     return match login_result {
-        Ok(_) => {
+        Ok(account) => {
+            // Signed in with an alias (another address or the phone number):
+            // the session belongs to the primary Apple ID Apple returned. Save
+            // the account under that one, or every later `auth info` check
+            // would call the session "another Apple ID".
+            let account = normalize_account_email(&account);
+            let email = if account.is_empty() || account == email {
+                email
+            } else {
+                ipatool_debug_log("login: alias accepted, account saved under the primary Apple ID");
+                let _ = history_secrets::store_history_password(&account, &store_pw);
+                account
+            };
             auth_stage("catalog-login", &email, "ok");
             register_apple_account(&app, &email)?;
             set_active_account(&app, &email)?;
@@ -12758,6 +13262,27 @@ async fn login_apple(
                 catalog_error: None,
             })
         }
+        // Code step: ipatool-cpp replays the password together with the code,
+        // and Apple answers a wrong/expired code with «Did you forget your
+        // password?». The password was accepted a moment ago (that is what
+        // produced the code prompt), so do not wipe the saved password or
+        // leave the code screen — ask for a fresh code instead.
+        Err(error) if providing_2fa && is_stale_2fa_code_error(&error) => {
+            auth_stage("catalog-2fa-submit", &email, "code-stale");
+            ipatool_debug_log(&format!(
+                "login 2fa code rejected: {}",
+                technical_excerpt(&error, 400)
+            ));
+            Ok(LoginAppleResult {
+                email,
+                needs_2fa: true,
+                history_needs_2fa: false,
+                history_ready: false,
+                history_error: None,
+                message: Some(STALE_2FA_CODE_MESSAGE.into()),
+                catalog_error: Some(strip_internal_error_markers(&error)),
+            })
+        }
         Err(error) if providing_2fa && is_invalid_2fa_code_error(&error) => Ok(LoginAppleResult {
             email,
             needs_2fa: true,
@@ -12775,7 +13300,7 @@ async fn login_apple(
         // ╨┐╨╛╨║╨░╨╖╤Л╨▓╨░╨╡╨╝ ╨║╨░╨║ ╨╡╤Б╤В╤М: ╨┐╨╛╨┤╨╛╨╢╨┤╨░╤В╤М. ╨б╨╛╤Б╤В╨╛╤П╨╜╨╕╨╡ 2FA ╨╜╨╡ ╤В╤А╨╛╨│╨░╨╡╨╝.
         Err(error) if providing_2fa && is_apple_opaque_auth_response(&error) => {
             auth_stage("catalog-2fa-submit", &email, "apple-unavailable");
-            Err(error)
+            Err(strip_internal_error_markers(&error))
         }
         Err(error) if providing_2fa && !is_fatal_account_error(&error) => {
             ipatool_debug_log(&format!(
@@ -12792,7 +13317,11 @@ async fn login_apple(
             history_secrets::delete_all_history_secrets(&email);
             let _ = rollback_to_previous_active_session(&app, previous_active.as_deref());
             save_last_catalog_error(&error);
-            Err("Не удалось войти. Проверьте Apple ID и пароль.".into())
+            if error.starts_with("Неверный пароль Apple ID") {
+                Err(strip_internal_error_markers(&error))
+            } else {
+                Err("Не удалось войти. Проверьте Apple ID и пароль.".into())
+            }
         }
         Err(error) if is_setup_error(&error) => {
             save_last_catalog_error(&error);
@@ -12805,7 +13334,7 @@ async fn login_apple(
             // failure (for example, Windows rejected a large HTTP header). Only
             // explicit ipatool 2FA markers enter the code flow.
             save_last_catalog_error(&error);
-            Err(error)
+            Err(strip_internal_error_markers(&error))
         }
     };
 }
@@ -13284,9 +13813,13 @@ async fn revoke_active_ipatool_session(app: &AppHandle) -> Result<(), String> {
     let keychain = resolve_ipatool_keychain(app)?;
     let mut args = ipatool_args(&keychain);
     args.extend(["auth".into(), "revoke".into()]);
-    run_process(&tools.ipatool, &args, Duration::from_secs(60), None)
+    let result = run_process(&tools.ipatool, &args, Duration::from_secs(60), None)
         .await
-        .map(|_| ())
+        .map(|_| ());
+    // The cache is keyed by the session files and would notice on its own;
+    // dropping it on logout just leaves no answer about a revoked session.
+    auth_cache::invalidate_all();
+    result
 }
 
 async fn remove_apple_account_inner(app: &AppHandle, email: &str) -> Result<(), String> {
@@ -13381,6 +13914,12 @@ fn apple_opaque_auth_status(lowered: &str) -> Option<u16> {
                 .filter_map(|code| code.trim().parse::<u16>().ok()),
         );
     }
+    // ipatool-cpp: «Login error: redirect with no location header» — the
+    // same location-less 301 Apple's auth endpoints send (seen in macOS logs
+    // as `native/fast/ -> 301 redirect loc=`).
+    if codes.is_empty() && lowered.contains("redirect with no location") {
+        codes.push(301);
+    }
     codes
         .into_iter()
         .rev()
@@ -13390,6 +13929,30 @@ fn apple_opaque_auth_status(lowered: &str) -> Option<u16> {
 fn is_apple_opaque_auth_response(error: &str) -> bool {
     error.contains(APPLE_UNAVAILABLE_MARKER)
         || apple_opaque_auth_status(&error.to_ascii_lowercase()).is_some()
+}
+
+/// Opaque status of an already formatted login error («…(ответ сервера 301)…»)
+/// or of raw ipatool output.
+fn opaque_auth_status_of_error(error: &str) -> Option<u16> {
+    static FORMATTED: OnceLock<Regex> = OnceLock::new();
+    let formatted =
+        FORMATTED.get_or_init(|| Regex::new(r"ответ сервера (\d{3})").unwrap());
+    formatted
+        .captures(error)
+        .and_then(|found| found[1].parse::<u16>().ok())
+        .or_else(|| apple_opaque_auth_status(&error.to_ascii_lowercase()))
+}
+
+/// 301 (location-less pod redirect), 204 (empty body) and 404 come from the
+/// way ipatool-cpp talks to Apple's auth endpoints, not from the account:
+/// another engine can still sign in. 403/500 are Apple-side refusals.
+fn is_engine_specific_opaque_auth_error(error: &str) -> bool {
+    matches!(opaque_auth_status_of_error(error), Some(301 | 204 | 404))
+}
+
+fn next_login_engine(order: &[String], current: &str) -> Option<String> {
+    let position = order.iter().position(|engine| engine == current)?;
+    order.get(position + 1).cloned()
 }
 
 fn parse_key_values(output: &str) -> HashMap<String, String> {
@@ -13551,11 +14114,28 @@ fn install_failure_allows_upgrade_retry(error: &str, cancelled: bool) -> bool {
         && !is_process_timeout_error(error)
         && !is_device_missing_error(error)
         && !error.starts_with("Не удалось запустить")
+        // iOS already named a reason `upgrade` cannot change (iOS too old,
+        // wrong CPU, broken file, installs prohibited). Re-sending the whole
+        // IPA only replaced that reason with a vaguer one.
+        && !is_definitive_install_refusal(error)
+}
+
+fn is_definitive_install_refusal(error: &str) -> bool {
+    error.starts_with("Эта версия приложения требует более новую iOS")
+        || error.starts_with("Эта сборка не подходит процессору")
+        || error.starts_with("iPhone не смог распаковать приложение")
+        || error.starts_with("Установка приложений запрещена")
 }
 
 fn pick_install_error(install_error: String, upgrade_error: String) -> String {
     if is_device_missing_error(&upgrade_error) {
         return device_not_found_message();
+    }
+    // Misclassified device logs used to surface here as «Не удалось подготовить
+    // вход в Apple ID…»; an Apple ID message is never the answer to an
+    // ideviceinstaller upgrade, so keep the install's own reason then.
+    if upgrade_error.contains("вход в Apple ID") {
+        return install_error;
     }
     let install_is_generic = install_error.starts_with("Не удалось выполнить операцию");
     if install_is_generic && !is_process_timeout_error(&upgrade_error) {
@@ -15180,6 +15760,10 @@ pub(crate) fn apply_ipatool_child_env(
         command,
         program_path.to_str().unwrap_or(program),
     );
+    // Every ipatool spawn (login, auth info, download, purchase, list-versions,
+    // kbsync, the PTY login) passes here: give the engine its own cookie jar
+    // before the Go/cpp heuristics in sanitize look at it.
+    move_libcurl_jar_aside_for(program);
     sanitize_ipatool_cookies();
     // macOS GUI apps: inject Homebrew/system bins so idevice* resolve.
     ensure_unix_tool_path_env(command);
@@ -15382,6 +15966,11 @@ async fn run_process_inner(
         status.code().unwrap_or(-1),
         technical_excerpt(&diagnostic_text, 1600)
     ));
+    // ideviceinstaller is not in the per-process log, so a refused install
+    // reached the report only as a translated sentence. Keep iOS's own words.
+    if is_ideviceinstaller_program(program) {
+        diag_log::proc_out(program, status.code(), &condense_log(&diagnostic_text, 1500));
+    }
     if raw_error {
         let clean = strip_ansi(&text);
         if clean.trim().is_empty() {
@@ -15934,7 +16523,23 @@ async fn purchase_app_only(
     let keychain = resolve_ipatool_keychain(&app)?;
     diag_log::note("ui", &format!("покупка без скачивания: {name}"));
     match purchase_store_app(&app, &tools, &keychain, &input).await {
-        Ok(_) => Ok(format!("{name} добавлено в покупки Apple ID.")),
+        Ok(_) => {
+            // The cached «not purchased» verdict (version list, catalog probe)
+            // is now wrong; without this the picker kept saying «нет в
+            // покупках» until the cache expired or «Обновить» was pressed.
+            if let Some(id) = store_id {
+                forget_version_list_checks(Some(id));
+                state.version_probe_cache.lock().unwrap().remove(id);
+                state.version_picker_cache.lock().unwrap().remove(id);
+                state
+                    .version_page_cache
+                    .lock()
+                    .unwrap()
+                    .retain(|key, _| !key.starts_with(&format!("{id}:")));
+                persist_account_catalog_cache(&app);
+            }
+            Ok(format!("{name} добавлено в покупки Apple ID."))
+        }
         Err(error) => Err(error),
     }
 }
@@ -16259,15 +16864,175 @@ fn catalog_download_temp_dir(job_id: &str) -> Result<PathBuf, String> {
     Ok(std::env::temp_dir().join(format!("signum-{job_id}")))
 }
 
+/// Запасная папка загрузки, если во временную (%TEMP%) записать не вышло.
+///
+/// ipatool-cpp падал через 2–3 с с `Failed writing received data to
+/// disk/application` (CURLE_WRITE_ERROR) на `%TEMP%\SIGNUM~2\download.ipa`:
+/// TEMP чистят «Контроль памяти»/очистители, его же первым делом закрывают
+/// антивирусы и «Контролируемый доступ к папкам». Своя папка Signum в
+/// LocalAppData — та же, где лежат движки, — туда запись разрешена всегда.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn catalog_download_fallback_dir_in(base: &Path, job_id: &str) -> Result<PathBuf, String> {
+    let name = catalog_download_temp_dir(job_id)?
+        .file_name()
+        .map(|value| value.to_os_string())
+        .ok_or("Некорректный номер задачи загрузки.")?;
+    Ok(base.join("Signum").join("downloads").join(name))
+}
+
+fn catalog_download_fallback_dir(job_id: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+        return catalog_download_fallback_dir_in(&base, job_id).ok();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = job_id;
+        None
+    }
+}
+
 fn cleanup_catalog_download(job_id: &str, ipa: &Path) {
     let Ok(dir) = catalog_download_temp_dir(job_id) else { return; };
-    if ipa.parent() == Some(dir.as_path()) {
+    let fallback = catalog_download_fallback_dir(job_id);
+    let parent = ipa.parent();
+    if parent == Some(dir.as_path()) || (fallback.is_some() && parent == fallback.as_deref()) {
         if ipa.exists() {
             let _ = fs::remove_file(ipa);
         }
         // Only remove an empty job directory, never recursively delete temp.
-        let _ = fs::remove_dir(dir);
+        let _ = fs::remove_dir(parent.unwrap_or(dir.as_path()));
     }
+    // A failed first attempt may have left an empty staging dir in %TEMP%.
+    let _ = fs::remove_dir(dir);
+}
+
+/// curl не смог записать полученные данные (CURLE_WRITE_ERROR) или на диске
+/// кончилось место. Сеть тут ни при чём: повтор в ту же папку не поможет.
+fn is_ipa_write_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("failed writing received data")
+        || lower.contains("failed writing body")
+        || lower.contains("failed writing data")
+        || lower.contains("no space left")
+        || lower.contains("disk full")
+        || lower.contains("not enough space on the disk")
+        || lower.contains("there is not enough space")
+}
+
+/// Соединение оборвалось посреди загрузки (CURLE_RECV_ERROR / SEND_ERROR).
+fn is_peer_transfer_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("failure when receiving data from the peer")
+        || lower.contains("failed sending data to the peer")
+        || lower.contains("recv failure")
+        || lower.contains("send failure")
+        || lower.contains("transfer closed with")
+        || lower.contains("partial file")
+}
+
+fn peer_transfer_error_message() -> &'static str {
+    "Соединение с серверами Apple оборвалось во время загрузки файла. \
+     Проверьте интернет; если включены VPN или прокси — попробуйте без них или с другим сервером, \
+     затем повторите скачивание."
+}
+
+fn ipa_write_error_message(free_bytes: Option<u64>) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let free = match free_bytes {
+        Some(bytes) => format!(" Сейчас свободно {:.1} ГБ.", bytes as f64 / GIB),
+        None => String::new(),
+    };
+    format!(
+        "Не удалось записать скачиваемый файл на диск — Signum попробовал две папки.\n\n\
+         Что проверить:\n\
+         1) Свободное место на системном диске: нужно хотя бы 3–5 ГБ.{free}\n\
+         2) Антивирус или «Контролируемый доступ к папкам» (Безопасность Windows → \
+         Защита от вирусов и угроз → Защита от программ-шантажистов): разрешите Signum и ipatool.exe \
+         или временно отключите защиту.\n\
+         3) Повторите скачивание."
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn free_disk_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available: u64 = 0;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    (ok != 0).then_some(available)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn free_disk_space(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Текст ошибки скачивания для человека. Загрузка теперь получает сырой вывод
+/// ipatool (иначе при выключенных подробных ошибках классификаторы видели уже
+/// русскую фразу и ни повтор, ни «нет в покупках» не срабатывали). Готовые
+/// русские сообщения (таймаут, отмена) отдаём как есть.
+fn ipatool_download_failure_text(program: &str, error: &str) -> String {
+    if error.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)) {
+        return error.to_string();
+    }
+    format_process_error(program, 1, error)
+}
+
+/// Подменить путь после `-o` (запасная папка при ошибке записи).
+fn replace_download_output_arg(args: &[String], output: &Path) -> Vec<String> {
+    let mut out = args.to_vec();
+    if let Some(index) = out.iter().position(|arg| arg == "-o") {
+        if let Some(slot) = out.get_mut(index + 1) {
+            *slot = output.to_string_lossy().into_owned();
+        }
+    }
+    out
+}
+
+/// Один запуск `ipatool download` с прогрессом по росту файла в `watch_dirs`.
+#[allow(clippy::too_many_arguments)]
+async fn run_ipatool_download_attempt(
+    app: &AppHandle,
+    job_id: &str,
+    ipatool: &str,
+    args: &[String],
+    watch_dirs: &[PathBuf],
+    input: &CatalogInstallInput,
+    session_start_bytes: u64,
+    progress_from: f64,
+    progress_to: f64,
+) -> Result<String, String> {
+    let progress = ProcessProgress::new(
+        app.clone(),
+        job_id.to_string(),
+        "download".into(),
+        progress_from,
+        progress_to,
+    );
+    // seed_raw ждёт сырые 0..100, а не процент задачи в шкале from..to.
+    progress.seed_raw(2.0);
+    let stop = Arc::new(AtomicBool::new(false));
+    let watch = {
+        let progress = progress.clone();
+        let watch_dirs = watch_dirs.to_vec();
+        let bundle_id = input.bundle_id.clone();
+        let app_store_id = input.app_store_id.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            watch_ipa_download(progress, watch_dirs, bundle_id, app_store_id, session_start_bytes, stop)
+                .await;
+        })
+    };
+    let result =
+        run_process_raw_error(ipatool, args, Duration::from_secs(900), Some(progress)).await;
+    stop.store(true, Ordering::Relaxed);
+    let _ = watch.await;
+    result
 }
 
 async fn download_catalog_ipa_inner(
@@ -16430,7 +17195,7 @@ async fn download_catalog_ipa_inner(
     let cli_output_path = windows_short_path(&staging_dir).join("download.ipa");
     #[cfg(not(windows))]
     let cli_output_path = output_path.clone();
-    let watch_dirs = vec![staging_dir.clone()];
+    let mut watch_dirs = vec![staging_dir.clone()];
     let session_start_bytes = largest_matching_download_size(
         &watch_dirs,
         &input.bundle_id,
@@ -16473,44 +17238,17 @@ async fn download_catalog_ipa_inner(
     }
     // Always pass --purchase like IPA_Downloader for latest/catalog installs.
     args.push("--purchase".into());
-    let progress = ProcessProgress::new(
-        app.clone(),
-        job_id.into(),
-        "download".into(),
-        progress_from,
-        progress_to,
-    );
-    progress.seed_raw(2.0);
-    let stop_watch = Arc::new(AtomicBool::new(false));
-    let watch = {
-        let progress = progress.clone();
-        let watch_dirs = watch_dirs.clone();
-        let bundle_id = input.bundle_id.clone();
-        let app_store_id = input.app_store_id.clone();
-        let stop = stop_watch.clone();
-        tokio::spawn(async move {
-            watch_ipa_download(
-                progress,
-                watch_dirs,
-                bundle_id,
-                app_store_id,
-                session_start_bytes,
-                stop,
-            )
-            .await;
-        })
-    };
-    let download_result = run_process(
-        &tools.ipatool,
-        &args,
-        Duration::from_secs(900),
-        Some(progress),
+    // %TEMP% могли почистить, пока шла покупка: без папки curl падает с
+    // «Failed writing received data to disk/application».
+    let _ = fs::create_dir_all(&staging_dir);
+    let mut output_path = output_path;
+    let mut download_result = run_ipatool_download_attempt(
+        app, job_id, &tools.ipatool, &args, &watch_dirs, input,
+        session_start_bytes, progress_from, progress_to,
     )
     .await;
-    stop_watch.store(true, Ordering::Relaxed);
-    let _ = watch.await;
-    let download_result = match download_result {
-        Err(error) if is_transient_ipatool_timeout(&error) => {
+    if let Err(error) = &download_result {
+        if is_transient_ipatool_timeout(error) || is_peer_transfer_error(error) {
             let append_failed = error.to_ascii_lowercase().contains("minizip: failed to open output ipa for append");
             update_job(
                 app,
@@ -16527,66 +17265,136 @@ async fn download_catalog_ipa_inner(
                 // Keep download.ipa.tmp: ipatool resumes/verifies it, then retries
                 // patching. Give Windows time to release the newly copied file.
                 tokio::time::sleep(Duration::from_secs(2)).await;
+            } else {
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             ensure_not_cancelled(&state, job_id)?;
-            let retry_progress = ProcessProgress::new(
-                app.clone(),
-                job_id.to_string(),
-                "download".into(),
-                progress_from,
-                progress_to,
-            );
-            // seed_raw ждёт сырые 0..100, а download_start — уже процент
-            // задачи в шкале from..to. Смешение давало скачок на старте ретрая.
-            retry_progress.seed_raw(2.0);
-            let retry_stop = Arc::new(AtomicBool::new(false));
-            let retry_watch = {
-                let progress = retry_progress.clone();
-                let watch_dirs = watch_dirs.clone();
-                let bundle_id = input.bundle_id.clone();
-                let app_store_id = input.app_store_id.clone();
-                let stop = retry_stop.clone();
-                tokio::spawn(async move {
-                    watch_ipa_download(
-                        progress,
-                        watch_dirs,
-                        bundle_id,
-                        app_store_id,
-                        session_start_bytes,
-                        stop,
-                    )
-                    .await;
-                })
-            };
-            let result = run_process(
-                &tools.ipatool,
-                &args,
-                Duration::from_secs(900),
-                Some(retry_progress),
+            let _ = fs::create_dir_all(&staging_dir);
+            download_result = run_ipatool_download_attempt(
+                app, job_id, &tools.ipatool, &args, &watch_dirs, input,
+                session_start_bytes, progress_from, progress_to,
             )
             .await;
-            retry_stop.store(true, Ordering::Relaxed);
-            let _ = retry_watch.await;
-            result
         }
-        other => other,
-    };
+    }
+    // Запись на диск не удалась: повтор в ту же папку бесполезен, пробуем
+    // собственную папку Signum в LocalAppData (длинный путь сокращаем так же).
+    if let Err(error) = &download_result {
+        if is_ipa_write_error(error) {
+            if let Some(fallback) = catalog_download_fallback_dir(job_id)
+                .filter(|dir| fs::create_dir_all(dir).is_ok())
+            {
+                update_job(
+                    app,
+                    job_id,
+                    "download",
+                    download_start,
+                    "Не удалось записать файл во временную папку — пробуем другую…",
+                    JobStatus::Running,
+                    None,
+                )
+                .await;
+                for leftover in ["download.ipa.tmp", "download.ipa"] {
+                    let _ = fs::remove_file(staging_dir.join(leftover));
+                }
+                let _ = fs::remove_dir(&staging_dir);
+                ensure_not_cancelled(&state, job_id)?;
+                #[cfg(windows)]
+                let fallback_cli = windows_short_path(&fallback).join("download.ipa");
+                #[cfg(not(windows))]
+                let fallback_cli = fallback.join("download.ipa");
+                args = replace_download_output_arg(&args, &fallback_cli);
+                watch_dirs = vec![fallback.clone()];
+                output_path = fallback.join("download.ipa");
+                download_result = run_ipatool_download_attempt(
+                    app, job_id, &tools.ipatool, &args, &watch_dirs, input,
+                    0, progress_from, progress_to,
+                )
+                .await;
+            }
+        }
+    }
+    // Из истории покупок, а Apple ответил пустым songList: лицензии на этом
+    // Apple ID нет (история с другого ID, лицензию отозвали, приложение ставили
+    // через «Семейный доступ»). Раньше человек жал «Установить» снова и снова и
+    // получал тот же отказ. Один раз пробуем заново получить приложение на
+    // аккаунт (как кнопка «Загрузить» в App Store) и повторяем скачивание.
+    let mut repurchase_attempted = false;
+    if let Err(error) = &download_result {
+        if is_not_purchased_store_error(error)
+            && input.already_owned
+            && normalized_app_store_id(input.app_store_id.as_deref()).is_some()
+        {
+            repurchase_attempted = true;
+            update_job(
+                app,
+                job_id,
+                "purchase",
+                download_start,
+                "Apple не нашёл лицензию — заново добавляем приложение в покупки Apple ID…",
+                JobStatus::Running,
+                None,
+            )
+            .await;
+            let mut acquire = input.clone();
+            acquire.already_owned = false;
+            acquire.in_store = true;
+            if let Ok(None) = purchase_store_app(app, &tools, &keychain, &acquire).await {
+                ensure_not_cancelled(&state, job_id)?;
+                update_job(
+                    app,
+                    job_id,
+                    "download",
+                    download_start,
+                    &format_download_progress_label(2.0),
+                    JobStatus::Running,
+                    None,
+                )
+                .await;
+                download_result = run_ipatool_download_attempt(
+                    app, job_id, &tools.ipatool, &args, &watch_dirs, input,
+                    session_start_bytes, progress_from, progress_to,
+                )
+                .await;
+            }
+        }
+    }
     download_result.map_err(|error| {
+        // `error` is the raw ipatool output (or an already-Russian message).
+        if error == "Загрузка отменена" {
+            return error;
+        }
         // Hard storefront/auth only — don't turn a soft purchase note into a fatal
         // download error (that was aborting history installs on «app not found»).
         if is_hard_storefront_error(&error) {
             let friendly = friendly_apple_store_error(&error).unwrap_or_else(|| error.clone());
             return with_process_log(&friendly, &error);
         }
+        if is_ipa_write_error(&error) {
+            let probe = output_path.parent().unwrap_or(staging_dir.as_path());
+            return with_process_log(&ipa_write_error_message(free_disk_space(probe)), &error);
+        }
+        if is_peer_transfer_error(&error) {
+            return with_process_log(peer_transfer_error_message(), &error);
+        }
         if is_app_not_found_store_error(&error) || is_not_purchased_store_error(&error) {
             let base = if input.already_owned {
                 format!(
-                    "Не удалось скачать «{}» из покупок этого Apple ID.\n\n\
-                     Приложение есть в истории, но файл скачать не получилось.\n\
-                     Проверьте: тот же Apple ID, что в истории; на iPhone в App Store \
-                     приняты условия; интернет стабилен.\n\
-                     Если покупка из другого региона — нужен аккаунт того региона.",
-                    input.title
+                    "Apple не отдаёт «{}»: в покупках этого Apple ID нет лицензии на эту версию.\n\n\
+                     {}\
+                     Что сделать:\n\
+                     1) Проверьте, что вошли в тот же Apple ID, на котором приложение покупалось \
+                     (история могла остаться от другого аккаунта или «Семейного доступа»).\n\
+                     2) На iPhone под этим Apple ID откройте App Store, найдите приложение и нажмите \
+                     «Загрузить» (облачко), затем повторите в Signum.\n\
+                     3) Если приложения уже нет в App Store вашей страны — нужен аккаунт той страны, \
+                     где оно продаётся.",
+                    input.title,
+                    if repurchase_attempted {
+                        "Signum уже попробовал заново добавить его в покупки — Apple отказал.\n\n"
+                    } else {
+                        ""
+                    }
                 )
             } else {
                 friendly_apple_store_error(&error).unwrap_or_else(|| {
@@ -16605,13 +17413,14 @@ async fn download_catalog_ipa_inner(
                 None => detailed,
             };
         }
+        let friendly = ipatool_download_failure_text(&tools.ipatool, &error);
         if DETAILED_ERRORS_ENABLED.load(Ordering::Relaxed) {
             if let Some(purchase_log) = purchase_log.as_deref().filter(|log| !log.is_empty()) {
-                return format!("{error}\n\nПредыдущие попытки покупки:\n{purchase_log}");
+                return format!("{friendly}\n\nПредыдущие попытки покупки:\n{purchase_log}");
             }
-            return error;
+            return friendly;
         }
-        if error.contains("завершился с ошибкой") {
+        if friendly.contains("завершился с ошибкой") {
             format!(
                 "Не удалось скачать «{}».\n\n\
                  Если версии уже нет в App Store — она должна быть в покупках Apple ID. \
@@ -16619,7 +17428,7 @@ async fn download_catalog_ipa_inner(
                 input.title
             )
         } else {
-            error
+            friendly
         }
     })?;
     ensure_not_cancelled(&state, job_id)?;
@@ -21617,6 +22426,62 @@ for ($i = 0; $i -lt 60; $i++) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn store_listing_upgrade_logs_are_not_read_as_anisette() {
+        let upgrade = "Uploading Happ.ipa --> PublicStaging/Happ.ipa\nUpgrading 'com.happproxy'\nERROR: Install failed. Got error \"DeviceOSVersionTooLow\" with code 0xe8008018";
+        let message = format_process_error("ideviceinstaller.exe", 1, upgrade);
+        assert!(message.starts_with("Эта версия приложения требует более новую iOS"), "{message}");
+        assert!(!install_failure_allows_upgrade_retry(&message, false));
+        // Unknown iOS code is named, never turned into an Apple ID hint.
+        let other = format_process_error(
+            "/x/ideviceinstaller",
+            1,
+            "Uploading a.ipa\nERROR: Install failed. Got error \"APIInternalError\" with code 0xe8008001",
+        );
+        assert!(other.contains("APIInternalError") && !other.contains("вход в Apple ID"), "{other}");
+        // Codes handled by the generic mapper keep their existing wording.
+        assert!(friendly_ideviceinstaller_error("Got error \"ApplicationVerificationFailed\"").is_none());
+        assert!(!mentions_anisette_failure("uploading x.ipa\ninstall failed"));
+        assert!(mentions_anisette_failure("adi: provisioning failed"));
+        assert!(mentions_anisette_failure("anisette server unreachable"));
+        assert_eq!(
+            pick_install_error(
+                "Не удалось выполнить операцию. Проверьте Apple ID, подключение iPhone и повторите попытку.".into(),
+                "Не удалось подготовить вход в Apple ID. Полностью закройте Signum и войдите снова.".into(),
+            ),
+            "Не удалось выполнить операцию. Проверьте Apple ID, подключение iPhone и повторите попытку."
+        );
+    }
+
+    #[test]
+    fn purchase_refusals_and_missing_listing_get_store_advice() {
+        let refused = friendly_apple_store_error("Purchase error: failed to purchase app").unwrap();
+        assert!(refused.starts_with("Apple не выдала лицензию"), "{refused}");
+        assert!(refused.contains("Сменить страну"));
+        for raw in ["Purchase error: app not found", "Error: app not found"] {
+            let text = friendly_apple_store_error(raw).unwrap();
+            assert!(text.starts_with("Приложение не найдено в App Store"), "{text}");
+            assert!(text.contains("Сменить страну"), "{text}");
+        }
+    }
+
+    #[test]
+    fn fresh_version_list_answers_are_reused() {
+        let now = Instant::now();
+        assert_eq!(version_list_recheck_window(None), None);
+        assert_eq!(version_list_recheck_window(Some((now, true))), Some(true));
+        assert_eq!(version_list_recheck_window(Some((now, false))), Some(false));
+        let old_owned = now.checked_sub(Duration::from_secs(VERSION_LIST_RECHECK_SECS + 1));
+        if let Some(at) = old_owned {
+            assert_eq!(version_list_recheck_window(Some((at, false))), None);
+            assert_eq!(version_list_recheck_window(Some((at, true))), Some(true));
+        }
+        let old = now.checked_sub(Duration::from_secs(NOT_PURCHASED_RECHECK_SECS + 1));
+        if let Some(at) = old {
+            assert_eq!(version_list_recheck_window(Some((at, true))), None);
+        }
+    }
+
+    #[test]
     fn ota_package_selection_keeps_matching_url_and_checksum() {
         let value = serde_json::json!({"download_url":"https://example.test/update.AppImage", "sha256":"image", "deb_download_url":"https://example.test/update.deb", "deb_sha256":"deb"});
         assert_eq!(parse_ota_for_package(&value, true).sha256.as_deref(), Some("deb"));
@@ -21794,6 +22659,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_json_retries_round_after_fast_network_failure() {
+        // Сервер «поднимается» после первого круга: отказ в подключении
+        // быстрый, поэтому круг повторяется, и второй запрос уже проходит.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let url = format!("http://{addr}/ota.php");
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            let listener = std::net::TcpListener::bind(addr).unwrap();
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}").unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap();
+        let (status, value) = api_get_json(&client, &[url], &[], "ota.php").await.unwrap();
+        assert!(status.is_success());
+        assert_eq!(value["ok"], true);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn macos_read_only_launch_detects_translocation_and_dmg() {
+        assert!(macos_read_only_launch(Path::new(
+            "/private/var/folders/fs/6p/T/AppTranslocation/D51CC72A/d/Signum.app/Contents/MacOS/Signum"
+        )));
+        assert!(macos_read_only_launch(Path::new("/Volumes/Signum/Signum.app/Contents/MacOS/Signum")));
+        assert!(!macos_read_only_launch(Path::new("/Applications/Signum.app/Contents/MacOS/Signum")));
+        assert!(!macos_read_only_launch(Path::new("/Users/me/Applications/Signum.app/Contents/MacOS/Signum")));
+    }
+
+    #[test]
+    fn error_chain_keeps_nested_causes() {
+        #[derive(Debug)]
+        struct Outer(std::io::Error);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("error sending request") }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.0) }
+        }
+        let error = Outer(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "dns error: no such host"));
+        assert_eq!(diag_log::error_chain(&error), "error sending request <- dns error: no such host");
+    }
+
+    #[tokio::test]
     async fn api_json_fails_over_on_broken_responses_but_preserves_client_gate() {
         fn server(reply: &str) -> (String, std::thread::JoinHandle<()>) {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -21941,6 +22854,43 @@ mod tests {
         archive.finish().unwrap();
         assert_eq!(super::resolve_completed_download(&output, "app.store.1514207975", Some("1514207975")).unwrap(), output);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn download_write_and_peer_errors_are_classified() {
+        let write = "Download error: Download failed after retries: Failed writing received data to disk/application";
+        assert!(super::is_ipa_write_error(write));
+        assert!(!super::is_transient_ipatool_timeout(write));
+        assert!(!super::is_peer_transfer_error(write));
+        let peer = "Download error: Download failed after retries: Failure when receiving data from the peer";
+        assert!(super::is_peer_transfer_error(peer));
+        assert!(super::is_transient_ipatool_timeout(peer));
+        assert!(!super::is_ipa_write_error(peer));
+        assert!(!super::is_ipa_write_error("Download error: invalid response: empty songList"));
+        assert!(super::is_not_purchased_store_error("Download error: invalid response: empty songList"));
+        super::DETAILED_ERRORS_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        let msg = super::format_process_error("ipatool.exe", 1, write);
+        assert!(msg.contains("Свободное место") && msg.contains("Контролируемый доступ"), "{msg}");
+        let msg = super::format_process_error("ipatool.exe", 1, peer);
+        assert!(msg.contains("оборвалось"), "{msg}");
+        assert!(super::ipa_write_error_message(Some(3 * 1024 * 1024 * 1024)).contains("3.0 ГБ"));
+        // Already-Russian messages (timeout, cancel) pass through untouched.
+        assert_eq!(super::ipatool_download_failure_text("ipatool.exe", "Загрузка отменена"), "Загрузка отменена");
+        assert!(!super::ipatool_download_failure_text("ipatool.exe", peer).contains("Download error"));
+    }
+
+    #[test]
+    fn download_output_arg_is_replaced_for_fallback_dir() {
+        let args: Vec<String> = ["--keychain-passphrase", "k", "download", "-o", "C:\\T\\SIGNUM~2\\download.ipa", "-i", "1", "--purchase"]
+            .iter().map(|v| v.to_string()).collect();
+        let out = super::replace_download_output_arg(&args, std::path::Path::new("D:/x/download.ipa"));
+        assert_eq!(out[4], "D:/x/download.ipa");
+        assert_eq!(out.len(), args.len());
+        assert_eq!(out[5], "-i");
+        let job = uuid::Uuid::new_v4().to_string();
+        let dir = super::catalog_download_fallback_dir_in(std::path::Path::new("/base"), &job).unwrap();
+        assert_eq!(dir, std::path::Path::new("/base").join("Signum").join("downloads").join(format!("signum-{job}")));
+        assert!(super::catalog_download_fallback_dir_in(std::path::Path::new("/base"), "../x").is_err());
     }
 
     #[test]
@@ -22981,6 +23931,85 @@ Download error: storefront blocked";
     }
 
     #[test]
+    fn did_you_forget_password_maps_to_wrong_password_or_stale_code() {
+        let mapped = format_login_error("Login error: Did you forget your password?", "pw");
+        assert!(mapped.starts_with("Неверный пароль Apple ID"));
+        // Password step: fatal, no fallback engine with the same password.
+        assert!(is_fatal_account_error(&mapped));
+        // Code step: login_apple reads it as a rejected/expired code.
+        assert!(is_stale_2fa_code_error(&mapped));
+        assert!(is_stale_2fa_code_error("Login error: Did you forget your password?"));
+        assert!(!is_stale_2fa_code_error("Login error: something went wrong (status=301)"));
+        assert!(!is_two_factor_error(&mapped));
+    }
+
+    #[test]
+    fn enter_2fa_prompt_without_code_is_the_2fa_step() {
+        let mapped = format_login_error(
+            "Enter 2FA code: Enter 2FA code: Login failed after retry.",
+            "pw",
+        );
+        assert!(mapped.starts_with("SIGNUM_2FA_REQUIRED:"));
+    }
+
+    #[test]
+    fn windows_socket_access_forbidden_maps_to_firewall_message() {
+        let raw = "6:44PM ERR error=\"failed to get bag: failed to send http request: request failed: Get \\\"https://init.itunes.apple.com/bag.xml?guid=x failed to make round trip: dial tcp 184.24.144.29:443: connectex: An attempt was made to access a socket in a way forbidden by its access permissions.\" success=false";
+        let mapped = format_login_error(raw, "pw");
+        assert!(mapped.contains("брандмауэр"), "{mapped}");
+        assert!(!mapped.contains("пароль и интернет"));
+        assert!(friendly_apple_store_error(raw).is_some_and(|m| m.contains("антивирус")));
+    }
+
+    #[test]
+    fn libcurl_connect_failures_are_network_errors() {
+        for raw in [
+            "Login error: HTTP request failed: Could not connect to server",
+            "Login error: HTTP request failed: SSL connect error",
+        ] {
+            assert!(format_login_error(raw, "pw").contains("Нет связи с серверами Apple"), "{raw}");
+        }
+    }
+
+    #[test]
+    fn opaque_login_errors_never_carry_internal_markers_to_user() {
+        let mapped = format_login_error("Login error: something went wrong (status=200)", "pw");
+        assert!(!mapped.contains("SIGNUM_"), "{mapped}");
+        let leaked = "login 2fa check failed: SIGNUM_LOGIN_OPAQUE: Apple отклонил вход";
+        assert_eq!(
+            strip_internal_error_markers(leaked),
+            "login 2fa check failed: Apple отклонил вход"
+        );
+        assert_eq!(
+            strip_internal_error_markers("SIGNUM_APPLE_UNAVAILABLE: Apple сейчас не принимает вход"),
+            "Apple сейчас не принимает вход"
+        );
+    }
+
+    #[test]
+    fn opaque_301_204_are_engine_specific_and_allow_fallback() {
+        for raw in [
+            "Login error: something went wrong (status=301)",
+            "Login error: something went wrong (status=204)",
+            "Enter 2FA code: Login error: something went wrong (status=301)",
+        ] {
+            assert!(is_engine_specific_opaque_auth_error(raw), "{raw}");
+        }
+        let formatted = format_login_error("Login error: something went wrong (status=301)", "pw");
+        assert!(is_apple_opaque_auth_response(&formatted));
+        assert!(is_engine_specific_opaque_auth_error(&formatted), "{formatted}");
+        let redirect = format_login_error("Login error: redirect with no location header", "pw");
+        assert!(is_apple_opaque_auth_response(&redirect), "{redirect}");
+        assert!(is_engine_specific_opaque_auth_error(&redirect));
+        assert!(!is_engine_specific_opaque_auth_error(
+            "Login error: something went wrong (status=403)"
+        ));
+        let order = vec!["v5".to_string(), "v4".to_string()];
+        assert_eq!(next_login_engine(&order, "v5").as_deref(), Some("v4"));
+        assert_eq!(next_login_engine(&order, "v4"), None);
+    }
+
+    #[test]
     fn account_lock_and_password_change_stop_engine_fallback() {
         assert!(is_fatal_account_error(
             "This Apple Account has been locked for security reasons"
@@ -23332,6 +24361,7 @@ fn main() {
             save_settings,
             set_background_mode,
             take_legacy_logout_notice,
+            macos_install_location_hint,
             take_session_expired_notice,
             purchase_app_only,
             purchase_apps_on_accounts,

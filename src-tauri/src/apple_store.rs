@@ -417,7 +417,21 @@ fn anisette_headers(anisette: Option<&str>) -> Result<HashMap<String, String>, S
         .output()
         .map_err(|e| format!("Не удалось запустить anisette: {e}"))?;
     if !output.status.success() && output.stdout.is_empty() {
-        return Err("Apple не подтвердила этот компьютер. Повторите попытку.".into());
+        // The local helper crashed or refused before Apple was ever asked —
+        // this is not Apple rejecting the computer, so do not say it is.
+        let code = output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".into());
+        store_debug(&format!(
+            "anisette exit={code} stderr={}",
+            String::from_utf8_lossy(&output.stderr).chars().take(400).collect::<String>()
+        ));
+        return Err(format!(
+            "Не удалось подготовить подпись этого компьютера для Apple: компонент anisette \
+             завершился с ошибкой (код {code}). Перезапустите Signum; если не поможет — переустановите приложение."
+        ));
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let mut headers = HashMap::new();
@@ -807,7 +821,7 @@ async fn post_plist(
         }
         builder = apply_common_headers(builder, session, ani, with_token);
         let resp = builder.send().await.map_err(|e| {
-            crate::diag_log::http_err("POST", &url, &e.to_string());
+            crate::diag_log::http_err("POST", &url, &crate::diag_log::error_chain(&e));
             "App Store не ответил. Проверьте интернет и повторите.".to_string()
         })?;
         let status = resp.status().as_u16();
@@ -943,7 +957,16 @@ async fn authenticate_locked(
     if let Some(prev) = recent_auth_failure(&email) {
         return Err(prev);
     }
-    let ani = anisette_headers(anisette)?;
+    // A failing local anisette helper fails the same way on every call; without
+    // remembering it each version label re-spawned the helper (and logged the
+    // same line) once per row of the picker.
+    let ani = match anisette_headers(anisette) {
+        Ok(headers) => headers,
+        Err(error) => {
+            remember_auth_failure(&email, &error);
+            return Err(error);
+        }
+    };
     let guid = account_guid();
     let mut session = StoreSession {
         kbsync: String::new(),
@@ -1520,6 +1543,22 @@ pub async fn version_display(
     })
 }
 
+/// The same native-session failure is reported once per ten minutes, not once
+/// per picker row: the fallback (ipatool) labels the rows anyway.
+fn should_report_label_failure(error: &str) -> bool {
+    static LAST: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
+    let Ok(mut last) = LAST.get_or_init(|| Mutex::new(None)).lock() else {
+        return true;
+    };
+    if let Some((prev, at)) = last.as_ref() {
+        if prev == error && at.elapsed() < Duration::from_secs(600) {
+            return false;
+        }
+    }
+    *last = Some((error.to_string(), Instant::now()));
+    true
+}
+
 /// How many version labels are resolved at once.
 ///
 /// Each one costs a SAP signature (a helper process, seconds) plus a round trip
@@ -1573,7 +1612,12 @@ pub async fn version_displays(
                 // Silent here used to mean «every version shows as «sborka»» with
                 // nothing in the logs to say why. Record it once per page.
                 store_debug(&format!("version-labels session failed: {error}"));
-                crate::diag_log::note("app", &format!("version labels unavailable: {error}"));
+                if should_report_label_failure(&error) {
+                    crate::diag_log::note(
+                        "app",
+                        &format!("version labels unavailable (fallback to ipatool): {error}"),
+                    );
+                }
                 return labels;
             }
         }

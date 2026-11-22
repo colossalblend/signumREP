@@ -134,6 +134,16 @@ class AnisetteClient(private val store: SettingsStore) {
             st = loadOrCreate()
         }
         return runCatching { fetchV3Headers(st) }.getOrElse { first ->
+            // Таймаут или обрыв сети — это не испорченная регистрация. Раньше
+            // после 45 с ожидания get_headers регистрацию стирали и заводили
+            // заново (новая «машина» для Apple), а если сервер так и не
+            // отвечал, она терялась насовсем. Повторяем один раз и уходим на
+            // запасной путь, не трогая сохранённый adi_pb.
+            if (first is java.io.IOException) {
+                return runCatching { fetchV3Headers(st) }.getOrElse {
+                    fetchLegacyHeaders(st)
+                }
+            }
             runCatching {
                 if (!st.provisioned()) error(first)
                                                
@@ -177,7 +187,10 @@ class AnisetteClient(private val store: SettingsStore) {
             .header("Content-Type", "application/json")
             .post(payload.toRequestBody("application/json".toMediaType()))
             .build()
-        Http.appleFollow.newCall(req).execute().use { resp ->
+        // Сервер отвечает за доли секунды; общие 45 с чтения клиента Apple
+        // держали вход почти минуту, прежде чем сработал запасной путь.
+        val client = Http.appleFollow.newBuilder().callTimeout(20, TimeUnit.SECONDS).build()
+        client.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             val obj = Json.parseToJsonElement(body).jsonObject
             if (obj["result"]?.jsonPrimitive?.content == "GetHeadersError") {

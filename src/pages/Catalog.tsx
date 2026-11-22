@@ -133,6 +133,10 @@ export default function Catalog() {
   const [versionsLoadingMore, setVersionsLoadingMore] = useState(false);
   const [iosLoadingIds, setIosLoadingIds] = useState<Set<string>>(new Set());
   const [versionsError, setVersionsError] = useState("");
+  // Ошибка последнего нажатия «Установить»/«Скачать файл». Показывается прямо
+  // под кнопками: текст в блоке версий был вне экрана, и нажатие выглядело
+  // так, будто ничего не произошло.
+  const [actionError, setActionError] = useState("");
   const [versionsHasMore, setVersionsHasMore] = useState(false);
   const [versionsTotal, setVersionsTotal] = useState(0);
   const [chosenVersion, setChosenVersion] = useState<AppStoreVersion | null>(null);
@@ -396,6 +400,7 @@ export default function Catalog() {
     setAppStoreVersions([]);
     setChosenVersion(null);
     setVersionsError("");
+    setActionError("");
     setVersionsLoading(false);
     setVersionsVisibleCount(VERSIONS_PAGE);
     setRestoreVisibleCount(VERSIONS_PAGE);
@@ -466,6 +471,7 @@ export default function Catalog() {
     setVersionsLoadingMore(false);
     setIosLoadingIds(new Set());
     setVersionsError("");
+    setActionError("");
     setAppStoreVersions([]);
     setChosenVersion(null);
     setVersionsHasMore(false);
@@ -541,16 +547,24 @@ export default function Catalog() {
     }
   }
 
+  // Happ без версии в покупках ставится/скачивается через временную смену
+  // страны на США. Ошибка списка версий тут не помеха: для Happ это обычно
+  // «you must purchase this app first», то есть ровно этот случай.
+  function happNeedsTemporaryUsRegion(selected: CatalogInstallOffer, confirmed: boolean) {
+    return selected.app_store_id === HAPP_APP_STORE_ID
+      && !confirmed
+      && !versionsLoading
+      && appStoreVersions.length === 0;
+  }
+
   async function queueInstall(selected: CatalogInstallOffer) {
     logUi("нажал «Установить на iPhone»",
       `${selected.title} · версия ${chosenVersion?.version ?? selected.version} · источник ${selected.source}`);
+    setActionError("");
     const versionConfirmedOnAccount = selected.source === "restore" || chosenVersion?.alreadyOwned === true;
-    const temporaryUsRegion = selected.app_store_id === HAPP_APP_STORE_ID
-      && !versionsLoading
-      && !versionsError
-      && appStoreVersions.length === 0;
+    const temporaryUsRegion = happNeedsTemporaryUsRegion(selected, versionConfirmedOnAccount);
     if (!temporaryUsRegion && !versionConfirmedOnAccount) {
-      setVersionsError("На этом Apple ID нет подтверждённой версии для установки. Откройте другой Apple ID или обновите список версий.");
+      setActionError("На этом Apple ID нет подтверждённой версии для установки. Откройте другой Apple ID или обновите список версий.");
       return;
     }
     if (temporaryUsRegion && !window.confirm(
@@ -575,7 +589,7 @@ export default function Catalog() {
     } catch (e) {
       // Без этого ошибка очереди уходила в необработанный reject, а окно
       // молча оставалось открытым.
-      setVersionsError(errorMessage(e));
+      setActionError(errorMessage(e));
       return;
     } finally {
       queueBusyRef.current = false;
@@ -604,11 +618,19 @@ export default function Catalog() {
   async function queueExport(selected: CatalogInstallOffer) {
     logUi("нажал «Скачать файл»",
       `${selected.title} · версия ${chosenVersion?.version ?? selected.version} · источник ${selected.source}`);
+    setActionError("");
     const versionConfirmedOnAccount = selected.source === "restore" || chosenVersion?.alreadyOwned === true;
-    if (!versionConfirmedOnAccount) {
-      setVersionsError("На этом Apple ID нет подтверждённой версии для скачивания. Откройте другой Apple ID или обновите список версий.");
+    // Кнопка для Happ активна и без версии в покупках (как и «Установить»),
+    // но раньше здесь не было его ветки с временной сменой страны: нажатие
+    // молча упиралось в проверку ниже, и ipatool не запускался вовсе.
+    const temporaryUsRegion = happNeedsTemporaryUsRegion(selected, versionConfirmedOnAccount);
+    if (!temporaryUsRegion && !versionConfirmedOnAccount) {
+      setActionError("На этом Apple ID нет подтверждённой версии для скачивания. Откройте другой Apple ID или обновите список версий.");
       return;
     }
+    if (temporaryUsRegion && !window.confirm(
+      "Happ пока нет в покупках этого Apple ID. Скачивание временно сменит страну магазина на США и сразу после загрузки вернёт вашу страну обратно.\n\nЕсли на счету Apple ID есть деньги, сменить страну не получится — проверьте баланс заранее.\n\nПродолжить?",
+    )) return;
     if (queueBusyRef.current) return;
     queueBusyRef.current = true;
     setQueueBusy(true);
@@ -622,9 +644,10 @@ export default function Catalog() {
         version: chosenVersion?.version ?? selected.version,
         external_version_id: chosenVersion?.externalVersionId,
         already_owned: versionConfirmedOnAccount,
+        temporary_us_region: temporaryUsRegion,
       }});
     } catch (e) {
-      setVersionsError(errorMessage(e));
+      setActionError(errorMessage(e));
       return;
     } finally {
       queueBusyRef.current = false;
@@ -1573,6 +1596,9 @@ export default function Catalog() {
                 <Download size={15} />
                 {versionsLoading ? "Загружаем версии…" : "Скачать файл"}
               </button>
+              {actionError && (
+                <p role="alert" className="text-xs leading-5 text-rose-300 whitespace-pre-line">{actionError}</p>
+              )}
               {offerBankAlt && (
                 <button
                   type="button"
