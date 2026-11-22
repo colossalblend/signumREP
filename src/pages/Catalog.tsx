@@ -1014,7 +1014,7 @@ export default function Catalog() {
                   <h2 className="flex items-center gap-2 text-lg font-bold tracking-tight text-white">
                     <Star size={16} className="fill-amber-300 text-amber-300" />Избранное
                   </h2>
-                  <span className="text-[11px] text-slate-600">{favoriteApps.length}</span>
+                  <span className="section-count">{favoriteApps.length}</span>
                 </div>
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4">
                   {favoriteApps.map(app => (
@@ -1037,7 +1037,7 @@ export default function Catalog() {
                 <section key={section.id}>
                   <div className="mb-4 flex items-end justify-between gap-3">
                     <h2 className="text-lg font-bold tracking-tight text-white">{section.title}</h2>
-                    <span className="text-[11px] text-slate-600">{section.apps.length}</span>
+                    <span className="section-count">{section.apps.length}</span>
                   </div>
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4">
                     {section.apps.map(app => (
@@ -1077,9 +1077,11 @@ export default function Catalog() {
       </div>
 
       {effectiveSearchQuery.trim().length >= 2 && (
-        <section className="mt-12 border-t border-white/[0.06] pt-8">
+        <section className="mt-12 border-t border-subtle pt-8">
           <div className="mb-4 flex items-end justify-between gap-3">
-            <h2 className="text-lg font-bold tracking-tight text-white">Результаты App Store</h2>
+            <h2 className="flex items-center gap-2 text-lg font-bold tracking-tight text-white">
+              <Store size={16} className="text-brand-300" />Результаты App Store
+            </h2>
             {storeSearching && <span className="inline-flex items-center gap-2 pb-0.5 text-xs text-slate-500"><LoaderCircle size={14} className="animate-spin text-brand-300" />Ищем…</span>}
           </div>
           <StoreSearch

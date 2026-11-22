@@ -119,7 +119,7 @@ function StoreHitCard({ hit, onClick, dataTour }: {
       type="button"
       data-tour={dataTour}
       onClick={onClick}
-      className="panel group relative min-h-[270px] overflow-hidden p-5 text-left transition duration-300 hover:-translate-y-1 hover:border-white/[0.13] hover:bg-white/[0.055]"
+      className="panel app-card group"
     >
       <div className="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full bg-brand-500 opacity-20 blur-3xl transition group-hover:opacity-35" />
       <div className="flex items-start justify-between gap-3">
@@ -145,11 +145,14 @@ function StoreHitCard({ hit, onClick, dataTour }: {
           </span>
         )}
       </div>
-      <div className="mt-6">
-        <h3 className="line-clamp-2 text-lg font-bold tracking-tight text-white">{hit.name}</h3>
+      <div className="mt-6 pb-10">
+        <h3 className="line-clamp-2 text-lg font-bold leading-snug tracking-tight text-white">{hit.name}</h3>
         {hit.publisher.trim() && <p className="mt-1 truncate text-xs text-slate-500">{hit.publisher.trim()}</p>}
       </div>
-      <span className="absolute bottom-5 right-5 grid h-8 w-8 place-items-center rounded-lg bg-white/[0.055] text-brand-300 transition group-hover:bg-brand-500 group-hover:text-white"><ArrowUpRight size={15} /></span>
+      <span className="absolute bottom-5 left-5 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+        <Store size={11} />App Store
+      </span>
+      <span className="card-corner-btn absolute bottom-5 right-5 bg-white/[0.055] text-brand-300 group-hover:bg-brand-500 group-hover:text-white group-focus-visible:bg-brand-500 group-focus-visible:text-white"><ArrowUpRight size={15} className="transition-transform duration-200 group-hover:-translate-y-px group-hover:translate-x-px" /></span>
     </button>
   );
 }
@@ -157,10 +160,10 @@ function StoreHitCard({ hit, onClick, dataTour }: {
 /** Заглушка карточки на время первого поиска — той же высоты, что настоящая. */
 function CardSkeleton() {
   return (
-    <div aria-hidden className="panel min-h-[270px] animate-pulse p-5">
-      <div className="h-[78px] w-[78px] rounded-[20px] bg-white/[0.06]" />
-      <div className="mt-8 h-4 w-3/4 rounded bg-white/[0.06]" />
-      <div className="mt-2 h-3 w-1/2 rounded bg-white/[0.04]" />
+    <div aria-hidden className="panel min-h-[264px] animate-pulse p-5">
+      <div className="h-[78px] w-[78px] rounded-[20px] bg-slate-400/15" />
+      <div className="mt-8 h-4 w-3/4 rounded bg-slate-400/15" />
+      <div className="mt-2 h-3 w-1/2 rounded bg-slate-400/10" />
     </div>
   );
 }
