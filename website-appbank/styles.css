@@ -434,3 +434,11 @@ html:not(.js) .checksums[open] .checksums-chevron { transform: rotate(225deg) tr
   .checksum { grid-template-columns: 22px minmax(0, 1fr); }
   .checksum-copy { grid-column: 2; grid-row: auto; justify-self: start; margin-top: 4px; }
 }
+
+.mac-help summary .bi-apple { font-size: 17px; color: var(--ink-2); }
+.mac-help .mac-steps { display: grid; gap: 8px; margin-top: 14px; padding-left: 22px; list-style: decimal; color: var(--ink-2); font-size: 14px; line-height: 1.5; }
+.mac-help .mac-steps li::marker { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.mac-help .mac-steps b { color: var(--ink); font-weight: 600; }
+.mac-help .mac-command { margin-top: 10px; }
+.mac-help.is-open .mac-command { opacity: 1; transform: none; transition-delay: .4s; }
+.mac-help .mac-steps + .checksums-note { margin-top: 14px; }

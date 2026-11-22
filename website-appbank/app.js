@@ -392,6 +392,38 @@
     window.addEventListener("resize", onScroll);
   }
 
+  // Подсказка «как открыть на Mac»: на macOS раскрыта сразу, а также после
+  // нажатия на загрузку для macOS. Кнопки [data-copy] копируют свой текст.
+  function initMacHelp(platform) {
+    var help = document.getElementById("mac-help");
+    if (help && platform === "macos") help.open = true;
+    $all(document, "[data-copy]").forEach(function (button) {
+      var timer = 0;
+      button.addEventListener("click", function () {
+        var label = button.querySelector("span");
+        copyText(button.getAttribute("data-copy") || "").then(function () {
+          button.classList.add("is-done");
+          if (label) label.textContent = "Скопировано";
+          window.clearTimeout(timer);
+          timer = window.setTimeout(function () {
+            button.classList.remove("is-done");
+            if (label) label.textContent = "Копировать";
+          }, 1800);
+        }).catch(function () {});
+      });
+    });
+    $all(document, '[data-download-link="macos"], [data-picker-download-link="macos"]').forEach(function (link) {
+      link.addEventListener("click", function () {
+        if (!help || help.classList.contains("is-open")) return;
+        var summary = help.querySelector("summary");
+        window.setTimeout(function () {
+          if (summary) summary.click();
+          help.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
+        }, 600);
+      });
+    });
+  }
+
   function initFaq() {
     $all(document, ".faq-item, .checksums").forEach(function (details) {
       var summary = details.querySelector("summary");
@@ -649,6 +681,7 @@
     initMobileNav();
     initReveal();
     initScrollScenes();
+    initMacHelp(platform);
     initFaq();
     initPlatformPicker();
     initDemo();

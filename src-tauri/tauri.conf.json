@@ -69,7 +69,8 @@
         "applicationFolderPosition": {
           "x": 480,
           "y": 220
-        }
+        },
+        "background": "icons/dmg/background.png"
       }
     }
   }
