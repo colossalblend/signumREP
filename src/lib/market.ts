@@ -73,59 +73,135 @@ export function minPrice(app: MarketApp): number {
 }
 
 // ───────────────────────── Тестовый каталог ─────────────────────────
-// Заменяется ответом сервера, когда он появится.
+// Заменяется ответом сервера, когда он появится. У продавца один id на все
+// приложения — это его аккаунт в Маркете; по нему работает фильтр.
 
-function seller(id: string, name: string, price: number, rating: number, sales: number, storefront = "RU"): MarketSeller {
-  return { id, name, price, rating, sales, storefront };
+const SELLERS = {
+  appbank: { name: "AppBank", rating: 4.9, storefront: "RU" },
+  istore: { name: "iStore TR", rating: 4.7, storefront: "TR" },
+  fast: { name: "FastInstall", rating: 4.8, storefront: "RU" },
+  safe: { name: "SafeInstall", rating: 4.6, storefront: "RU" },
+  usa: { name: "US Apps", rating: 4.5, storefront: "US" },
+} as const;
+type SellerKey = keyof typeof SELLERS;
+
+function seller(key: SellerKey, price: number, sales: number): MarketSeller {
+  return { id: key, ...SELLERS[key], price, sales };
 }
 
 export const TEST_MARKET_APPS: MarketApp[] = [
   {
     id: "vk", title: "ВКонтакте", bundle_id: "com.vk.vkclient", app_store_id: "564177498",
     developer: "VK", category: "social", color: "#0077ff", min_ios: "15.0",
-    sellers: [
-      seller("vk-a", "AppBank", 149, 4.9, 1280),
-      seller("vk-b", "iStore TR", 129, 4.7, 540, "TR"),
-      seller("vk-c", "FastInstall", 199, 4.8, 210),
-    ],
+    sellers: [seller("appbank", 149, 1280), seller("istore", 129, 540), seller("fast", 199, 210)],
   },
   {
     id: "vk-video", title: "VK Видео", bundle_id: "com.vk.vkvideo", app_store_id: "1446471760",
     developer: "VK", category: "media", color: "#0077ff", min_ios: "15.0",
-    sellers: [seller("vkv-a", "AppBank", 149, 4.9, 410)],
+    sellers: [seller("appbank", 149, 410)],
   },
   {
     id: "tbank", title: "Т-Банк", bundle_id: "com.tcsbank.ib", app_store_id: "488573820",
     developer: "Tbank", category: "finance", color: "#ffdd2d", min_ios: "15.0",
-    sellers: [
-      seller("tb-a", "AppBank", 199, 4.9, 2300),
-      seller("tb-b", "SafeInstall", 179, 4.6, 870),
-    ],
+    sellers: [seller("appbank", 199, 2300), seller("safe", 179, 870)],
   },
   {
     id: "sber", title: "СберБанк Онлайн", bundle_id: "ru.sberbankmobile", app_store_id: "492224193",
     developer: "Sberbank", category: "finance", color: "#21a038", min_ios: "15.0",
-    sellers: [seller("sb-a", "AppBank", 199, 4.9, 1950)],
+    sellers: [seller("appbank", 199, 1950), seller("safe", 189, 640), seller("usa", 219, 95)],
+  },
+  {
+    id: "alfa", title: "Альфа-Банк", bundle_id: "ru.alfabank.mobile.iphone", app_store_id: "1453826808",
+    developer: "Alfa-Bank", category: "finance", color: "#ef3124", min_ios: "15.0",
+    sellers: [seller("appbank", 199, 1120), seller("fast", 209, 300)],
+  },
+  {
+    id: "vtb", title: "ВТБ Онлайн", bundle_id: "ru.vtb24.mobilebanking", app_store_id: "1466457427",
+    developer: "VTB", category: "finance", color: "#0a2973", min_ios: "15.0",
+    sellers: [seller("safe", 179, 520)],
   },
   {
     id: "happ", title: "Happ - Proxy Utility", bundle_id: "com.happproxy", app_store_id: "6504287215",
     developer: "Happ", category: "utilities", color: "#5b6cf0", min_ios: "15.0",
-    sellers: [
-      seller("hp-a", "AppBank", 99, 4.8, 320),
-      seller("hp-b", "iStore TR", 89, 4.5, 180, "TR"),
-    ],
+    sellers: [seller("appbank", 99, 320), seller("istore", 89, 180), seller("usa", 79, 60)],
   },
   {
     id: "max", title: "MAX", bundle_id: "ru.oneme.app", app_store_id: "6480873435",
     developer: "VK", category: "messenger", color: "#2d7bff", min_ios: "15.0",
-    sellers: [seller("max-a", "AppBank", 129, 4.7, 140)],
+    sellers: [seller("appbank", 129, 140), seller("fast", 119, 70)],
+  },
+  {
+    id: "vk-music", title: "VK Музыка", bundle_id: "com.uma.musicvk", app_store_id: "1534578419",
+    developer: "VK", category: "media", color: "#ff3347", min_ios: "15.0",
+    sellers: [seller("istore", 119, 230)],
   },
 ];
 
-export function searchMarket(apps: MarketApp[], query: string, category: MarketCategory | "all"): MarketApp[] {
-  const q = query.trim().toLowerCase();
-  return apps.filter(app => {
-    if (category !== "all" && app.category !== category) return false;
+/** Продавец в целом по Маркету — для ленты фильтра. */
+export interface MarketSellerSummary {
+  id: string;
+  name: string;
+  rating: number;
+  storefront: string;
+  apps: number;
+  sales: number;
+  minPrice: number;
+}
+
+export function marketSellers(apps: MarketApp[]): MarketSellerSummary[] {
+  const byId = new Map<string, MarketSellerSummary>();
+  for (const app of apps) {
+    for (const s of app.sellers) {
+      const cur = byId.get(s.id);
+      if (cur) {
+        cur.apps += 1;
+        cur.sales += s.sales;
+        cur.minPrice = Math.min(cur.minPrice, s.price);
+      } else {
+        byId.set(s.id, { id: s.id, name: s.name, rating: s.rating, storefront: s.storefront, apps: 1, sales: s.sales, minPrice: s.price });
+      }
+    }
+  }
+  return [...byId.values()].sort((a, b) => b.sales - a.sales);
+}
+
+export type MarketSort = "popular" | "price_asc" | "price_desc" | "rating";
+
+export const MARKET_SORTS: { id: MarketSort; label: string }[] = [
+  { id: "popular", label: "Популярные" },
+  { id: "price_asc", label: "Сначала дешевле" },
+  { id: "price_desc", label: "Сначала дороже" },
+  { id: "rating", label: "По рейтингу продавцов" },
+];
+
+export interface MarketFilter {
+  query: string;
+  category: MarketCategory | "all";
+  /** Пусто — все продавцы. */
+  sellerIds: string[];
+  /** Верхняя граница цены в рублях; 0 — без ограничения. */
+  maxPrice: number;
+  sort: MarketSort;
+}
+
+export const EMPTY_FILTER: MarketFilter = { query: "", category: "all", sellerIds: [], maxPrice: 0, sort: "popular" };
+
+/** Продавцы приложения с учётом фильтра по продавцам и цене. */
+export function matchingSellers(app: MarketApp, filter: Pick<MarketFilter, "sellerIds" | "maxPrice">): MarketSeller[] {
+  return app.sellers.filter(s =>
+    (filter.sellerIds.length === 0 || filter.sellerIds.includes(s.id))
+    && (filter.maxPrice === 0 || s.price <= filter.maxPrice));
+}
+
+function totalSales(app: MarketApp): number {
+  return app.sellers.reduce((sum, s) => sum + s.sales, 0);
+}
+
+export function filterMarket(apps: MarketApp[], filter: MarketFilter): MarketApp[] {
+  const q = filter.query.trim().toLowerCase();
+  const list = apps.filter(app => {
+    if (filter.category !== "all" && app.category !== filter.category) return false;
+    if (matchingSellers(app, filter).length === 0) return false;
     if (!q) return true;
     return (
       app.title.toLowerCase().includes(q) ||
@@ -134,6 +210,28 @@ export function searchMarket(apps: MarketApp[], query: string, category: MarketC
       app.app_store_id.includes(q)
     );
   });
+  const price = (app: MarketApp) => Math.min(...matchingSellers(app, filter).map(s => s.price));
+  const rating = (app: MarketApp) => Math.max(...matchingSellers(app, filter).map(s => s.rating));
+  switch (filter.sort) {
+    case "price_asc": return list.sort((a, b) => price(a) - price(b));
+    case "price_desc": return list.sort((a, b) => price(b) - price(a));
+    case "rating": return list.sort((a, b) => rating(b) - rating(a));
+    default: return list.sort((a, b) => totalSales(b) - totalSales(a));
+  }
+}
+
+/** Цвет аватара продавца — стабильный по имени. */
+export function sellerHue(name: string): number {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}
+
+export function pluralRu(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
 }
 
 // ───────────────────────── Поток покупки и установки ─────────────────────────
