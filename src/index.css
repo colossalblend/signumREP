@@ -1508,3 +1508,181 @@ html.light .market-success-core { color: #047857; background: #d1fae5; }
   .market-backdrop.is-closing .market-sheet { animation: none !important; }
   .market-seller:hover, .market-row:hover, .app-card:hover .market-card-icon { transform: none; }
 }
+
+/* ── Установщик (SignumSetup.exe, окно 420×540) ─────────────────────────────
+   Иконка в кольце прогресса — главный элемент на всех экранах: пустое кольцо
+   на приветствии, заполняется при установке, зелёное с галочкой в конце.
+   Экраны сменяются короткой анимацией; «Меньше движения» её отключает. */
+.setup-shell { position: relative; overflow: hidden; }
+.setup-backdrop {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 260px;
+  pointer-events: none;
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--app-text) 20%, transparent) 1px, transparent 1.2px);
+  background-size: 14px 14px;
+  mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
+  opacity: 0.35;
+}
+
+@keyframes setup-enter { from { opacity: 0; transform: translateY(10px) scale(0.98); } }
+@keyframes setup-page { from { opacity: 0; transform: translateY(8px); } }
+@keyframes setup-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+@keyframes setup-pop {
+  0% { transform: scale(0.3); opacity: 0; }
+  60% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); }
+}
+@keyframes setup-draw { from { stroke-dashoffset: 30; } }
+@keyframes setup-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.6); opacity: 0.6; }
+}
+@keyframes setup-spin { to { transform: rotate(360deg); } }
+@keyframes setup-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+
+.setup-enter { animation: setup-enter 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.setup-page { animation: setup-page 0.32s 0.04s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.setup-message { animation: setup-page 0.25s ease-out both; }
+
+.setup-ring { position: relative; width: 112px; height: 112px; }
+.setup-ring > svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.setup-ring-track { fill: none; stroke: color-mix(in srgb, var(--app-text) 8%, transparent); stroke-width: 4; }
+.setup-ring-value {
+  fill: none;
+  stroke: #5b6cf0;
+  stroke-width: 4;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.45s cubic-bezier(0.4, 0, 0.2, 1), stroke 0.3s ease;
+}
+.setup-ring.is-idle .setup-ring-value { opacity: 0; }
+.setup-ring.is-done .setup-ring-value { stroke: #34d399; }
+.setup-ring.is-error .setup-ring-value { stroke: #fb7185; }
+.setup-ring.is-busy > svg { animation: setup-spin 6s linear infinite; }
+.setup-ring-icon {
+  position: absolute;
+  inset: 26px;
+  width: 60px;
+  height: 60px;
+  object-fit: contain;
+  filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.35));
+}
+.setup-ring.is-idle .setup-ring-icon { animation: setup-float 4s ease-in-out infinite; }
+.setup-ring.is-error .setup-ring-icon { animation: setup-shake 0.35s ease-in-out 2; }
+.setup-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 99px;
+  color: #fff;
+  box-shadow: 0 0 0 3px var(--app-bg);
+  animation: setup-pop 0.42s 0.1s cubic-bezier(0.3, 1.4, 0.5, 1) both;
+}
+.setup-badge svg { width: 15px; height: 15px; }
+.setup-badge.is-ok { background: #10b981; }
+.setup-badge.is-ok path { stroke-dasharray: 30; animation: setup-draw 0.35s 0.35s ease-out both; }
+.setup-badge.is-error { background: #e11d48; }
+
+.setup-version {
+  border-radius: 99px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-muted);
+  background: color-mix(in srgb, var(--app-text) 6%, transparent);
+  border: 1px solid var(--app-border);
+}
+
+.setup-card {
+  border-radius: 16px;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
+  padding: 4px;
+}
+.setup-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 8px 12px;
+  border-radius: 12px;
+}
+button.setup-row { width: 100%; text-align: left; cursor: pointer; transition: background-color 0.15s ease; }
+button.setup-row:hover { background: color-mix(in srgb, var(--app-text) 4%, transparent); }
+.setup-row + .setup-row { border-top: 1px solid var(--app-border); border-radius: 0; }
+.setup-row-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  color: #a5b4fc;
+  background: rgba(91, 108, 240, 0.14);
+}
+html.light .setup-row-icon { color: #4338ca; background: #eef2ff; }
+
+.setup-cta { padding-top: 12px; padding-bottom: 12px; font-size: 15px; transition: filter 0.15s ease, transform 0.12s ease; }
+.setup-cta:active { transform: scale(0.98); }
+
+.setup-stage {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--app-muted);
+  transition: color 0.25s ease;
+}
+.setup-stage + .setup-stage { border-top: 1px solid var(--app-border); }
+.setup-stage.is-active { color: var(--app-text); font-weight: 600; }
+.setup-stage.is-done { color: var(--app-text); }
+.setup-stage-dot {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 99px;
+  border: 1.5px solid color-mix(in srgb, var(--app-text) 18%, transparent);
+  transition: background-color 0.25s ease, border-color 0.25s ease, color 0.25s ease;
+}
+.setup-stage.is-active .setup-stage-dot { border-color: #818cf8; }
+.setup-stage.is-done .setup-stage-dot { border-color: transparent; background: #10b981; color: #fff; }
+.setup-stage.is-done .setup-stage-dot svg { animation: setup-pop 0.32s cubic-bezier(0.3, 1.4, 0.5, 1) both; }
+.setup-stage-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  background: #818cf8;
+  animation: setup-pulse 1.2s ease-in-out infinite;
+}
+
+.setup-error {
+  display: flex;
+  gap: 10px;
+  max-height: 120px;
+  overflow-y: auto;
+  border-radius: 14px;
+  border: 1px solid rgba(251, 113, 133, 0.25);
+  background: rgba(251, 113, 133, 0.07);
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #fda4af;
+}
+html.light .setup-error { color: #be123c; background: #fff1f2; }
+
+@media (prefers-reduced-motion: reduce) {
+  .setup-enter, .setup-page, .setup-message, .setup-ring > svg, .setup-ring-icon, .setup-badge,
+  .setup-badge path, .setup-stage-dot svg, .setup-stage-pulse { animation: none !important; }
+}

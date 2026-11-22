@@ -1,6 +1,7 @@
 # Dependencies & build
 node_modules/
 frontend-dist/
+setup-dist/
 src-tauri/target/
 dist/
 build/
