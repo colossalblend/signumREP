@@ -415,51 +415,99 @@ fn delete_custom_cert_password(name: &str) {
 }
 
                                                                                   
-fn wait_for_signing_2fa_code(
+/// Ждём код 2FA из окна Signum (Signing2faGate).
+///
+/// Асинхронно: раньше ожидание блокировало поток рантайма на три минуты.
+/// В ответ можно прислать код, `__resend__` (ещё раз), `__sms__` (прислать SMS)
+/// или пустую строку — отмена.
+async fn wait_for_signing_2fa_code(
     app: &tauri::AppHandle,
-    sms: bool,
+    params: &isideload::auth::apple_account::TwoFactorCallbackParams,
 ) -> isideload::auth::apple_account::TwoFactorCallbackResponse {
     use isideload::auth::apple_account::TwoFactorCallbackResponse;
     use tauri::{Emitter, Manager};
 
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    if let Some(state) = app.try_state::<crate::AppState>() {
-        if let Ok(mut slot) = state.signing_2fa_reply.lock() {
-            *slot = Some(tx);
-        }
-    } else {
-        return TwoFactorCallbackResponse::Abort;
+    let first_number = params
+        .selected_number_id
+        .or_else(|| params.numbers.first().map(|n| n.id));
+
+    // Apple не сказала, каким способом подтверждать (прошлый способ не
+    // сработал): код ввести некуда, поэтому сразу выбираем доставку.
+    if params.unknown {
+        return match first_number {
+            Some(id) => TwoFactorCallbackResponse::SendSms(id),
+            None => TwoFactorCallbackResponse::SendToDevices,
+        };
     }
 
-    let message = if sms {
-        "Apple отправил SMS. Введите 6-значный код."
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    match app.try_state::<crate::AppState>() {
+        Some(state) => {
+            if let Ok(mut slot) = state.signing_2fa_reply.lock() {
+                *slot = Some(tx);
+            }
+        }
+        None => return TwoFactorCallbackResponse::Abort,
+    }
+
+    let phone_hint = params
+        .numbers
+        .iter()
+        .find(|n| Some(n.id) == params.selected_number_id)
+        .or_else(|| params.numbers.first())
+        .map(|n| n.number_with_dial_code.clone());
+    let mut message = if params.sms {
+        match &phone_hint {
+            Some(phone) => format!("Apple отправил SMS на {phone}. Введите 6-значный код."),
+            None => "Apple отправил SMS. Введите 6-значный код.".to_string(),
+        }
     } else {
-        "Apple отправил код на iPhone. Введите 6 цифр."
+        "Apple отправил код на iPhone. Введите 6 цифр.".to_string()
     };
+    if params.last_error.is_some() {
+        message = format!("Код не подошёл или устарел. {message}");
+    }
     let _ = app.emit(
         "signing-2fa-required",
         serde_json::json!({
             "message": message,
-            "sms": sms,
+            "sms": params.sms,
+            "can_sms": first_number.is_some() && !params.sms,
+            "retry": params.last_error.is_some(),
         }),
     );
 
-    match rx.recv_timeout(Duration::from_secs(180)) {
-        Ok(code) if code == "__resend__" => TwoFactorCallbackResponse::ResendCode,
-        Ok(code) => {
-            let digits: String = code
-                .chars()
-                .filter(|c| c.is_ascii_digit())
-                .take(6)
-                .collect();
-            if digits.len() >= 6 {
+    let reply = tokio::time::timeout(Duration::from_secs(300), rx).await;
+    let response = match reply {
+        Ok(Ok(code)) if code == "__resend__" => TwoFactorCallbackResponse::ResendCode,
+        Ok(Ok(code)) if code == "__sms__" => match first_number {
+            Some(id) => TwoFactorCallbackResponse::SendSms(id),
+            None => TwoFactorCallbackResponse::ResendCode,
+        },
+        Ok(Ok(code)) => {
+            let digits = only_code_digits(&code);
+            if digits.len() == 6 {
                 TwoFactorCallbackResponse::SubmitCode(digits)
             } else {
                 TwoFactorCallbackResponse::Abort
             }
         }
-        Err(_) => TwoFactorCallbackResponse::Abort,
+        // Окно закрыли / время вышло.
+        _ => TwoFactorCallbackResponse::Abort,
+    };
+    if matches!(response, TwoFactorCallbackResponse::Abort) {
+        if let Some(state) = app.try_state::<crate::AppState>() {
+            if let Ok(mut slot) = state.signing_2fa_reply.lock() {
+                *slot = None;
+            }
+        }
+        let _ = app.emit("signing-2fa-closed", serde_json::json!({}));
     }
+    response
+}
+
+fn only_code_digits(code: &str) -> String {
+    code.chars().filter(|c| c.is_ascii_digit()).take(6).collect()
 }
 
 fn report_text(err: impl std::fmt::Display) -> String {
@@ -480,23 +528,33 @@ fn report_text(err: impl std::fmt::Display) -> String {
 
 fn map_sign_app_err(err: impl std::fmt::Display) -> String {
     let s = report_text(err);
-    let lower = s.to_ascii_lowercase();
-    if lower.contains("not enough available app id")
-        || (lower.contains("app id") && lower.contains("required") && lower.contains("available"))
-    {
-        return "SIGN_IPA_APP_ID_LIMIT: На этом Apple ID кончился лимит подписей — у бесплатного их 10. Включите «Удалить плагины» или войдите другим Apple ID.".into();
-    }
-    if lower.contains("8220")
-        || lower.contains("no devices from which to generate")
-        || lower.contains("team has no devices")
-        || (lower.contains("provisioning profile") && lower.contains("no device"))
-    {
-        return "SIGN_IPA_NO_TEAM_DEVICE: Для подписи Apple нужна хотя бы одна регистрация iPhone на этом Apple ID. Подключите iPhone кабелем, нажмите «Доверять» и повторите. Потом файл можно сохранять и без телефона.".into();
-    }
     if s.trim().is_empty() {
         return "SIGN_IPA_CERT_FAILED: Не удалось подписать файл. Повторите попытку или войдите другим Apple ID.".into();
     }
     map_isideload_err(s)
+}
+
+const APP_ID_LIMIT_TEXT: &str = "SIGN_IPA_APP_ID_LIMIT: На этом Apple ID кончился лимит App ID — бесплатный аккаунт даёт 10 штук на 7 дней, и каждое расширение внутри приложения занимает ещё один. Включите «Удалить плагины», подождите, пока старые App ID освободятся, или войдите другим Apple ID.";
+
+/// «Not enough available app IDs. 3 are required, but only 1 is available.»
+fn is_app_id_limit(lower: &str) -> bool {
+    lower.contains("not enough available app id")
+        || (lower.contains("app id") && lower.contains("required") && lower.contains("available"))
+        // 9401: «Cannot create more than 10 App IDs within 7 days» и т.п.
+        || lower.contains("maximum app id")
+        || (lower.contains("app ids") && lower.contains("7 days"))
+}
+
+/// Перехваченное TLS-соединение (антивирус с HTTPS-проверкой, корпоративный
+/// прокси). Это не про сертификат разработчика, хотя слово то же.
+fn is_tls_interception(lower: &str) -> bool {
+    lower.contains("invalid peer certificate")
+        || lower.contains("unknownissuer")
+        || lower.contains("unknown issuer")
+        || lower.contains("certificate verify failed")
+        || lower.contains("self signed certificate")
+        || lower.contains("self-signed certificate")
+        || lower.contains("badsignature")
 }
 
 /// Похоже ли на временный отказ Apple, который имеет смысл просто переждать.
@@ -526,10 +584,8 @@ fn has_status_code(text: &str, code: &str) -> bool {
 fn map_isideload_err(err: impl std::fmt::Display) -> String {
     let s = report_text(err);
     let lower = s.to_ascii_lowercase();
-    if lower.contains("not enough available app id")
-        || (lower.contains("app id") && lower.contains("required") && lower.contains("available"))
-    {
-        return "SIGN_IPA_APP_ID_LIMIT: На этом Apple ID кончился лимит подписей — у бесплатного их 10. Включите «Удалить плагины» или войдите другим Apple ID.".into();
+    if is_app_id_limit(&lower) {
+        return APP_ID_LIMIT_TEXT.into();
     }
     if lower.contains("8220")
         || lower.contains("no devices from which to generate")
@@ -541,13 +597,19 @@ fn map_isideload_err(err: impl std::fmt::Display) -> String {
     if lower.contains("2fa")
         || lower.contains("two-factor")
         || lower.contains("two factor")
-        || lower.contains("no 2fa code")
-        || lower.contains("abort")
+        || lower.contains("aborting")
     {
-        return "SIGN_IPA_DEV_LOGIN_FAILED: нужен код 2FA для Developer. Введите код в окне Signum (не только вход в «Аккаунт»).".into();
+        return "SIGN_IPA_DEV_LOGIN_FAILED: Apple ждёт код подтверждения (2FA). Введите его в окне Signum, которое появится во время подписи.".into();
     }
-    if lower.contains("password") || lower.contains("credential") || lower.contains("-22406") {
+    if lower.contains("-20101")
+        || lower.contains("-22406")
+        || lower.contains("password")
+        || lower.contains("credential")
+    {
         return "SIGN_IPA_DEV_LOGIN_FAILED: Apple не принял пароль. Выйдите и войдите снова в «Аккаунт».".into();
+    }
+    if is_tls_interception(&lower) {
+        return "SIGN_IPA_NETWORK: Защищённое соединение с Apple подменено — обычно это антивирус с проверкой HTTPS или прокси. Отключите проверку HTTPS (или добавьте Signum в исключения) и повторите.".into();
     }
     if lower.contains("anisette") {
         return "SIGN_IPA_DEV_LOGIN_FAILED: Apple не подтвердила этот компьютер. Проверьте интернет и повторите.".into();
@@ -556,12 +618,10 @@ fn map_isideload_err(err: impl std::fmt::Display) -> String {
     // не проблема пароля. Без этой ветки текст падал в общий случай и
     // показывался пользователю сырым дампом.
     if is_apple_outage(&lower) {
-        return "SIGN_IPA_DEV_LOGIN_FAILED: Apple временно не отвечает (сервис входа перегружен).                 Это не ошибка пароля — подождите несколько минут и повторите."
+        return "SIGN_IPA_DEV_LOGIN_FAILED: Apple временно не отвечает (сервис входа перегружен). Это не ошибка пароля — подождите несколько минут и повторите."
             .into();
     }
-    if lower.contains("team")
-        && (lower.contains("empty") || lower.contains("none") || lower.contains("no "))
-    {
+    if lower.contains("no developer teams") || lower.contains("no team selected") {
         return "SIGN_IPA_TEAM_NONE".into();
     }
     if lower.contains("appidname")
@@ -574,6 +634,23 @@ fn map_isideload_err(err: impl std::fmt::Display) -> String {
         || lower.contains("failed to add developer app group")
     {
         return "SIGN_IPA_CERT_FAILED: Apple не приняла имя приложения — обычно из-за кириллицы. Обновите Signum и повторите: имена подчищаются сами.".into();
+    }
+    // Сеть проверяем до «certificate»: обёртка «Failed to retrieve certificate
+    // identity» иначе выдавала обрыв связи за проблему сертификата.
+    // Apple was simply unreachable — the retry advice is about the network,
+    // not about the Apple ID.
+    if lower.contains("failed to fetch url bag")
+        || lower.contains("error sending request")
+        || lower.contains("connectionreset")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("dns error")
+        || lower.contains("timed out")
+    {
+        return "SIGN_IPA_NETWORK: Не удалось связаться с серверами Apple. Проверьте интернет или VPN и повторите попытку.".into();
+    }
+    if lower.contains("7460") || lower.contains("maximum number of certificates") {
+        return "SIGN_IPA_CERT_FAILED: на Apple ID уже выпущен максимум сертификатов разработки, и освободить место не удалось. Отзовите лишний сертификат на developer.apple.com (Certificates) или подождите и повторите.".into();
     }
     if lower.contains("certificate")
         || lower.contains("7252")
@@ -591,18 +668,6 @@ fn map_isideload_err(err: impl std::fmt::Display) -> String {
         || lower.contains("mismatched extension bundle")
     {
         return format!("SIGN_IPA_BUNDLE_INVALID: В приложении есть расширение с чужим идентификатором, Apple такой пакет не подписывает. Включите «Удалить плагины / extensions» в опциях подписи и повторите. {s}");
-    }
-    // Apple was simply unreachable — the retry advice is about the network,
-    // not about the Apple ID.
-    if lower.contains("failed to fetch url bag")
-        || lower.contains("error sending request")
-        || lower.contains("connectionreset")
-        || lower.contains("connection reset")
-        || lower.contains("connection refused")
-        || lower.contains("dns error")
-        || lower.contains("timed out")
-    {
-        return "SIGN_IPA_NETWORK: Не удалось связаться с серверами Apple. Проверьте интернет или VPN и повторите попытку.".into();
     }
     format!("SIGN_IPA_DEV_LOGIN_FAILED: {s}")
 }

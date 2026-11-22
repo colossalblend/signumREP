@@ -11,6 +11,7 @@ mod diag_log;
 mod history_secrets;
 mod ipa_inspect;
 mod pty_login;
+mod signing_profile;
 mod store_search;
 mod system_proxy;
 mod uninstall;
