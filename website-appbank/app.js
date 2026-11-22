@@ -143,7 +143,7 @@
           pack.version = fresh.version;
           if (fresh.download_url) pack.url = fresh.download_url;
           if (key === "linux") {
-            pack.debAvailable = fresh.deb_available === true && !!fresh.deb_download_url;
+            pack.debAvailable = !!fresh.deb_download_url && fresh.deb_available !== false;
             if (pack.debAvailable) pack.debUrl = fresh.deb_download_url;
           }
         });
