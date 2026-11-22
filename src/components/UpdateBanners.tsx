@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { LoaderCircle, LogIn, Sparkles, X } from "lucide-react";
+import { FolderOpen, LoaderCircle, LogIn, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { command, errorMessage } from "../lib/tauri";
@@ -19,6 +19,8 @@ export default function UpdateBanners() {
   const otaInFlight = useRef(false);
   const [legacyLogout, setLegacyLogout] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
+  // macOS: Signum открыт из «Загрузок» (App Translocation) или из образа .dmg.
+  const [locationHint, setLocationHint] = useState<string | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -43,6 +45,7 @@ export default function UpdateBanners() {
     // об этом узнают один раз и говорят человеку, почему он вышел.
     void command<boolean>("take_legacy_logout_notice").then(setLegacyLogout).catch(() => {});
     void command<boolean>("take_session_expired_notice").then(setSessionExpired).catch(() => {});
+    void command<string | null>("macos_install_location_hint").then(setLocationHint).catch(() => {});
   }, []);
 
   async function installAppUpdate() {
@@ -90,7 +93,7 @@ export default function UpdateBanners() {
     }
   }
 
-  if (!appUpdate && !otaUpdate && !legacyLogout && !sessionExpired) return null;
+  if (!appUpdate && !otaUpdate && !legacyLogout && !sessionExpired && !locationHint) return null;
 
   return (
     <div className="relative z-40 space-y-2 border-b border-white/[0.06] bg-[#0a1020]/95 px-4 py-3 backdrop-blur-xl">
@@ -102,6 +105,16 @@ export default function UpdateBanners() {
           actionLabel="Войти"
           onAction={() => { setSessionExpired(false); navigate("/account"); }}
           onDismiss={() => setSessionExpired(false)}
+        />
+      )}
+      {locationHint && (
+        <Banner
+          icon={<FolderOpen size={16} />}
+          title="Перенесите Signum в папку «Программы»"
+          text={locationHint}
+          actionLabel="Понятно"
+          onAction={() => setLocationHint(null)}
+          onDismiss={() => setLocationHint(null)}
         />
       )}
       {legacyLogout && (

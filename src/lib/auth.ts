@@ -54,7 +54,7 @@ export function formatAuthError(message: string): string {
     || lowered.includes("неверный пароль")
     || lowered.includes("неверный apple id")
   ) {
-    return text.includes("Технически:")
+    return text.includes("Технически:") || text.startsWith("Неверный пароль Apple ID")
       ? text
       : `Не удалось войти. Проверьте Apple ID и пароль.\n\n${text}`;
   }

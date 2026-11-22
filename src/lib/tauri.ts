@@ -114,8 +114,12 @@ function extractPath(raw: string): string | null {
   return unix ? unix[0] : null;
 }
 
+// Internal routing prefixes from the backend: never show them to the person,
+// wherever they ended up in the text (also in «подробные ошибки» mode).
+const INTERNAL_ERROR_MARKERS = /SIGNUM_(?:LOGIN_OPAQUE|APPLE_UNAVAILABLE|BAD_CREDENTIALS):\s*/g;
+
 function localizeError(message: string): string {
-  const raw = message.trim() || "Не удалось выполнить операцию";
+  const raw = message.replace(INTERNAL_ERROR_MARKERS, "").trim() || "Не удалось выполнить операцию";
   const signing = localizeSigningError(raw);
   if (signing) return signing;
   if (detailedErrorsEnabled) return stripRustPaths(raw) || raw;
