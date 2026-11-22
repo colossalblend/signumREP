@@ -14,6 +14,8 @@ export default function UpdateBanners() {
   const [otaBusy, setOtaBusy] = useState(false);
   const [otaPercent, setOtaPercent] = useState(0);
   const [otaError, setOtaError] = useState<string | null>(null);
+  const [appUpdateBusy, setAppUpdateBusy] = useState(false);
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
   const otaInFlight = useRef(false);
   const [legacyLogout, setLegacyLogout] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
@@ -44,18 +46,28 @@ export default function UpdateBanners() {
   }, []);
 
   async function installAppUpdate() {
-    if (!appUpdate) return;
-    await command<string>("enqueue_catalog_install", {
-      input: {
-        title: appUpdate.title,
-        bundle_id: appUpdate.bundle_id,
-        app_store_id: appUpdate.app_store_id,
-        in_store: appUpdate.in_store,
-        min_ios: appUpdate.min_ios,
-      },
-    });
-    setAppUpdate(null);
-    navigate("/installs");
+    if (!appUpdate || appUpdateBusy) return;
+    setAppUpdateBusy(true);
+    setAppUpdateError(null);
+    try {
+      await command<string>("enqueue_catalog_install", {
+        input: {
+          title: appUpdate.title,
+          bundle_id: appUpdate.bundle_id,
+          app_store_id: appUpdate.app_store_id,
+          in_store: appUpdate.in_store,
+          min_ios: appUpdate.min_ios,
+        },
+      });
+      setAppUpdate(null);
+      navigate("/installs");
+    } catch (e) {
+      // Раньше ошибка очереди терялась в необработанном reject, а баннер
+      // просто не реагировал на нажатие.
+      setAppUpdateError(errorMessage(e));
+    } finally {
+      setAppUpdateBusy(false);
+    }
   }
 
   async function runOtaInstall(update: OtaUpdateInfo) {
@@ -106,10 +118,11 @@ export default function UpdateBanners() {
         <Banner
           icon={<Sparkles size={16} />}
           title={`Доступно обновление ${appUpdate.title}`}
-          text={`${appUpdate.installed_version} → ${appUpdate.remote_version}`}
-          actionLabel="Обновить"
+          text={appUpdateError ?? `${appUpdate.installed_version} → ${appUpdate.remote_version}`}
+          actionLabel={appUpdateBusy ? "Ставим в очередь…" : appUpdateError ? "Повторить" : "Обновить"}
+          actionDisabled={appUpdateBusy}
           onAction={() => void installAppUpdate()}
-          onDismiss={() => setAppUpdate(null)}
+          onDismiss={() => { setAppUpdate(null); setAppUpdateError(null); }}
         />
       )}
       {otaUpdate && (

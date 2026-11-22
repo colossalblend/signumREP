@@ -137,6 +137,9 @@ export default function Catalog() {
   const [versionsTotal, setVersionsTotal] = useState(0);
   const [chosenVersion, setChosenVersion] = useState<AppStoreVersion | null>(null);
   const [fitBusy, setFitBusy] = useState(false);
+  // Двойной клик по «Установить»/«Скачать» ставил задачу в очередь дважды.
+  const [queueBusy, setQueueBusy] = useState(false);
+  const queueBusyRef = useRef(false);
 
   const [versionsVisibleCount, setVersionsVisibleCount] = useState(12);
   const [restoreVisibleCount, setRestoreVisibleCount] = useState(12);
@@ -422,6 +425,8 @@ export default function Catalog() {
   async function scanAppRestoreVersions(target: CatalogInstallOffer, force = false) {
     logUi(force ? "нажал «Обновить список»" : "нажал «Выбрать другую версию»", target.title);
     const appId = target.app_id;
+    // Ответ для окна, которое уже закрыли или сменили, не должен его перезаписать.
+    const request = offerRequestRef.current;
     setAppRestoreOpen(true);
     setRestoreVisibleCount(VERSIONS_PAGE);
     setRestoreVersionsSearch("");
@@ -437,17 +442,19 @@ export default function Catalog() {
           currentBundleId: target.bundle_id ?? null,
         },
       });
+      if (request !== offerRequestRef.current) return;
       setAppRestoreScan({
         ...scan,
         items: scan.items ?? [],
       });
     } catch (e) {
+      if (request !== offerRequestRef.current) return;
       setAppRestoreScan({
         items: [],
         message: errorMessage(e) || "Не удалось загрузить другие версии. Повторите попытку.",
       });
     } finally {
-      setDetailLoading(false);
+      if (request === offerRequestRef.current) setDetailLoading(false);
     }
   }
 
@@ -549,7 +556,12 @@ export default function Catalog() {
     if (temporaryUsRegion && !window.confirm(
       "Happ пока нет в покупках этого Apple ID. Установка временно сменит страну магазина на США и сразу после установки вернёт вашу страну обратно.\n\nЕсли на счету Apple ID есть деньги, сменить страну не получится — проверьте баланс заранее.\n\nПродолжить?",
     )) return;
-    const jobId = await command<string>("enqueue_catalog_install", { input: {
+    if (queueBusyRef.current) return;
+    queueBusyRef.current = true;
+    setQueueBusy(true);
+    let jobId: string;
+    try {
+      jobId = await command<string>("enqueue_catalog_install", { input: {
       title: selected.title,
       bundle_id: selected.bundle_id,
       app_store_id: selected.app_store_id,
@@ -559,7 +571,16 @@ export default function Catalog() {
       external_version_id: chosenVersion?.externalVersionId,
       already_owned: versionConfirmedOnAccount,
       temporary_us_region: temporaryUsRegion,
-    }});
+      }});
+    } catch (e) {
+      // Без этого ошибка очереди уходила в необработанный reject, а окно
+      // молча оставалось открытым.
+      setVersionsError(errorMessage(e));
+      return;
+    } finally {
+      queueBusyRef.current = false;
+      setQueueBusy(false);
+    }
                                                                                         
     const full = resolveAppActivation(apps.find(a => a.id === selected.app_id)?.activation);
     if (full) {
@@ -588,16 +609,27 @@ export default function Catalog() {
       setVersionsError("На этом Apple ID нет подтверждённой версии для скачивания. Откройте другой Apple ID или обновите список версий.");
       return;
     }
-    await command<string>("enqueue_catalog_export", { input: {
-      title: selected.title,
-      bundle_id: selected.bundle_id,
-      app_store_id: selected.app_store_id,
-      in_store: selected.in_store,
-      min_ios: selected.min_ios,
-      version: chosenVersion?.version ?? selected.version,
-      external_version_id: chosenVersion?.externalVersionId,
-      already_owned: versionConfirmedOnAccount,
-    }});
+    if (queueBusyRef.current) return;
+    queueBusyRef.current = true;
+    setQueueBusy(true);
+    try {
+      await command<string>("enqueue_catalog_export", { input: {
+        title: selected.title,
+        bundle_id: selected.bundle_id,
+        app_store_id: selected.app_store_id,
+        in_store: selected.in_store,
+        min_ios: selected.min_ios,
+        version: chosenVersion?.version ?? selected.version,
+        external_version_id: chosenVersion?.externalVersionId,
+        already_owned: versionConfirmedOnAccount,
+      }});
+    } catch (e) {
+      setVersionsError(errorMessage(e));
+      return;
+    } finally {
+      queueBusyRef.current = false;
+      setQueueBusy(false);
+    }
     setExportQueued(true);
     sessionStorage.setItem("signum-export-queued", "1");
     setOffer(null);
@@ -1515,7 +1547,7 @@ export default function Catalog() {
               <button
                 data-tour="sheet-install"
                 className="btn-primary w-full"
-                disabled={catalogActionDisabled || versionsLoading}
+                disabled={catalogActionDisabled || versionsLoading || queueBusy}
                 onClick={() => void queueInstall(offer)}
               >
                 <Smartphone size={15} />
@@ -1533,7 +1565,7 @@ export default function Catalog() {
                 /* Пока версии не загружены, скачивать нечего: подтверждённой
                    версии ещё нет, и задача повисала бы в очереди до конца
                    опроса — со стороны это выглядело зависанием. */
-                disabled={catalogActionDisabled || versionsLoading}
+                disabled={catalogActionDisabled || versionsLoading || queueBusy}
                 onClick={() => void queueExport(offer)}
               >
                 <Download size={15} />

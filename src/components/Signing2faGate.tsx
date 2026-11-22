@@ -16,7 +16,11 @@ export default function Signing2faGate() {
   const [hint, setHint] = useState("");
 
   useEffect(() => {
+    // Подписка приходит асинхронно: если эффект сняли раньше (StrictMode,
+    // быстрый размонтаж), отписываемся сразу по приходу — иначе слушатель
+    // оставался висеть и окно 2FA открывалось дважды.
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     void listen<{ message?: string; sms?: boolean }>("signing-2fa-required", event => {
       setMessage(
         event.payload?.message?.trim() ||
@@ -29,9 +33,11 @@ export default function Signing2faGate() {
       setResending(false);
       setBusy(false);
     }).then(fn => {
-      unlisten = fn;
-    });
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => {});
     return () => {
+      disposed = true;
       unlisten?.();
     };
   }, []);
