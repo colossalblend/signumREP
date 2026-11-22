@@ -227,6 +227,7 @@ export default function StoreSearch({
 
   const storeRequestRef = useRef(0);
   const devRequestRef = useRef(0);
+  const devAppsRequestRef = useRef(0);
   const versionsRequestRef = useRef(0);
   const versionsOffsetRef = useRef(0);
 
@@ -618,17 +619,21 @@ export default function StoreSearch({
   }
 
   async function showDeveloper(dev: StoreDeveloper) {
+    // Номер запроса: ответ по студии, которую уже закрыли или сменили на
+    // другую, не должен подменить её список приложений.
+    const request = ++devAppsRequestRef.current;
     setOpenDev(dev);
     setPicked(new Set());
     setDevApps([]);
     setDevAppsError("");
     setDevAppsLoading(true);
     try {
-      setDevApps(await developerApps(dev.artistId));
+      const apps = await developerApps(dev.artistId);
+      if (request === devAppsRequestRef.current) setDevApps(apps);
     } catch (e) {
-      setDevAppsError(errorMessage(e));
+      if (request === devAppsRequestRef.current) setDevAppsError(errorMessage(e));
     } finally {
-      setDevAppsLoading(false);
+      if (request === devAppsRequestRef.current) setDevAppsLoading(false);
     }
   }
 
@@ -691,7 +696,7 @@ export default function StoreSearch({
           <div className="panel flex items-center gap-4 p-4">
             <button
               type="button"
-              onClick={() => setOpenDev(null)}
+              onClick={() => { ++devAppsRequestRef.current; setOpenDev(null); setDevAppsLoading(false); }}
               className="shrink-0 rounded-lg p-2 text-slate-400 transition hover:bg-white/[0.06] hover:text-white"
               aria-label="Назад к поиску"
             >
