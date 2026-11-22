@@ -1,10 +1,3 @@
-/*
- * Signum landing.
- * Тёмная тема: графитовый фон, светлый текст, один фирменный синий из иконки,
- * моноширинные подписи и тонкие линейки. Анимации — только там,
- * где они что-то показывают, и все выключаются при prefers-reduced-motion.
- */
-
 :root {
   color-scheme: dark;
   --paper: #0e0f12;
@@ -53,7 +46,6 @@ img { display: block; max-width: 100%; height: auto; }
 .skip-link { position: absolute; z-index: 100; top: -60px; left: 16px; padding: 10px 14px; background: var(--ink); color: var(--paper); font-weight: 600; }
 .skip-link:focus { top: 12px; }
 
-/* ── Type ─────────────────────────────────────────────────────────────── */
 .label {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px;
   color: var(--muted); font-family: var(--mono); font-size: 12px; letter-spacing: .02em;
@@ -62,7 +54,6 @@ img { display: block; max-width: 100%; height: auto; }
 h2 { font-size: clamp(30px, 4.2vw, 52px); font-weight: 600; line-height: 1.05; letter-spacing: -.035em; text-wrap: balance; }
 h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015em; }
 
-/* ── Buttons ──────────────────────────────────────────────────────────── */
 .button {
   position: relative; display: inline-flex; min-height: 46px; align-items: center; justify-content: center; gap: 10px;
   padding: 0 20px; border: 1px solid transparent; border-radius: 999px;
@@ -83,7 +74,6 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 .button-paper:hover { background: var(--card); }
 .button.is-disabled { opacity: .45; pointer-events: none; }
 
-/* ── Header ───────────────────────────────────────────────────────────── */
 .site-header {
   position: sticky; z-index: 30; top: 0;
   background: color-mix(in srgb, var(--paper) 92%, transparent);
@@ -120,7 +110,6 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 .mobile-nav-inner > a:not(.button) { padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 20px; font-weight: 500; letter-spacing: -.01em; }
 .mobile-nav-inner .button { margin-top: 14px; }
 
-/* ── Hero ─────────────────────────────────────────────────────────────── */
 .hero { padding: clamp(40px, 7vw, 96px) 0 clamp(56px, 8vw, 110px); }
 .hero-grid { display: grid; grid-template-columns: minmax(0, 1.02fr) minmax(0, 1fr); gap: clamp(32px, 5vw, 72px); align-items: center; }
 .hero-label { margin-bottom: 28px; }
@@ -146,7 +135,6 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 .hero-copy > .hero-meta { animation-delay: .5s; }
 @keyframes fade-up { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 
-/* ── Demo window ──────────────────────────────────────────────────────── */
 .demo { animation: fade-up 1s .25s var(--ease-out) both; }
 .demo-window {
   overflow: hidden; border-radius: 14px; background: var(--night); color: #ecebe6;
@@ -184,7 +172,7 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 .demo-row .demo-icon { width: 28px; height: 28px; border-radius: 7px; font-size: 11px; }
 .demo-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .demo-row small { font-family: var(--mono); font-size: 10px; color: var(--night-muted); }
-/* animation: none — иначе заливка slide-in держит opacity:1 и строка не исчезает. */
+
 .demo-row.is-leaving { animation: none; opacity: 0; transform: translateX(-18px) scale(.97); height: 0 !important; padding-block: 0; margin-top: -6px; pointer-events: none; }
 @keyframes pop { from { opacity: 0; transform: scale(.94); } to { opacity: 1; transform: none; } }
 @keyframes slide-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
@@ -199,7 +187,6 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 .demo-caption { display: block; margin-top: 16px; max-width: 46em; line-height: 1.6; }
 .demo-caption .label-num, .shot figcaption .label-num { margin-right: 8px; }
 
-/* ── Ticker ───────────────────────────────────────────────────────────── */
 .ticker { overflow: hidden; border-block: 1px solid var(--line); background: var(--paper-2); color: var(--ink); }
 .ticker-track { display: flex; width: max-content; animation: marquee 48s linear infinite; }
 .ticker:hover .ticker-track { animation-play-state: paused; }
@@ -208,7 +195,6 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 .ticker-list li::after { content: ""; width: 7px; height: 7px; margin: 0 clamp(22px, 3vw, 40px); border-radius: 50%; background: var(--accent); }
 @keyframes marquee { to { transform: translateX(-50%); } }
 
-/* ── Sections ─────────────────────────────────────────────────────────── */
 .section { padding: clamp(72px, 10vw, 140px) 0; }
 .section-tight { padding-top: clamp(56px, 7vw, 96px); }
 .section + .section-tight { border-top: 1px solid var(--line); }
@@ -217,7 +203,6 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 .section-ink .label { color: var(--night-muted); }
 .section-ink .label-num { color: #8ea2ff; }
 
-/* ── Features ─────────────────────────────────────────────────────────── */
 .features { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line-strong); }
 .feature { position: relative; display: grid; align-content: start; gap: 14px; padding: 28px 24px 34px 0; border-bottom: 1px solid var(--line); }
 .feature + .feature:not(.feature-wide) { padding-left: 24px; border-left: 1px solid var(--line); }
@@ -242,7 +227,6 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 .feature-wide.is-visible .merge-result { animation: chip-in .5s .55s var(--ease-out) both; }
 @keyframes chip-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
-/* ── Product shot ─────────────────────────────────────────────────────── */
 .shot-section { padding-bottom: clamp(72px, 10vw, 140px); }
 .shot img {
   width: 100%; border-radius: 12px; box-shadow: 0 0 0 1px var(--line-strong), 0 40px 80px -40px rgba(0, 0, 0, .85);
@@ -251,7 +235,6 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 }
 .shot figcaption { display: block; margin-top: 18px; }
 
-/* ── Steps ────────────────────────────────────────────────────────────── */
 .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: clamp(20px, 3vw, 40px); counter-reset: step; }
 .step { display: grid; gap: 14px; align-content: start; }
 .step-num { display: grid; width: 56px; height: 56px; place-items: center; border: 1px solid var(--night-line); border-radius: 50%; font-family: var(--mono); font-size: 18px; color: #f3f1eb; transition: background-color .4s ease, border-color .4s ease, color .4s ease; }
@@ -261,7 +244,6 @@ h3 { font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: -.015e
 .steps-rail { position: relative; height: 1px; margin-top: 48px; background: var(--night-line); }
 .steps-rail i { position: absolute; inset: 0; background: var(--accent); transform: scaleX(var(--progress, 0)); transform-origin: left; }
 
-/* ── Download ─────────────────────────────────────────────────────────── */
 .download-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: clamp(32px, 6vw, 96px); align-items: start; }
 .download-copy { display: grid; gap: 20px; justify-items: start; position: sticky; top: 110px; }
 .download-copy > p:not(.label) { color: var(--ink-2); max-width: 26em; }
@@ -300,7 +282,6 @@ a.platform:hover .platform-go { background: var(--accent-bg); border-color: var(
 .linux-formats small { color: var(--muted); font-family: var(--mono); font-size: 11px; }
 .linux-formats a[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
 
-/* ── FAQ ──────────────────────────────────────────────────────────────── */
 .faq-grid { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: clamp(32px, 6vw, 96px); align-items: start; }
 .faq-grid .section-head { position: sticky; top: 110px; }
 .faq-list { border-top: 1px solid var(--line-strong); }
@@ -316,13 +297,11 @@ a.platform:hover .platform-go { background: var(--accent-bg); border-color: var(
 .faq-panel p { max-width: 38em; padding-bottom: 24px; color: var(--ink-2); }
 .faq-panel a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
 
-/* ── Support ──────────────────────────────────────────────────────────── */
 .support { background: var(--accent-bg); color: #fff; }
 .support-inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 28px; padding-block: clamp(56px, 8vw, 104px); }
 .support h2 { font-size: clamp(30px, 4.6vw, 60px); }
 .support h2 span { color: rgba(255, 255, 255, .78); }
 
-/* ── Footer ───────────────────────────────────────────────────────────── */
 .site-footer { background: var(--night); color: #f3f1eb; border-top: 1px solid var(--line); }
 .footer-inner { display: flex; flex-wrap: wrap; align-items: center; gap: 18px 36px; padding-block: 34px; }
 .footer-inner .brand-by { color: var(--night-muted); }
@@ -330,7 +309,6 @@ a.platform:hover .platform-go { background: var(--accent-bg); border-color: var(
 .footer-inner nav a:hover { color: #fff; }
 .footer-copy { color: var(--night-muted); font-family: var(--mono); font-size: 12px; }
 
-/* ── Dialog ───────────────────────────────────────────────────────────── */
 .platform-dialog { width: min(560px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: 0; border: 0; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--paper-2); color: var(--ink); box-shadow: 0 40px 80px -30px rgba(0, 0, 0, .8); opacity: 0; transform: translateY(12px) scale(.98); transition: opacity .22s ease, transform .3s var(--ease); }
 .platform-dialog.is-open { opacity: 1; transform: none; }
 .platform-dialog::backdrop { background: rgba(0, 0, 0, .65); backdrop-filter: blur(2px); }
@@ -352,11 +330,9 @@ a.dialog-row:hover { background: var(--card); }
 .dialog-formats a:hover { border-color: var(--ink); }
 .dialog-formats a[aria-disabled="true"] { opacity: .45; }
 
-/* ── Reveal ───────────────────────────────────────────────────────────── */
 .js .reveal { opacity: 0; transform: translateY(22px); transition: opacity .8s var(--ease-out), transform .8s var(--ease-out); transition-delay: var(--d, 0s); }
 .js .reveal.is-visible { opacity: 1; transform: none; }
 
-/* ── Responsive ───────────────────────────────────────────────────────── */
 @media (max-width: 1080px) {
   .features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .feature:nth-child(4) { border-left: 0; padding-left: 0; }
@@ -399,7 +375,6 @@ a.dialog-row:hover { background: var(--card); }
   .shot img { transform: none; }
 }
 
-/* ── Контрольные суммы ───────────────────────────────────────────────── */
 .checksums { margin-top: 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper-2); overflow: hidden; }
 .checksums summary {
   display: flex; align-items: center; gap: 12px; padding: 16px 18px; cursor: pointer; list-style: none;

@@ -1,6 +1,3 @@
-/**
- * Signum landing: выбор загрузки под ОС, актуальные версии и анимации.
- */
 (function () {
   "use strict";
 
@@ -10,8 +7,6 @@
     return Array.prototype.slice.call(root.querySelectorAll(selector));
   }
 
-  // ── Загрузки ──────────────────────────────────────────────────────────
-
   var DOWNLOADS = {
     windows: { id: "windows", label: "Скачать для Windows", shortLabel: "Windows", hint: "Windows 10/11 · версия 1.2.3", url: "download.php?platform=windows", version: "1.2.3", available: true },
     macos: { id: "macos", label: "Скачать для Mac", shortLabel: "Mac", hint: "macOS · Apple Silicon и Intel · версия 1.2.3", url: "download.php?platform=macos", version: "1.2.3", available: true },
@@ -19,7 +14,6 @@
     android: { id: "android", label: "Скачать для Android", shortLabel: "Android", hint: "Android 10+ · APK · версия 1.2.3", url: "download.php?platform=android", version: "1.2.3", available: true },
   };
 
-  /** @returns {"windows"|"macos"|"linux"|"android"|"unknown"} */
   function detectPlatform() {
     try {
       var uaData = navigator.userAgentData;
@@ -30,11 +24,11 @@
         if (p.indexOf("mac") !== -1) return "macos";
         if (p.indexOf("linux") !== -1 || p.indexOf("chrome os") !== -1) return "linux";
       }
-    } catch (_) { /* старый браузер */ }
+    } catch (_) {}
 
     var platform = String(navigator.platform || "").toLowerCase();
     var ua = String(navigator.userAgent || "").toLowerCase();
-    // iPhone и iPad: своего клиента нет, предлагаем Mac как самый близкий.
+
     var isIpad = /ipad/.test(ua) || (platform === "macintel" && navigator.maxTouchPoints > 1);
     if (isIpad || /iphone|ipod/.test(ua)) return "macos";
     if (/android/.test(ua)) return "android";
@@ -66,7 +60,6 @@
     }
   }
 
-  /** .deb: null — ещё не знаем (ссылка рабочая), false — сервер сказал, что пакета нет. */
   function applyDebLinks() {
     var linux = DOWNLOADS.linux;
     $all(document, "[data-download-format='deb'], [data-picker-format='deb']").forEach(function (link) {
@@ -105,7 +98,6 @@
       badge.hidden = badge.getAttribute("data-platform-badge") !== detected;
     });
 
-    // Диалог «Все платформы».
     $all(document, "[data-picker-detected]").forEach(function (node) { node.textContent = platformName(detected); });
     $all(document, "[data-picker-platform]").forEach(function (row) {
       var id = row.getAttribute("data-picker-platform");
@@ -125,10 +117,6 @@
     applyDebLinks();
   }
 
-  /**
-   * Подписи версий из version.php. Числа в разметке — запасной вариант на
-   * случай, если запрос не прошёл: страница могла закешироваться до релиза.
-   */
   function refreshVersions(platform) {
     if (typeof fetch !== "function") return;
     fetch("version.php?_=" + Date.now(), { cache: "no-store", credentials: "same-origin" })
@@ -154,10 +142,8 @@
         applyDownloadUI(platform);
         renderChecksums(data.platforms);
       })
-      .catch(function () { /* остаются значения из разметки */ });
+      .catch(function () {});
   }
-
-  // ── Контрольные суммы SHA-256 ─────────────────────────────────────────
 
   var CHECKSUM_NAMES = [
     ["windows", "Windows", "bi-windows"],
@@ -243,14 +229,12 @@
     if (count) box.classList.add("is-visible");
   }
 
-  // ── Диалог «Все платформы» ────────────────────────────────────────────
-
   function initPlatformPicker() {
     var dialog = document.getElementById("platform-picker");
     var triggers = $all(document, "[data-platform-picker-open]");
     if (!dialog || !triggers.length) return;
     if (typeof dialog.showModal !== "function") {
-      // Без <dialog> просто ведём к блоку загрузок.
+
       triggers.forEach(function (t) {
         t.addEventListener("click", function () { location.hash = "#download"; });
       });
@@ -288,8 +272,6 @@
     $all(dialog, "a[href]").forEach(function (link) { link.addEventListener("click", closeDialog); });
   }
 
-  // ── Шапка и меню ──────────────────────────────────────────────────────
-
   function initHeader() {
     var header = document.getElementById("site-header");
     if (!header) return;
@@ -297,7 +279,6 @@
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
 
-    // Текущий раздел подчёркнут в меню.
     var links = $all(document, ".nav a[href^='#']");
     if (!links.length || !("IntersectionObserver" in window)) return;
     var byId = {};
@@ -348,11 +329,9 @@
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
   }
 
-  // ── Появление при прокрутке ───────────────────────────────────────────
-
   function initReveal() {
     var nodes = $all(document, ".reveal");
-    // Соседи появляются лесенкой, а не все разом.
+
     nodes.forEach(function (node) {
       var siblings = Array.prototype.filter.call(node.parentNode.children, function (el) {
         return el.classList.contains("reveal");
@@ -374,8 +353,6 @@
     nodes.forEach(function (n) { io.observe(n); });
   }
 
-  // ── Скриншот и шаги: прогресс от прокрутки ────────────────────────────
-
   function initScrollScenes() {
     var shot = document.querySelector("[data-shot] img");
     var steps = $all(document, ".step");
@@ -394,7 +371,7 @@
       var vh = window.innerHeight;
       if (shot) {
         var r = shot.getBoundingClientRect();
-        // 1 — у нижнего края экрана, 0 — когда верх картинки на трети высоты.
+
         var tilt = clamp((r.top - vh * 0.3) / (vh * 0.65));
         shot.style.setProperty("--tilt", tilt.toFixed(3));
       }
@@ -414,8 +391,6 @@
     window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", onScroll);
   }
-
-  // ── FAQ: плавное раскрытие ────────────────────────────────────────────
 
   function initFaq() {
     $all(document, ".faq-item, .checksums").forEach(function (details) {
@@ -447,11 +422,6 @@
       });
     });
   }
-
-  // ── Демо в первом экране ──────────────────────────────────────────────
-  //
-  // Поиск сразу по каталогу и App Store: одно и то же приложение
-  // показывается одной карточкой, затем установка на iPhone.
 
   var SCENES = [
     {
@@ -548,7 +518,6 @@
       installPct.textContent = "0%";
     }
 
-    /** Финальный кадр без движения — для prefers-reduced-motion. */
     function renderStatic(scene) {
       reset();
       q.textContent = scene.query;
@@ -570,12 +539,12 @@
       sceneIndex += 1;
       reset();
       var t = 300;
-      // Печать запроса.
+
       scene.query.split("").forEach(function (ch, i) {
         later(function () { q.textContent += ch; }, t + i * 170);
       });
       t += scene.query.length * 170 + 250;
-      // Каталог отвечает мгновенно.
+
       scene.catalog.forEach(function (item, i) {
         later(function () {
           catalogBox.appendChild(card(item));
@@ -583,7 +552,7 @@
         }, t + i * 110);
       });
       t += scene.catalog.length * 110 + 500;
-      // App Store отвечает позже.
+
       scene.store.forEach(function (item, i) {
         later(function () {
           storeBox.appendChild(row(item));
@@ -591,7 +560,7 @@
         }, t + i * 150);
       });
       t += scene.store.length * 150 + 900;
-      // Совпадения из App Store сливаются с карточками каталога.
+
       later(function () {
         var left = scene.store.length;
         $all(storeBox, ".demo-row").forEach(function (r) {
@@ -613,7 +582,7 @@
         storeCount.textContent = String(left);
       }, t);
       t += 1300;
-      // Установка.
+
       var phases = [
         [0, "Получаем в Apple ID"],
         [18, "Скачиваем приложение"],
@@ -653,7 +622,6 @@
     function start() { if (!running) { running = true; play(); } }
     function stop() { running = false; clearTimers(); }
 
-    // Не крутим анимацию, когда окно демо не видно или вкладка в фоне.
     if ("IntersectionObserver" in window) {
       new IntersectionObserver(function (entries) {
         entries.forEach(function (entry) { if (entry.isIntersecting) start(); else stop(); });
