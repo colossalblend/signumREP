@@ -113,7 +113,24 @@ class SignumApi {
         )
     }
 
-    fun fetchTb(id: String): JsonObject = get("tb.php", mapOf("id" to id))
+    fun fetchTb(id: String, force: Boolean = false): JsonObject =
+        get("tb.php", mapOf("id" to id, "force" to if (force) "1" else "0"))
+
+    /**
+     * Живой QR активации (tb.php). Код действует ограниченное время — сервер
+     * говорит сколько; по умолчанию 10 минут, как на ПК.
+     */
+    fun fetchTbActivation(id: String, force: Boolean): TbActivation {
+        val clean = id.trim()
+        if (clean.isEmpty()) throw SignumApiException("Не указан id активации")
+        val root = fetchTb(clean, force)
+        val payload = root.str("qr_payload")?.trim().orEmpty()
+        if (!root.bool("ok") || payload.isEmpty()) {
+            throw SignumApiException(root.str("error") ?: "Не удалось сгенерировать QR активации")
+        }
+        val ttl = (root.int("expires_in") ?: root.int("ttl_seconds") ?: 600).coerceAtLeast(0)
+        return TbActivation(payload = payload, expiresInSec = ttl, hint = root.str("hint"))
+    }
 
     private fun parseCatalogApp(obj: JsonObject, bust: String): CatalogApp? {
         val id = obj.anyStr("id") ?: return null
@@ -265,3 +282,5 @@ class SignumApi {
 }
 
 data class ClientOutdated(val message: String, val minClientVersion: String? = null)
+
+data class TbActivation(val payload: String, val expiresInSec: Int, val hint: String? = null)

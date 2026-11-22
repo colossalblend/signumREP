@@ -155,7 +155,31 @@ data class UiState(
     val otaChecking: Boolean = false,
     val otaCheckMessage: String = "",
     val cacheBytes: Long = -1L,
+    /** Окно с QR активации: из карточки приложения или сразу после установки. */
+    val activation: ActivationView? = null,
+    /** Сервер не принимает эту версию Signum — экран закрыт окном обновления. */
+    val clientOutdated: pw.appbank.signum.data.api.ClientOutdated? = null,
 )
+
+/** QR активации, готовый к показу: живые коды tb.php уже подставлены. */
+data class ActivationView(
+    val appTitle: String,
+    val source: pw.appbank.signum.data.models.AppActivation,
+    val items: List<ActivationItemView>,
+    val loading: Boolean = false,
+    val error: String = "",
+)
+
+data class ActivationItemView(
+    val item: pw.appbank.signum.data.models.AppActivationItem,
+    val payload: String,
+    val hint: String,
+    /** Когда код перестанет действовать (мс), если сервер дал срок. */
+    val expiresAt: Long? = null,
+) {
+    val inApp: Boolean get() = item.mode == "in_app_scan"
+    val live: Boolean get() = !item.tb_id.isNullOrBlank()
+}
 
 class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     private val _state = MutableStateFlow(
@@ -179,6 +203,149 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         checkOta()
         recoverRegionAfterCrash()
         restoreRegionWhenQueueIdle()
+        watchClientOutdated()
+        showActivationAfterInstall()
+    }
+
+    // ── Устаревший клиент ──────────────────────────────────────────────
+
+    private fun watchClientOutdated() {
+        viewModelScope.launch {
+            pw.appbank.signum.data.api.SignumApi.clientOutdated.collect { info ->
+                if (info != null) _state.update { it.copy(clientOutdated = info) }
+            }
+        }
+    }
+
+    // ── Активация после установки ──────────────────────────────────────
+    //
+    // Некоторым банкам после установки нужна активация по QR. Как на ПК:
+    // если у выбранной версии есть свой QR, показываем его, как только дело
+    // в очереди завершилось.
+
+    private val pendingActivations = java.util.concurrent.ConcurrentHashMap<String, Pair<String, pw.appbank.signum.data.models.AppActivation>>()
+
+    private fun showActivationAfterInstall() {
+        viewModelScope.launch {
+            engine.jobs.jobsFlow.collect { jobs ->
+                if (pendingActivations.isEmpty()) return@collect
+                for (job in jobs) {
+                    when (job.status) {
+                        JobStatus.done -> {
+                            val (title, activation) = pendingActivations.remove(job.id) ?: continue
+                            openActivation(title, activation, force = true)
+                        }
+                        JobStatus.failed, JobStatus.cancelled -> pendingActivations.remove(job.id)
+                        else -> Unit
+                    }
+                }
+            }
+        }
+    }
+
+    /** Активация из карточки каталога, без пустых пунктов. */
+    fun activationFor(appId: String?): pw.appbank.signum.data.models.AppActivation? {
+        if (appId.isNullOrBlank()) return null
+        val raw = _state.value.catalog.firstOrNull { it.id == appId }?.activation ?: return null
+        if (raw.enabled == false) return null
+        val items = raw.items.filter {
+            !it.qr_payload.isNullOrBlank() || !it.url.isNullOrBlank() || !it.tb_id.isNullOrBlank()
+        }
+        return if (items.isEmpty()) null else raw.copy(items = items)
+    }
+
+    /** Пункт активации именно для ставящейся версии: по App Store ID, bundle ID или названию. */
+    private fun activationForInstalled(
+        full: pw.appbank.signum.data.models.AppActivation,
+        appStoreId: String?,
+        bundleId: String?,
+        title: String?,
+    ): pw.appbank.signum.data.models.AppActivation? {
+        val store = appStoreId?.trim().orEmpty()
+        val bundle = bundleId?.trim().orEmpty()
+        val name = title?.trim()?.lowercase().orEmpty()
+        val item = full.items.firstOrNull { store.isNotEmpty() && it.app_store_id?.trim() == store }
+            ?: full.items.firstOrNull { bundle.isNotEmpty() && bundle != "NONE" && it.bundle_id?.trim() == bundle }
+            ?: full.items.firstOrNull { name.isNotEmpty() && it.title.trim().lowercase() == name }
+            ?: return null
+        return pw.appbank.signum.data.models.AppActivation(
+            enabled = true,
+            provider = full.provider,
+            title = full.title?.takeIf { it.isNotBlank() } ?: "Активация после установки",
+            message = item.hint?.takeIf { it.isNotBlank() } ?: full.message
+                ?: "Для входа в банк нужно активировать установленное приложение.",
+            items = listOf(item),
+        )
+    }
+
+    fun openActivation(appTitle: String, activation: pw.appbank.signum.data.models.AppActivation, force: Boolean = false) {
+        _state.update {
+            it.copy(
+                activation = ActivationView(
+                    appTitle = appTitle,
+                    source = activation,
+                    items = activation.items.map(::staticActivationItem),
+                    loading = activation.items.any { item -> !item.tb_id.isNullOrBlank() },
+                ),
+            )
+        }
+        refreshActivation(force)
+    }
+
+    fun closeActivation() = _state.update { it.copy(activation = null) }
+
+    private var activationRequest = 0
+
+    /** Подставить живые коды tb.php. force — попросить у сервера новый код. */
+    fun refreshActivation(force: Boolean) {
+        val current = _state.value.activation ?: return
+        if (current.source.items.none { !it.tb_id.isNullOrBlank() }) return
+        val request = ++activationRequest
+        _state.update { st -> st.copy(activation = st.activation?.copy(loading = true, error = "")) }
+        viewModelScope.launch {
+            val items = coroutineScope {
+                current.source.items.map { item ->
+                    async {
+                        val tb = item.tb_id?.trim().orEmpty()
+                        if (tb.isEmpty()) return@async staticActivationItem(item)
+                        runCatching { engine.fetchTbActivation(tb, force) }.fold(
+                            { live ->
+                                ActivationItemView(
+                                    item = item,
+                                    payload = live.payload,
+                                    hint = item.hint?.takeIf { it.isNotBlank() } ?: live.hint?.takeIf { it.isNotBlank() }
+                                        ?: "Отсканируйте QR камерой iPhone. Код действует 10 минут, затем обновляется.",
+                                    expiresAt = System.currentTimeMillis() + live.expiresInSec * 1000L,
+                                )
+                            },
+                            { e ->
+                                val base = staticActivationItem(item)
+                                base.copy(
+                                    payload = if (force) "" else base.payload,
+                                    hint = "Не удалось сгенерировать QR: " + Errors.localize(e.message ?: "ошибка сети"),
+                                )
+                            },
+                        )
+                    }
+                }.awaitAll()
+            }
+            if (request != activationRequest) return@launch
+            _state.update { st ->
+                val view = st.activation ?: return@update st
+                if (view.source != current.source) return@update st
+                st.copy(activation = view.copy(items = items, loading = false))
+            }
+        }
+    }
+
+    private fun staticActivationItem(item: pw.appbank.signum.data.models.AppActivationItem): ActivationItemView {
+        val payload = (item.qr_payload ?: item.url ?: "").trim()
+        val hint = item.hint?.trim()?.takeIf { it.isNotEmpty() } ?: if (item.mode == "in_app_scan") {
+            "Откройте приложение и отсканируйте QR внутри него (не через системную камеру iPhone)."
+        } else {
+            "Отсканируйте QR камерой iPhone — откроется приложение."
+        }
+        return ActivationItemView(item = item, payload = payload, hint = hint)
     }
 
     /**
@@ -956,7 +1123,7 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
             return false
         }
         val chosen = _state.value.chosenVersion
-        engine.enqueueInstall(
+        val jobId = engine.enqueueInstall(
             title = offer.title,
             adamId = adam,
             bundleId = offer.bundleId,
@@ -966,6 +1133,11 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
             externalVersionId = chosen?.externalVersionId,
             install = install,
         )
+        if (install) {
+            activationFor(offer.appId)
+                ?.let { activationForInstalled(it, adam, offer.bundleId, offer.title) }
+                ?.let { pendingActivations[jobId] = offer.appTitle to it }
+        }
         _state.update { it.copy(offer = null, offerError = "", bankAltOpen = false) }
         return true
     }
@@ -1485,10 +1657,25 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
      * человек видит баннер только когда есть что ставить.
      */
     private fun checkOta() {
-        // Настройка «Автопроверка обновлений» раньше ни на что не влияла.
-        if (!engine.settingsFlow.value.autoUpdate) return
         viewModelScope.launch {
             val info = runCatching { engine.fetchOta() }.getOrNull() ?: return@launch
+            // Устаревший клиент закрываем окном обновления всегда — даже при
+            // выключенной автопроверке: сервер его всё равно не примет.
+            if (!info.clientSupported) {
+                _state.update {
+                    it.copy(
+                        ota = info,
+                        clientOutdated = pw.appbank.signum.data.api.ClientOutdated(
+                            message = info.notes?.trim()?.takeIf { n -> n.isNotEmpty() }
+                                ?: "Эта версия Signum устарела. Обновите приложение.",
+                            minClientVersion = info.minClientVersion,
+                        ),
+                    )
+                }
+                return@launch
+            }
+            // Настройка «Автопроверка обновлений»: баннер не показываем.
+            if (!engine.settingsFlow.value.autoUpdate) return@launch
             if (!info.hasUpdate || info.downloadUrl.isNullOrBlank()) return@launch
             _state.update { it.copy(ota = info) }
         }
@@ -1513,6 +1700,34 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                         it.copy(otaBusy = false, otaMessage = Errors.localize(e.message ?: "Не удалось скачать обновление."))
                     }
                 }
+        }
+    }
+
+    /**
+     * «Обновить Signum» из окна устаревшего клиента. Окно могло открыться по
+     * ответу 426 на любой запрос, когда сведений об обновлении ещё нет, —
+     * тогда сначала спрашиваем ota.php.
+     */
+    fun updateFromOutdatedGate() {
+        if (_state.value.otaBusy || _state.value.otaChecking) return
+        if (_state.value.ota?.downloadUrl.isNullOrBlank().not()) {
+            downloadOta()
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(otaChecking = true, otaMessage = "") }
+            val info = runCatching { engine.fetchOta() }.getOrNull()
+            if (info == null || info.downloadUrl.isNullOrBlank()) {
+                _state.update {
+                    it.copy(
+                        otaChecking = false,
+                        otaMessage = "Ссылка на обновление недоступна. Скачайте новую версию на сайте appbank.pw.",
+                    )
+                }
+                return@launch
+            }
+            _state.update { it.copy(otaChecking = false, ota = info.copy(mandatory = true)) }
+            downloadOta()
         }
     }
 
@@ -1741,7 +1956,17 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
             _state.update { st ->
                 result.fold(
                     { info ->
-                        if (info.hasUpdate && !info.downloadUrl.isNullOrBlank()) {
+                        if (!info.clientSupported) {
+                            st.copy(
+                                otaChecking = false,
+                                ota = info,
+                                clientOutdated = pw.appbank.signum.data.api.ClientOutdated(
+                                    message = info.notes?.trim()?.takeIf { n -> n.isNotEmpty() }
+                                        ?: "Эта версия Signum устарела. Обновите приложение.",
+                                    minClientVersion = info.minClientVersion,
+                                ),
+                            )
+                        } else if (info.hasUpdate && !info.downloadUrl.isNullOrBlank()) {
                             st.copy(otaChecking = false, ota = info, otaCheckMessage = "Доступна версия ${info.version.orEmpty()}".trim())
                         } else {
                             st.copy(otaChecking = false, otaCheckMessage = "Установлена последняя версия")

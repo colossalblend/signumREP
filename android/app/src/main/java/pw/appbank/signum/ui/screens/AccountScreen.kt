@@ -437,7 +437,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.historySection(
         }
     }
     if (s.historyLoading && s.history.isEmpty()) {
-        items(4) { SkeletonRow(reduceMotion = s.settings.liteReduceMotion) }
+        items(4) { SkeletonRow(reduceMotion = s.settings.staticLoaders) }
         return
     }
     // Дубли по adamId бывали в ответе Apple (повторная покупка) — с ними

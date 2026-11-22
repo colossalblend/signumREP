@@ -109,6 +109,9 @@ class SignumEngine(context: Context) {
 
     suspend fun fetchOta(): OtaUpdateInfo = withContext(Dispatchers.IO) { api.checkOta() }
 
+    suspend fun fetchTbActivation(id: String, force: Boolean) =
+        withContext(Dispatchers.IO) { api.fetchTbActivation(id, force) }
+
     /**
      * Скачать обновление Signum и вернуть файл.
      *

@@ -97,7 +97,7 @@ fun DevicesScreen(vm: SignumViewModel) {
         }
 
         if (s.devicesLoading && s.devices.isEmpty()) {
-            item { SkeletonRow(reduceMotion = s.settings.liteReduceMotion) }
+            item { SkeletonRow(reduceMotion = s.settings.staticLoaders) }
         } else if (s.devices.isEmpty()) {
             item {
                 EmptyState(
@@ -137,7 +137,7 @@ fun DevicesScreen(vm: SignumViewModel) {
             if (s.installed.isEmpty()) {
                 item {
                     if (s.installedLoading) {
-                        SkeletonRow(reduceMotion = s.settings.liteReduceMotion)
+                        SkeletonRow(reduceMotion = s.settings.staticLoaders)
                     } else {
                         Panel {
                             Text(
