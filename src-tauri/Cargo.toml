@@ -39,7 +39,7 @@ rcgen = "0.13"
 aes = "0.8"
 cbc = "0.1"
                                                                
-# Vendored isideload 0.5.2 with Signum patches (see vendor/isideload/SIGNUM-PATCHES.md).
+# Vendored isideload 0.5.2 with local fixes (grep "Signum patch" in vendor/isideload).
 isideload = { path = "vendor/isideload/isideload", default-features = false, features = ["fs-storage", "install", "tokio-mt"] }
 rootcause = "0.12"
 tracing = "0.1"
