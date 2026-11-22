@@ -34,6 +34,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.animation.animateContentSize
 import androidx.compose.ui.Alignment
@@ -111,8 +112,8 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
     val c = signumColors
     val apps = vm.visibleApps()
     val sections = vm.catalogSections()
-    var catalogSort by remember { mutableStateOf("default") }
-    var compatibility by remember { mutableStateOf("all") }
+    var catalogSort by rememberSaveable { mutableStateOf("default") }
+    var compatibility by rememberSaveable { mutableStateOf("all") }
     val deviceIos = vm.deviceIos()
     val displayedApps = remember(apps, catalogSort, compatibility, deviceIos) {
         // Без подключённого iPhone фильтр совместимости не действует — как на ПК.
@@ -141,8 +142,8 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
     val displayedSections = if (catalogSort == "default" && (compatibility == "all" || deviceIos == null)) sections else null
     // Android 10+ exports to Downloads/Signum through MediaStore. Older
     // versions need a user-selected folder before the first export.
-    var exportPending by remember { mutableStateOf(false) }
-    var devExportPending by remember { mutableStateOf(false) }
+    var exportPending by rememberSaveable { mutableStateOf(false) }
+    var devExportPending by rememberSaveable { mutableStateOf(false) }
     val folderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
@@ -518,6 +519,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
             onDismissRequest = vm::closeOffer,
             properties = DialogProperties(usePlatformDefaultWidth = true),
         ) {
+            val offerActivation = remember(offer.appId, s.catalog) { vm.activationFor(offer.appId) }
             OfferDialog(
                 offer = offer,
                 versions = s.versions,
@@ -538,6 +540,8 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                 onInstall = { if (vm.queueOffer(true)) goInstalls() },
                 onExport = startExport,
                 onBankAlt = vm::openBankAlt,
+                activationCount = offerActivation?.items?.size ?: 0,
+                onActivation = { offerActivation?.let { vm.openActivation(offer.appTitle, it) } },
                 onOtherVersions = vm::openRestoreVersions,
                 onAccount = goAccount,
                 onClose = vm::closeOffer,
@@ -721,6 +725,8 @@ private fun OfferDialog(
     onInstall: () -> Unit,
     onExport: () -> Unit,
     onBankAlt: () -> Unit,
+    activationCount: Int,
+    onActivation: () -> Unit,
     onOtherVersions: () -> Unit,
     onAccount: () -> Unit,
     onClose: () -> Unit,
@@ -931,6 +937,14 @@ private fun OfferDialog(
                 SecondaryButton(
                     "Альтернативный способ · ${bank.displayName()}",
                     onClick = onBankAlt,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (activationCount > 0) {
+                SecondaryButton(
+                    if (activationCount == 1) "Активация · QR" else "Активация · все QR ($activationCount)",
+                    onClick = onActivation,
+                    icon = Icons.Outlined.QrCode2,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }

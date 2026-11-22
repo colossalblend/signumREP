@@ -83,8 +83,8 @@ import java.text.Normalizer
 fun AccountScreen(vm: SignumViewModel, goInstalls: () -> Unit) {
     val s by vm.state.collectAsState()
     val c = signumColors
-    var confirmLogout by remember { mutableStateOf(false) }
-    var confirmRemove by remember { mutableStateOf<String?>(null) }
+    var confirmLogout by rememberSaveable { mutableStateOf(false) }
+    var confirmRemove by rememberSaveable { mutableStateOf<String?>(null) }
     LaunchedEffect(s.auth.authenticated, s.auth.email) {
         if (s.auth.authenticated && s.history.isEmpty()) vm.loadHistory(false)
     }

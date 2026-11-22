@@ -1375,6 +1375,9 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     }
 
     fun loadHistory(force: Boolean) {
+        // Двойное нажатие запускало два запроса подряд, и Apple присылала
+        // два кода — второй делал первый недействительным.
+        if (_state.value.historyLoading) return
         viewModelScope.launch {
             _state.update { it.copy(historyLoading = true, historyMessage = "") }
             engine.cachedHistory()?.let { cached ->

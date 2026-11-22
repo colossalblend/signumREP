@@ -1,6 +1,33 @@
 package pw.appbank.signum.ui.navigation
 
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Downloading
+import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.PhoneIphone
+import androidx.compose.material.icons.outlined.AccountCircle
+import androidx.compose.material.icons.outlined.Downloading
+import androidx.compose.material.icons.outlined.FileOpen
+import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.style.TextAlign
+import androidx.core.view.WindowCompat
+import pw.appbank.signum.data.models.JobStatus
+import pw.appbank.signum.ui.components.ActivationSheet
+import pw.appbank.signum.ui.components.Panel
+import pw.appbank.signum.ui.components.StatusLine
+import pw.appbank.signum.ui.screens.AboutScreen
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -24,11 +51,9 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
-import androidx.compose.material.icons.outlined.Badge
-import androidx.compose.material.icons.outlined.InstallMobile
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PhoneIphone
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
@@ -80,15 +105,22 @@ import pw.appbank.signum.ui.theme.Brand500
 import pw.appbank.signum.ui.theme.SignumTheme
 import pw.appbank.signum.ui.theme.signumColors
 
-private data class Dest(val route: String, val label: String, val icon: ImageVector)
+private data class Dest(
+    val route: String,
+    val label: String,
+    val icon: ImageVector,
+    val selectedIcon: ImageVector,
+)
 
-private val dests = buildList {
-    add(Dest("catalog", "Каталог", Icons.Outlined.Apps))
-    add(Dest("signing", "Файл", Icons.Outlined.Badge))
-    add(Dest("devices", "iPhone", Icons.Outlined.PhoneIphone))
-    add(Dest("account", "Аккаунт", Icons.Outlined.Person))
-    add(Dest("installs", "Очередь", Icons.Outlined.InstallMobile))
-}
+// Подписи короткие и однотипные: в пять колонок длинное слово обрезалось.
+// Выбранная вкладка рисуется залитым значком — так её видно и без цвета.
+private val dests = listOf(
+    Dest("catalog", "Каталог", Icons.Outlined.Apps, Icons.Filled.Apps),
+    Dest("signing", "Файл", Icons.Outlined.FileOpen, Icons.Filled.FileOpen),
+    Dest("devices", "iPhone", Icons.Outlined.PhoneIphone, Icons.Filled.PhoneIphone),
+    Dest("account", "Аккаунт", Icons.Outlined.AccountCircle, Icons.Filled.AccountCircle),
+    Dest("installs", "Очередь", Icons.Outlined.Downloading, Icons.Filled.Downloading),
+)
 
 @Composable
 fun SignumRoot(engine: SignumEngine) {
@@ -96,15 +128,21 @@ fun SignumRoot(engine: SignumEngine) {
     val state by vm.state.collectAsState()
     SignumTheme(themePref = state.settings.theme) {
         val c = signumColors
-        var showOnboarding by remember { mutableStateOf(!engine.settings.onboardingSeen()) }
+        SystemBarsAppearance(dark = c.isDark)
+        // rememberSaveable: после поворота экрана незаконченное обучение не
+        // должно ни пропасть, ни открыться заново поверх уже пройденного.
+        var showOnboarding by rememberSaveable { mutableStateOf(!engine.settings.onboardingSeen()) }
+        val reduceMotion = state.settings.motionReduced
         Box(Modifier.fillMaxSize()) {
         val nav = rememberNavController()
         val back by nav.currentBackStackEntryAsState()
         val route = back?.destination?.route ?: "catalog"
+        val density = LocalDensity.current
+        val imeVisible = WindowInsets.ime.getBottom(density) > 0
         Column(
             Modifier
                 .fillMaxSize()
-                .background(c.spaceBrush)
+                .then(if (state.settings.flatBackground) Modifier.background(c.background) else Modifier.background(c.spaceBrush))
                 .statusBarsPadding()
                 .imePadding(),
         ) {
@@ -125,11 +163,14 @@ fun SignumRoot(engine: SignumEngine) {
                     Text(APP_VERSION, color = c.muted, fontSize = 10.sp, fontWeight = FontWeight.Medium)
                 }
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = { nav.navigate("settings") { launchSingleTop = true } }) {
+                val inSettings = route == "settings" || route == "about"
+                IconButton(onClick = {
+                    if (!inSettings) nav.navigate("settings") { launchSingleTop = true }
+                }) {
                     Icon(
-                        Icons.Outlined.Settings,
+                        if (inSettings) Icons.Filled.Settings else Icons.Outlined.Settings,
                         contentDescription = "Настройки",
-                        tint = if (route == "settings") Brand300 else c.muted,
+                        tint = if (inSettings) c.brandSoft else c.muted,
                     )
                 }
             }
@@ -138,12 +179,12 @@ fun SignumRoot(engine: SignumEngine) {
             // Установку запускает экран, а не модель: системному установщику
             // нужен Context и разрешение, которого может не быть.
             val ctx = LocalContext.current
-             AnimatedVisibility(
-                 visible = state.ota != null,
-                 enter = fadeIn(tween(220)) + expandVertically(tween(260)),
-                 exit = fadeOut(tween(160)) + shrinkVertically(tween(220)),
-             ) {
-                 UpdateBanner(
+            AnimatedVisibility(
+                visible = state.ota != null && state.clientOutdated == null,
+                enter = fadeIn(tween(220)) + expandVertically(tween(260)),
+                exit = fadeOut(tween(160)) + shrinkVertically(tween(220)),
+            ) {
+                UpdateBanner(
                     version = state.ota?.version.orEmpty(),
                     notes = state.ota?.notes.orEmpty(),
                     busy = state.otaBusy,
@@ -153,7 +194,7 @@ fun SignumRoot(engine: SignumEngine) {
                     onAction = vm::downloadOta,
                     onDismiss = vm::dismissOta,
                 )
-             }
+            }
             // Файл скачан — зовём системный установщик.
             LaunchedEffect(state.otaFile) {
                 val path = state.otaFile
@@ -178,16 +219,20 @@ fun SignumRoot(engine: SignumEngine) {
                     .weight(1f)
                     .clipToBounds(),
                 enterTransition = {
-                    fadeIn(tween(220)) + slideInHorizontally(initialOffsetX = { it / 4 }, animationSpec = tween(260))
+                    if (reduceMotion) EnterTransition.None
+                    else fadeIn(tween(220)) + slideInHorizontally(initialOffsetX = { it / 4 }, animationSpec = tween(260))
                 },
                 exitTransition = {
-                    fadeOut(tween(180)) + slideOutHorizontally(targetOffsetX = { -it / 4 }, animationSpec = tween(220))
+                    if (reduceMotion) ExitTransition.None
+                    else fadeOut(tween(180)) + slideOutHorizontally(targetOffsetX = { -it / 4 }, animationSpec = tween(220))
                 },
                 popEnterTransition = {
-                    fadeIn(tween(220)) + slideInHorizontally(initialOffsetX = { -it / 4 }, animationSpec = tween(260))
+                    if (reduceMotion) EnterTransition.None
+                    else fadeIn(tween(220)) + slideInHorizontally(initialOffsetX = { -it / 4 }, animationSpec = tween(260))
                 },
                 popExitTransition = {
-                    fadeOut(tween(180)) + slideOutHorizontally(targetOffsetX = { it / 4 }, animationSpec = tween(220))
+                    if (reduceMotion) ExitTransition.None
+                    else fadeOut(tween(180)) + slideOutHorizontally(targetOffsetX = { it / 4 }, animationSpec = tween(220))
                 },
             ) {
                 composable("catalog") { CatalogScreen(vm, { goTab("installs") }, { goTab("account") }) }
@@ -195,7 +240,18 @@ fun SignumRoot(engine: SignumEngine) {
                 composable("devices") { DevicesScreen(vm) }
                 composable("account") { AccountScreen(vm) { goTab("installs") } }
                 composable("installs") { InstallsScreen(vm) }
-                composable("settings") { SettingsScreen(vm) }
+                composable("settings") {
+                    SettingsScreen(
+                        vm,
+                        onOpenAbout = { nav.navigate("about") { launchSingleTop = true } },
+                        onReplayOnboarding = {
+                            engine.settings.resetOnboarding()
+                            goTab("catalog")
+                            showOnboarding = true
+                        },
+                    )
+                }
+                composable("about") { AboutScreen(onBack = { nav.popBackStack() }) }
             }
             // Нажали на уведомление о ходе установки — показываем очередь.
             val openQueue by QueueService.openQueueRequested.collectAsState()
@@ -205,46 +261,187 @@ fun SignumRoot(engine: SignumEngine) {
                     goTab("installs")
                 }
             }
-            NavigationBar(
-                containerColor = c.surfaceStrong,
-                tonalElevation = 0.dp,
-                modifier = Modifier.navigationBarsPadding(),
-            ) {
-                dests.forEach { d ->
-                    val selected = route == d.route
-                    NavigationBarItem(
-                        selected = selected,
-                        onClick = { goTab(d.route) },
-                        icon = { Icon(d.icon, contentDescription = d.label, modifier = Modifier.size(20.dp)) },
-                        alwaysShowLabel = true,
-                        label = {
-                            Text(
-                                d.label,
-                                fontSize = 10.sp,
-                                maxLines = 1,
-                                fontWeight = FontWeight.Medium,
-                            )
-                        },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Brand300,
-                            selectedTextColor = Brand300,
-                            indicatorColor = Brand500.copy(0.18f),
-                            unselectedIconColor = c.muted,
-                            unselectedTextColor = c.muted,
-                        ),
-                    )
-                }
+            val jobs by engine.jobs.jobsFlow.collectAsState()
+            val activeJobs = jobs.count { it.status == JobStatus.running || it.status == JobStatus.queued }
+            // Пока открыта клавиатура, нижнюю панель прячем: иначе она
+            // поднималась над клавиатурой и съедала половину экрана с полем.
+            if (!imeVisible) {
+                SignumBottomBar(
+                    route = route,
+                    activeJobs = activeJobs,
+                    onSelect = { target -> if (target != route) goTab(target) },
+                )
             }
+        }
+        state.activation?.let { view ->
+            ActivationSheet(
+                view = view,
+                onRefresh = vm::refreshActivation,
+                onClose = vm::closeActivation,
+            )
         }
         if (showOnboarding) {
             OnboardingScreen(
-                reduceMotion = state.settings.liteReduceMotion,
+                reduceMotion = reduceMotion,
                 onFinish = {
                     engine.settings.markOnboardingSeen()
                     showOnboarding = false
                 },
             )
         }
+        state.clientOutdated?.let { info ->
+            ClientOutdatedGate(
+                message = info.message,
+                minVersion = info.minClientVersion,
+                latestVersion = state.ota?.version,
+                busy = state.otaBusy || state.otaChecking,
+                percent = state.otaPercent,
+                error = state.otaMessage,
+                onUpdate = vm::updateFromOutdatedGate,
+            )
+        }
+        }
+    }
+}
+
+/**
+ * Нижняя панель вкладок.
+ *
+ * Отступ под системную панель жестов даёт сам NavigationBar (windowInsets);
+ * раньше сверху добавлялся ещё navigationBarsPadding, и на телефонах с
+ * кнопками панель стояла на двойной подушке.
+ */
+@Composable
+private fun SignumBottomBar(route: String, activeJobs: Int, onSelect: (String) -> Unit) {
+    val c = signumColors
+    Column {
+        Box(Modifier.fillMaxWidth().height(1.dp).background(c.divider))
+        NavigationBar(
+            containerColor = c.surfaceStrong,
+            tonalElevation = 0.dp,
+        ) {
+            dests.forEach { d ->
+                val selected = route == d.route
+                NavigationBarItem(
+                    selected = selected,
+                    onClick = { onSelect(d.route) },
+                    icon = {
+                        val icon = if (selected) d.selectedIcon else d.icon
+                        if (d.route == "installs" && activeJobs > 0) {
+                            BadgedBox(badge = {
+                                Badge(containerColor = c.brand, contentColor = Color.White) {
+                                    Text(if (activeJobs > 9) "9+" else activeJobs.toString(), fontSize = 9.sp)
+                                }
+                            }) {
+                                Icon(icon, contentDescription = null, modifier = Modifier.size(22.dp))
+                            }
+                        } else {
+                            Icon(icon, contentDescription = null, modifier = Modifier.size(22.dp))
+                        }
+                    },
+                    alwaysShowLabel = true,
+                    label = {
+                        Text(
+                            d.label,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        )
+                    },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = c.brandSoft,
+                        selectedTextColor = c.brandSoft,
+                        indicatorColor = c.brand.copy(alpha = if (c.isDark) 0.18f else 0.12f),
+                        unselectedIconColor = c.muted,
+                        unselectedTextColor = c.muted,
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Цвет значков в строке состояния и панели навигации под текущую тему.
+ * Раньше активность раз и навсегда ставила светлые значки, и в светлой теме
+ * часы и батарея пропадали на белом фоне.
+ */
+@Composable
+private fun SystemBarsAppearance(dark: Boolean) {
+    val view = LocalView.current
+    if (view.isInEditMode) return
+    SideEffect {
+        val window = (view.context as? android.app.Activity)?.window ?: return@SideEffect
+        WindowCompat.getInsetsController(window, view).apply {
+            isAppearanceLightStatusBars = !dark
+            isAppearanceLightNavigationBars = !dark
+        }
+    }
+}
+
+/**
+ * Сервер больше не принимает эту версию — как ClientOutdatedGate на ПК.
+ * Окно не закрывается: без обновления любой шаг упрётся в отказ.
+ */
+@Composable
+private fun ClientOutdatedGate(
+    message: String,
+    minVersion: String?,
+    latestVersion: String?,
+    busy: Boolean,
+    percent: Float,
+    error: String,
+    onUpdate: () -> Unit,
+) {
+    val c = signumColors
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(c.background.copy(alpha = 0.97f))
+            // Касания не должны проходить к экрану под окном.
+            .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Panel {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    Modifier.size(56.dp).clip(RoundedCornerShape(16.dp)).background(c.danger.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = c.danger, modifier = Modifier.size(28.dp))
+                }
+                Spacer(Modifier.height(16.dp))
+                Text("Приложение недоступно", color = c.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text(message, color = c.muted, fontSize = 14.sp, lineHeight = 20.sp, textAlign = TextAlign.Center)
+                val versions = listOfNotNull(
+                    minVersion?.takeIf { it.isNotBlank() }?.let { "Нужна версия $it или новее" },
+                    latestVersion?.takeIf { it.isNotBlank() }?.let { "Актуальная: $it" },
+                ).joinToString(" · ")
+                if (versions.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(versions, color = c.muted, fontSize = 12.sp, textAlign = TextAlign.Center)
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Управление приложением заблокировано, пока Signum не обновлён.",
+                    color = c.muted.copy(alpha = 0.8f),
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    textAlign = TextAlign.Center,
+                )
+                StatusLine(error, error = true)
+                Spacer(Modifier.height(16.dp))
+                PrimaryButton(
+                    if (busy && percent > 0f) "Загрузка… ${percent.toInt()}%" else "Обновить Signum",
+                    onClick = onUpdate,
+                    loading = busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
 }
@@ -287,7 +484,7 @@ private fun UpdateBanner(
         }
         if (message.isNotBlank()) {
             Spacer(Modifier.height(6.dp))
-            Text(message, color = Color(0xFFFCA5A5), fontSize = 12.sp)
+            Text(message, color = c.danger, fontSize = 12.sp)
         }
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
