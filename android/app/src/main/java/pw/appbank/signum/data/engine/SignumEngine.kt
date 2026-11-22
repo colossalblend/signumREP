@@ -74,7 +74,7 @@ class SignumEngine(context: Context) {
     }
 
     init {
-        DiagLog.note("engine", "Android Store client: ipatool protocol ${pw.appbank.signum.data.apple.StorePodRouting.UPSTREAM_VERSION} routing port; native SAP helper")
+        DiagLog.note("engine", "Android Store client: ipatool ${pw.appbank.signum.data.apple.StoreProtocol.UPSTREAM_VERSION} protocol port (routing ${pw.appbank.signum.data.apple.StorePodRouting.UPSTREAM_VERSION}); native SAP helper")
         store.restoreTokens()
         Errors.detailed = _settings.value.detailedErrors
         // Прокси применяем до первого запроса: иначе сохранённая настройка
