@@ -1,6 +1,5 @@
 /**
- * Signum landing: выбор загрузки под ОС, версии из version.php и анимации.
- * Без сборки, обычный ES5-совместимый JS.
+ * Signum landing: выбор загрузки под ОС, актуальные версии и анимации.
  */
 (function () {
   "use strict";
@@ -364,21 +363,20 @@
 
   // ── Демо в первом экране ──────────────────────────────────────────────
   //
-  // Показывает настоящую логику Signum: каталог и App Store по одному
-  // запросу, результаты с тем же App Store ID сливаются в карточку каталога,
-  // затем установка на iPhone. Сценарии берут реальные позиции каталога.
+  // Поиск сразу по каталогу и App Store: одно и то же приложение
+  // показывается одной карточкой, затем установка на iPhone.
 
   var SCENES = [
     {
       query: "вк",
       catalog: [
-        { title: "ВКонтакте", meta: "id 564177498", color: "#0077ff", letter: "VK", storeId: "564177498" },
-        { title: "ВК Видео", meta: "id 6447614666", color: "#0077ff", letter: "▶", storeId: "6447614666" },
-        { title: "ВК Музыка", meta: "id 1054372220", color: "#0077ff", letter: "♪", storeId: "1054372220" },
+        { title: "ВКонтакте", meta: "проверенная сборка", color: "#0077ff", letter: "VK", storeId: "vk" },
+        { title: "ВК Видео", meta: "проверенная сборка", color: "#0077ff", letter: "▶", storeId: "vk-video" },
+        { title: "ВК Музыка", meta: "проверенная сборка", color: "#0077ff", letter: "♪", storeId: "vk-music" },
       ],
       store: [
-        { title: "VK: music, video, messenger", meta: "564177498", color: "#0077ff", letter: "VK" },
-        { title: "VK Video: films, series", meta: "6447614666", color: "#0077ff", letter: "▶" },
+        { title: "VK: music, video, messenger", meta: "App Store", color: "#0077ff", letter: "VK", storeId: "vk" },
+        { title: "VK Video: films, series", meta: "App Store", color: "#0077ff", letter: "▶", storeId: "vk-video" },
         { title: "Kate Mobile", meta: "App Store", color: "#5b6f8c", letter: "K" },
       ],
       install: "ВКонтакте",
@@ -448,7 +446,7 @@
       el.appendChild(icon(item));
       el.appendChild(t);
       el.appendChild(m);
-      el.setAttribute("data-store-id", item.meta);
+      if (item.storeId) el.setAttribute("data-store-id", item.storeId);
       return el;
     }
 
@@ -470,7 +468,7 @@
       scene.catalog.forEach(function (item) { catalogBox.appendChild(card(item)); });
       var merged = {};
       scene.catalog.forEach(function (item) { if (item.storeId) merged[item.storeId] = true; });
-      var left = scene.store.filter(function (item) { return !merged[item.meta]; });
+      var left = scene.store.filter(function (item) { return !item.storeId || !merged[item.storeId]; });
       left.forEach(function (item) { storeBox.appendChild(row(item)); });
       count.textContent = String(scene.catalog.length);
       storeCount.textContent = String(left.length);
@@ -506,11 +504,12 @@
         }, t + i * 150);
       });
       t += scene.store.length * 150 + 900;
-      // Слияние по App Store ID.
+      // Совпадения из App Store сливаются с карточками каталога.
       later(function () {
         var left = scene.store.length;
         $all(storeBox, ".demo-row").forEach(function (r) {
           var id = r.getAttribute("data-store-id");
+          if (!id) return;
           var twin = catalogBox.querySelector("[data-store-id='" + id + "']");
           if (!twin) return;
           left -= 1;
@@ -526,8 +525,8 @@
       t += 1300;
       // Установка.
       var phases = [
-        [0, "Покупаем на Apple ID"],
-        [18, "Скачиваем IPA"],
+        [0, "Получаем в Apple ID"],
+        [18, "Скачиваем приложение"],
         [72, "Ставим на iPhone"],
       ];
       later(function () {

@@ -4,8 +4,8 @@
   "description": "Приложения на iPhone с Windows, macOS, Linux и Android",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#f3f1eb",
-  "theme_color": "#f3f1eb",
+  "background_color": "#0e0f12",
+  "theme_color": "#0e0f12",
   "lang": "ru",
   "icons": [
     {
