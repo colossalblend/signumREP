@@ -4307,6 +4307,22 @@ function signum_app_min_ios(array $app): string
     return (string)($app['min_ios'] ?? '');
 }
 
+function signum_catalog_app_store_ids(array $app): array
+{
+    $ids = [];
+    foreach (($app['versions'] ?? []) as $version) {
+        $id = trim((string)($version['app_store_id'] ?? ''));
+        if ($id !== '' && ctype_digit($id)) {
+            $ids[$id] = true;
+        }
+    }
+    $url = (string)($app['app_store_url'] ?? '');
+    if ($url !== '' && preg_match('~/id(\d+)~', $url, $m)) {
+        $ids[$m[1]] = true;
+    }
+    return array_map('strval', array_keys($ids));
+}
+
 function signum_catalog_summary(array $app): array
 {
     $summary = [
@@ -4322,6 +4338,9 @@ function signum_catalog_summary(array $app): array
         'app_store_url' => $app['app_store_url'] ?? null,
         'category' => $app['category'] ?? 'app',
         'aliases' => $app['aliases'] ?? [],
+        // Same App Store ids as the versions behind this card: the client
+        // merges a catalogue card and an App Store search hit with one id.
+        'app_store_ids' => signum_catalog_app_store_ids($app),
     ];
     if (!empty($app['activation']) && is_array($app['activation'])) {
         $summary['activation'] = $app['activation'];

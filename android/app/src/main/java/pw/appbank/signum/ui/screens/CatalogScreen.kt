@@ -34,6 +34,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.animation.animateContentSize
 import androidx.compose.ui.Alignment
@@ -48,6 +49,32 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.CheckBoxOutlineBlank
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.NorthEast
+import androidx.compose.material.icons.outlined.QrCode2
+import androidx.compose.material.icons.outlined.Restore
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material.icons.outlined.Storefront
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import pw.appbank.signum.data.catalog.StoreSearch
+import pw.appbank.signum.data.models.AppStoreSearchHit
+import pw.appbank.signum.data.models.StoreDeveloper
+import pw.appbank.signum.ui.theme.Brand600
 import pw.appbank.signum.data.catalog.CatalogResolve
 import pw.appbank.signum.data.catalog.CatalogSearch
 import pw.appbank.signum.data.catalog.detectBankAlt
@@ -61,7 +88,6 @@ import pw.appbank.signum.ui.SignumViewModel
 import androidx.compose.ui.graphics.Brush
 import pw.appbank.signum.data.models.CatalogBanner
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.lazy.LazyColumn
@@ -86,36 +112,48 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
     val c = signumColors
     val apps = vm.visibleApps()
     val sections = vm.catalogSections()
-    var catalogSort by remember { mutableStateOf("default") }
-    var compatibility by remember { mutableStateOf("all") }
+    var catalogSort by rememberSaveable { mutableStateOf("default") }
+    var compatibility by rememberSaveable { mutableStateOf("all") }
     val deviceIos = vm.deviceIos()
     val displayedApps = remember(apps, catalogSort, compatibility, deviceIos) {
-        val compatible = when (compatibility) {
-            "yes" -> apps.filter { it.min_ios.isNullOrBlank() || deviceIos.isNullOrBlank() || CatalogResolve.compareIos(deviceIos, it.min_ios!!) >= 0 }
-            "no" -> apps.filter { !it.min_ios.isNullOrBlank() && !deviceIos.isNullOrBlank() && CatalogResolve.compareIos(deviceIos, it.min_ios!!) < 0 }
+        // Без подключённого iPhone фильтр совместимости не действует — как на ПК.
+        val compatible = if (deviceIos.isNullOrBlank()) apps else when (compatibility) {
+            "yes" -> apps.filter { it.min_ios.isNullOrBlank() || CatalogResolve.compareIos(deviceIos, it.min_ios!!) >= 0 }
+            "no" -> apps.filter { !it.min_ios.isNullOrBlank() && CatalogResolve.compareIos(deviceIos, it.min_ios!!) < 0 }
             else -> apps
         }
         when (catalogSort) {
-            "name" -> compatible.sortedBy { it.title.lowercase() }
-            "ios" -> compatible.sortedWith(compareBy(nullsFirst()) { it.min_ios })
+            "name" -> compatible.sortedWith(compareBy(RU_COLLATOR) { it.title })
+            // Без минимальной iOS — первыми, дальше по номеру, а не по строке:
+            // иначе «10.0» встаёт раньше «9.0».
+            "ios" -> compatible.sortedWith(Comparator { a, b ->
+                val x = a.min_ios?.trim().orEmpty()
+                val y = b.min_ios?.trim().orEmpty()
+                when {
+                    x.isEmpty() && y.isEmpty() -> 0
+                    x.isEmpty() -> -1
+                    y.isEmpty() -> 1
+                    else -> CatalogResolve.compareIos(x, y)
+                }
+            })
             else -> compatible
         }
     }
-    val displayedSections = if (catalogSort == "default" && compatibility == "all") sections else null
-    // One catalog surface: local matches and AppMagic/iTunes matches use the
-    // same search field and are displayed in separate sections.
-    val storeScope = false
+    val displayedSections = if (catalogSort == "default" && (compatibility == "all" || deviceIos == null)) sections else null
     // Android 10+ exports to Downloads/Signum through MediaStore. Older
     // versions need a user-selected folder before the first export.
-    var exportPending by remember { mutableStateOf(false) }
+    var exportPending by rememberSaveable { mutableStateOf(false) }
+    var devExportPending by rememberSaveable { mutableStateOf(false) }
     val folderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         if (uri != null) {
             vm.engine.settings.setDownloadsTree(uri)
             if (exportPending && vm.queueOffer(false)) goInstalls()
+            if (devExportPending) vm.queueDeveloperPicked(goInstalls)
         }
         exportPending = false
+        devExportPending = false
     }
     val tfApp = s.testFlightApp
     if (tfApp != null && s.testFlightUrl.isNotBlank()) {
@@ -138,8 +176,22 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
             goInstalls()
         }
     }
+    val favorites = s.settings.favoriteAppIds.toSet()
+    val typedQuery = s.search.trim().length >= 2
+    // Одно приложение — одна карточка: результат App Store с тем же ID, что у
+    // приложения каталога, превращается в карточку каталога, а если она уже
+    // показана выше — не дублируется.
+    val shownCatalogIds = remember(displayedSections, displayedApps) {
+        (displayedSections?.flatMap { it.apps } ?: displayedApps).mapTo(HashSet()) { it.id }
+    }
+    val mergedStore = remember(s.storeHits, s.catalog, shownCatalogIds) {
+        StoreSearch.mergeWithCatalog(s.storeHits, s.catalog, shownCatalogIds)
+    }
+    val onCatalogCard: (CatalogApp) -> Unit = { app ->
+        if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app)
+    }
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(160.dp),
+        columns = GridCells.Adaptive(164.dp),
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(18.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -159,7 +211,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
             Column {
                 PageHeader(
                     title = "Каталог",
-                    subtitle = s.selectedDevice?.productVersion?.let { "Банки и важные приложения · iPhone iOS $it" }
+                    subtitle = deviceIos?.let { "Банки и важные приложения · iPhone iOS $it" }
                         ?: "Банки и важные приложения для вашего iPhone",
                 ) {
                     SecondaryButton("Обновить", onClick = { vm.loadCatalog() })
@@ -175,7 +227,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                     vm::setSearch,
                     placeholder = "Название, сокращение, ссылка App Store, номер или разработчик",
                 )
-                if (!storeScope && s.groups.isNotEmpty()) {
+                if (s.groups.isNotEmpty()) {
                     Spacer(Modifier.height(10.dp))
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip("Все", s.groupFilter == "all") { vm.setGroup("all") }
@@ -184,38 +236,37 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                         }
                     }
                 }
-                if (!storeScope) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Сортировка", color = c.muted, fontSize = 11.sp)
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Сортировка", color = c.muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                     FilterChip("По каталогу", catalogSort == "default") { catalogSort = "default" }
                     FilterChip("По названию", catalogSort == "name") { catalogSort = "name" }
-                    FilterChip("По iOS", catalogSort == "ios") { catalogSort = "ios" }
+                    FilterChip("По минимальной iOS", catalogSort == "ios") { catalogSort = "ios" }
                 }
-                if (!storeScope && deviceIos != null) {
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip("Любая совместимость", compatibility == "all") { compatibility = "all" }
-                        FilterChip("Подходит · iOS $deviceIos", compatibility == "yes") { compatibility = "yes" }
-                        FilterChip("Не подходит", compatibility == "no") { compatibility = "no" }
+                if (deviceIos != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Совместимость", color = c.muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        FilterChip("Все", compatibility == "all") { compatibility = "all" }
+                        FilterChip("Подходит для iOS $deviceIos", compatibility == "yes", tone = ChipTone.Good) { compatibility = "yes" }
+                        FilterChip("Не подходит", compatibility == "no", tone = ChipTone.Warn) { compatibility = "no" }
                     }
                 }
-                if (s.search.isNotBlank()) {
-                    Text(
-                        "В каталоге найдено: ${apps.size}. Ниже автоматически проверяем AppMagic и iTunes.",
-                        color = c.muted,
-                        fontSize = 11.sp,
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    )
-                }
                 StatusLine(s.catalogError, error = true)
-                StatusLine(s.storeSearchError, error = true)
-                if (s.storeSearching) {
-                    Text("Ищем приложение…", color = c.muted, fontSize = 12.sp)
-                }
                 if (s.regionNotice.isNotBlank()) {
                     Spacer(Modifier.height(8.dp))
                     Panel {
                         Text("Страна магазина", color = Color(0xFFFCD34D), fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         Spacer(Modifier.height(6.dp))
-                        Text(s.regionNotice, color = Color(0xFFE2E8F0), fontSize = 12.sp, lineHeight = 17.sp)
+                        Text(s.regionNotice, color = c.text, fontSize = 12.sp, lineHeight = 17.sp)
                         Spacer(Modifier.height(10.dp))
                         Text(
                             "Понятно",
@@ -226,8 +277,8 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                         )
                     }
                 }
-                Spacer(Modifier.height(8.dp))
-                if (!storeScope) Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     if (s.selectMode) {
                         Text(
                             if (s.bulkBusy) "Ставим…"
@@ -258,168 +309,187 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                 }
             }
         }
-        if (s.catalogLoading) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Box(Modifier.fillMaxWidth().height(180.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Brand400Safe)
+        when {
+            s.catalogLoading && s.catalog.isEmpty() -> {
+                // Скелет вместо одинокого спиннера: сетка не прыгает, когда
+                // карточки приходят.
+                items(6, key = { "skeleton-$it" }) { SkeletonCard() }
+            }
+            s.catalog.isEmpty() && s.catalogError.isBlank() -> {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    EmptyState(title = "Каталог пока пуст", text = "Нажмите «Обновить», чтобы загрузить его снова.")
                 }
             }
-        }
-        if (!s.catalogLoading && s.catalog.isEmpty() && s.catalogError.isBlank()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Panel {
-                    Text("Каталог пока пуст", color = c.text, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-        if (!storeScope && !s.catalogLoading && s.catalog.isNotEmpty() && apps.isEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                val bank = detectBankAlt(s.search)
-                Panel {
-                    Text("Ничего не найдено", color = c.text, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "Попробуйте полное название, сокращение или английский вариант.",
-                        color = c.muted,
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp,
-                    )
-                    if (bank != null) {
+            s.catalog.isNotEmpty() && displayedApps.isEmpty() && displayedSections == null -> {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    val bank = detectBankAlt(s.search)
+                    EmptyState(
+                        title = "Ничего не найдено",
+                        text = "Попробуйте полное название, сокращение или английский вариант.",
+                    ) {
                         Spacer(Modifier.height(12.dp))
                         Text(
-                            "В каталоге нет подходящей версии ${bank.displayName()}. Можно установить другим способом — по номеру телефона.",
-                            color = Color(0xFFE2E8F0),
-                            fontSize = 13.sp,
-                            lineHeight = 18.sp,
+                            "В каталоге собраны проверенные приложения и специальные сборки. " +
+                                "Для остальных названий результаты App Store появятся ниже автоматически.",
+                            color = c.muted,
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .border(1.dp, c.border, RoundedCornerShape(14.dp))
+                                .padding(12.dp),
                         )
-                        Spacer(Modifier.height(10.dp))
-                        SecondaryButton("Альтернативный способ установки", onClick = vm::openBankAlt, modifier = Modifier.fillMaxWidth())
-                    }
-                    Spacer(Modifier.height(10.dp))
-                }
-            }
-        }
-        if (s.search.trim().length >= 2 && s.storeHits.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Text("Результаты AppMagic и iTunes", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            }
-            items(s.storeHits, key = { "s${it.adamId}" }) { hit ->
-                Panel(onClick = { vm.openStoreHit(hit) }) {
-                    Column {
-                        if (hit.artwork.isNullOrBlank()) {
-                            Box(
-                                Modifier.size(64.dp).clip(RoundedCornerShape(16.dp)).background(Brand400.copy(alpha = 0.15f)),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(hit.name.take(1), color = Brand300, fontWeight = FontWeight.Bold, fontSize = 24.sp)
-                            }
-                        } else AsyncImage(
-                            hit.artwork,
-                            contentDescription = null,
-                            modifier = Modifier.size(64.dp).clip(RoundedCornerShape(16.dp)),
-                            contentScale = ContentScale.Crop,
-                        )
-                        Spacer(Modifier.height(10.dp))
-                        Text(hit.name, color = c.text, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Text(hit.artist ?: hit.bundleId ?: "", color = c.muted, fontSize = 11.sp, maxLines = 1)
-                        if (hit.foundOnAccount) {
-                            Text("Есть на Apple ID", color = Brand300, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        if (bank != null) {
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                "В каталоге нет подходящей версии ${bank.displayName()}. Можно установить другим способом — по номеру телефона.",
+                                color = c.text,
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp,
+                                textAlign = TextAlign.Center,
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            PrimaryButton("Альтернативный способ установки", onClick = vm::openBankAlt, modifier = Modifier.fillMaxWidth())
                         }
                     }
                 }
             }
         }
-        // Разработчики — под приложениями, как на ПК: сначала то, что искали,
-        // потом «а кто это сделал и что ещё у него есть».
-        if (s.search.trim().length >= 2 && s.devHits.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Column {
-                    Spacer(Modifier.height(6.dp))
-                    Text("Разработчики", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(8.dp))
-                    s.devHits.forEach { dev ->
-                        Panel(onClick = { vm.openDeveloper(dev) }) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        dev.name,
-                                        color = c.text,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 14.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                    Text(
-                                        "приложений в поиске: ${dev.appCount}",
-                                        color = c.muted,
-                                        fontSize = 11.sp,
-                                    )
-                                }
-                                Text("Открыть", color = Brand400, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                        Spacer(Modifier.height(8.dp))
-                    }
-                }
-            }
-        }
-        val favorites = s.settings.favoriteAppIds.toSet()
-        val favoriteApps = if (s.search.isBlank() && catalogSort == "default" && compatibility == "all") apps.filter { it.id in favorites } else emptyList()
+        val favoriteApps = if (s.search.isBlank() && catalogSort == "default" && compatibility == "all") {
+            s.catalog.filter { it.id in favorites }
+        } else emptyList()
         if (favoriteApps.isNotEmpty()) {
             item(key = "g-favorites", span = { GridItemSpan(maxLineSpan) }) {
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
-                    verticalAlignment = Alignment.Bottom,
-                ) {
-                    Text("Избранное", color = c.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.weight(1f))
-                    Text("${favoriteApps.size}", color = c.muted, fontSize = 11.sp)
-                }
+                SectionHeader("Избранное", favoriteApps.size, star = true)
             }
             items(favoriteApps, key = { "fav-${it.id}" }) { app ->
-                AppCard(
+                CatalogAppCard(
                     app = app,
                     favorite = true,
                     selectable = s.selectMode,
                     selected = app.id in s.selectedAppIds,
                     onToggleFavorite = { vm.toggleFavorite(app.id) },
-                ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
+                    onClick = { onCatalogCard(app) },
+                )
             }
         }
         if (displayedSections != null) {
             displayedSections.forEach { section ->
                 item(key = "g-${section.id}", span = { GridItemSpan(maxLineSpan) }) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
-                        verticalAlignment = Alignment.Bottom,
-                    ) {
-                        Text(section.title, color = c.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.weight(1f))
-                        Text("${section.apps.size}", color = c.muted, fontSize = 11.sp)
-                    }
+                    SectionHeader(section.title, section.apps.size)
                 }
                 items(section.apps, key = { it.id }) { app ->
-                    AppCard(
+                    CatalogAppCard(
                         app = app,
                         favorite = app.id in favorites,
                         selectable = s.selectMode,
                         selected = app.id in s.selectedAppIds,
                         onToggleFavorite = { vm.toggleFavorite(app.id) },
-                    ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
+                        onClick = { onCatalogCard(app) },
+                    )
                 }
             }
         } else {
             items(displayedApps, key = { it.id }) { app ->
-                AppCard(
+                CatalogAppCard(
                     app = app,
                     favorite = app.id in favorites,
                     selectable = s.selectMode,
                     selected = app.id in s.selectedAppIds,
                     onToggleFavorite = { vm.toggleFavorite(app.id) },
-                ) { if (s.selectMode) vm.toggleSelected(app.id) else vm.openOffer(app) }
+                    onClick = { onCatalogCard(app) },
+                )
+            }
+        }
+        // ── Результаты App Store ─────────────────────────────────────────
+        // Раздел есть всегда, когда введено от двух символов, — как на ПК:
+        // со спиннером «Ищем…», ошибкой или пустым состоянием.
+        if (typedQuery) {
+            item(key = "store-title", span = { GridItemSpan(maxLineSpan) }) {
+                Column(Modifier.fillMaxWidth().padding(top = 14.dp)) {
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(c.border))
+                    Spacer(Modifier.height(18.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Результаты App Store",
+                            color = c.text,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (s.storeSearching || s.devSearching) {
+                            CircularProgressIndicator(Modifier.size(14.dp), color = Brand300, strokeWidth = 2.dp)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Ищем…", color = c.muted, fontSize = 12.sp)
+                        } else if (mergedStore.isNotEmpty()) {
+                            Text("${mergedStore.size}", color = c.muted, fontSize = 11.sp)
+                        }
+                    }
+                    if (s.storeSearchError.isNotBlank()) {
+                        Spacer(Modifier.height(10.dp))
+                        ErrorBox(s.storeSearchError)
+                    }
+                }
+            }
+            if (s.storeSearching && s.storeHits.isEmpty()) {
+                items(4, key = { "store-skeleton-$it" }) { SkeletonCard() }
+            }
+            if (!s.storeSearching && s.storeHits.isNotEmpty() && mergedStore.isEmpty()) {
+                item(key = "store-all-merged", span = { GridItemSpan(maxLineSpan) }) {
+                    Panel {
+                        Text(
+                            "Всё, что нашлось в App Store, уже есть в каталоге выше.",
+                            color = c.muted,
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
+            if (!s.storeSearching && !s.devSearching && s.storeHits.isEmpty() &&
+                s.devHits.isEmpty() && s.storeSearchError.isBlank()
+            ) {
+                item(key = "store-empty", span = { GridItemSpan(maxLineSpan) }) {
+                    EmptyState(
+                        title = "Ничего не найдено",
+                        text = "Попробуйте другое название, ссылку из App Store или номер.",
+                    )
+                }
+            }
+            items(mergedStore, key = { m -> m.catalog?.let { "sc-${it.id}" } ?: "s${m.hit.adamId}" }) { m ->
+                val catalogApp = m.catalog
+                if (catalogApp != null) {
+                    CatalogAppCard(
+                        app = catalogApp,
+                        favorite = catalogApp.id in favorites,
+                        onAccount = m.hit.foundOnAccount,
+                        onToggleFavorite = { vm.toggleFavorite(catalogApp.id) },
+                        onClick = { vm.openOffer(catalogApp) },
+                    )
+                } else {
+                    StoreHitCard(m.hit) { vm.openStoreHit(m.hit) }
+                }
+            }
+            // Разработчики — под приложениями, как на ПК: сначала то, что
+            // искали, потом «а кто это сделал и что ещё у него есть».
+            if (s.devHits.isNotEmpty()) {
+                item(key = "dev-title", span = { GridItemSpan(maxLineSpan) }) {
+                    Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.Bottom) {
+                        Text("Разработчики", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.width(8.dp))
+                        Text("${s.devHits.size} ${pluralDevs(s.devHits.size)}", color = c.muted, fontSize = 12.sp)
+                    }
+                }
+                items(s.devHits, key = { "dev-${it.artistId}" }, span = { GridItemSpan(maxLineSpan) }) { dev ->
+                    DeveloperRow(dev) { vm.openDeveloper(dev) }
+                }
             }
         }
     }
+
 
     if (s.offerLoading) {
         Dialog(onDismissRequest = {}) {
@@ -449,6 +519,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
             onDismissRequest = vm::closeOffer,
             properties = DialogProperties(usePlatformDefaultWidth = true),
         ) {
+            val offerActivation = remember(offer.appId, s.catalog) { vm.activationFor(offer.appId) }
             OfferDialog(
                 offer = offer,
                 versions = s.versions,
@@ -457,6 +528,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                 versionsSearch = s.versionsSearch,
                 versionsVisibleCount = s.versionsVisibleCount,
                 chosenStore = s.chosenVersion,
+                iosPending = s.versionsIosPending,
                 error = s.offerError,
                 showRestore = offer.showAccountVersions,
                 onChooseStore = vm::chooseVersion,
@@ -468,6 +540,8 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                 onInstall = { if (vm.queueOffer(true)) goInstalls() },
                 onExport = startExport,
                 onBankAlt = vm::openBankAlt,
+                activationCount = offerActivation?.items?.size ?: 0,
+                onActivation = { offerActivation?.let { vm.openActivation(offer.appTitle, it) } },
                 onOtherVersions = vm::openRestoreVersions,
                 onAccount = goAccount,
                 onClose = vm::closeOffer,
@@ -497,73 +571,33 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
 
     val openedDev = s.openedDeveloper
     if (openedDev != null) {
-        Dialog(onDismissRequest = vm::closeDeveloper) {
-            SolidCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            openedDev.name,
-                            color = Color(0xFFF8FAFC),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 17.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            when {
-                                s.developerLoading -> "Смотрим, что есть в магазине…"
-                                s.developerApps.isEmpty() -> "В App Store ничего не нашлось"
-                                else -> "Приложений: ${s.developerApps.size}"
-                            },
-                            color = Color(0xFF94A3B8),
-                            fontSize = 12.sp,
-                        )
+        Dialog(
+            onDismissRequest = { if (!s.developerBatchBusy) vm.closeDeveloper() },
+            properties = DialogProperties(usePlatformDefaultWidth = true),
+        ) {
+            DeveloperDialog(
+                dev = openedDev,
+                apps = s.developerApps,
+                loading = s.developerLoading,
+                error = s.developerError,
+                picked = s.developerPicked,
+                batchBusy = s.developerBatchBusy,
+                onTogglePick = vm::toggleDeveloperPick,
+                onToggleAll = vm::toggleDeveloperPickAll,
+                onDownloadPicked = {
+                    if (!vm.engine.settings.canExportToDownloads()) {
+                        devExportPending = true
+                        folderPicker.launch(null)
+                    } else {
+                        vm.queueDeveloperPicked(goInstalls)
                     }
-                }
-                Spacer(Modifier.height(12.dp))
-                // Ограничиваем высоту: у крупной студии сотня приложений, и
-                // без предела окно уезжает за края экрана.
-                LazyColumn(Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(s.developerApps, key = { "d${it.adamId}" }) { hit ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    vm.closeDeveloper()
-                                    vm.openStoreHit(hit)
-                                },
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            AsyncImage(
-                                hit.artwork,
-                                contentDescription = null,
-                                modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)),
-                                contentScale = ContentScale.Crop,
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    hit.name,
-                                    color = Color(0xFFE2E8F0),
-                                    fontSize = 14.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Text(
-                                    listOfNotNull(
-                                        hit.version?.let { "v$it" },
-                                        hit.minIos?.let { "iOS $it+" },
-                                    ).joinToString(" · "),
-                                    color = Color(0xFF94A3B8),
-                                    fontSize = 11.sp,
-                                )
-                            }
-                        }
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-                SecondaryButton("Закрыть", onClick = vm::closeDeveloper, modifier = Modifier.fillMaxWidth())
-            }
+                },
+                onOpen = { hit ->
+                    vm.closeDeveloper()
+                    vm.openStoreHit(hit)
+                },
+                onClose = vm::closeDeveloper,
+            )
         }
     }
     if (s.bankAltOpen) {
@@ -679,6 +713,7 @@ private fun OfferDialog(
     versionsSearch: String,
     versionsVisibleCount: Int,
     chosenStore: AppStoreVersion?,
+    iosPending: Set<String>,
     error: String,
     showRestore: Boolean,
     onChooseStore: (AppStoreVersion) -> Unit,
@@ -690,6 +725,8 @@ private fun OfferDialog(
     onInstall: () -> Unit,
     onExport: () -> Unit,
     onBankAlt: () -> Unit,
+    activationCount: Int,
+    onActivation: () -> Unit,
     onOtherVersions: () -> Unit,
     onAccount: () -> Unit,
     onClose: () -> Unit,
@@ -840,7 +877,7 @@ private fun OfferDialog(
                     versions.isEmpty() -> {
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "На этом Apple ID приложение не покупалось, поэтому выбирать не из чего — будет скачана последняя доступная версия. Если покупали на другом Apple ID, войдите в него на странице «Аккаунт» и обновите список.",
+                            "Приложения ещё нет в покупках этого Apple ID — история версий появится после установки. Сейчас будет скачана последняя версия. Если покупали на другом Apple ID, войдите в него на странице «Аккаунт» и обновите список.",
                             color = body,
                             fontSize = 12.sp,
                             lineHeight = 17.sp,
@@ -871,6 +908,7 @@ private fun OfferDialog(
                                         }
                                     },
                                     selected = chosenStore?.externalVersionId == version.externalVersionId,
+                                    iosLoading = version.minIos.isNullOrBlank() && version.externalVersionId in iosPending,
                                     onClick = { onChooseStore(version) },
                                 )
                             }
@@ -899,6 +937,14 @@ private fun OfferDialog(
                 SecondaryButton(
                     "Альтернативный способ · ${bank.displayName()}",
                     onClick = onBankAlt,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (activationCount > 0) {
+                SecondaryButton(
+                    if (activationCount == 1) "Активация · QR" else "Активация · все QR ($activationCount)",
+                    onClick = onActivation,
+                    icon = Icons.Outlined.QrCode2,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -1060,7 +1106,7 @@ private fun Badge(text: String, color: Color) {
 }
 
 @Composable
-private fun VersionRow(title: String, subtitle: String, selected: Boolean, onClick: () -> Unit) {
+private fun VersionRow(title: String, subtitle: String, selected: Boolean, iosLoading: Boolean = false, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -1085,6 +1131,13 @@ private fun VersionRow(title: String, subtitle: String, selected: Boolean, onCli
             Text(title, color = Color(0xFFF8FAFC), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(subtitle, color = Color(0xFFCBD5E1), fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
+        if (iosLoading) {
+            // Совместимость ещё уточняется — как «iOS…» на ПК.
+            Spacer(Modifier.size(8.dp))
+            CircularProgressIndicator(Modifier.size(12.dp), color = Color(0xFF94A3B8), strokeWidth = 1.5.dp)
+            Spacer(Modifier.size(4.dp))
+            Text("iOS…", color = Color(0xFF94A3B8), fontSize = 11.sp)
+        }
     }
 }
 
@@ -1102,77 +1155,262 @@ private fun SolidCard(content: @Composable () -> Unit) {
     ) { content() }
 }
 
-// Тот же оттенок, что Brand400 в палитре: отдельная копия осталась со старого
-// сиреневого и после перекраски стала бы расходиться с остальным интерфейсом.
-private val Brand400Safe = Brand400
+private val RU_COLLATOR: java.text.Collator = java.text.Collator.getInstance(java.util.Locale.forLanguageTag("ru"))
+
+/** Тон чипа фильтра: обычный, «подходит» (зелёный), «не подходит» (янтарный) — как на ПК. */
+private enum class ChipTone { Brand, Good, Warn }
 
 @Composable
-private fun FilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun toneColor(tone: ChipTone): Color {
+    val dark = signumColors.isDark
+    return when (tone) {
+        ChipTone.Brand -> if (dark) Brand300 else Brand600
+        ChipTone.Good -> if (dark) Color(0xFF6EE7B7) else Color(0xFF047857)
+        ChipTone.Warn -> if (dark) Color(0xFFFCD34D) else Color(0xFFB45309)
+    }
+}
+
+@Composable
+private fun FilterChip(label: String, selected: Boolean, tone: ChipTone = ChipTone.Brand, onClick: () -> Unit) {
     val c = signumColors
-    val shape = RoundedCornerShape(20.dp)
+    val shape = RoundedCornerShape(12.dp)
+    val accent = toneColor(tone)
     Text(
         label,
-        color = if (selected) Brand300 else c.muted,
+        color = if (selected) accent else c.muted,
         fontSize = 12.sp,
-        fontWeight = FontWeight.Medium,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
         modifier = Modifier
             .clip(shape)
-            .background(if (selected) Brand500.copy(0.15f) else Color.Transparent)
-            .border(1.dp, if (selected) Brand500.copy(0.25f) else c.border, shape)
+            .background(if (selected) accent.copy(alpha = 0.15f) else c.text.copy(alpha = 0.04f))
+            .border(1.dp, if (selected) accent.copy(alpha = 0.3f) else Color.Transparent, shape)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
     )
 }
 
 @Composable
-private fun AppCard(
+private fun SectionHeader(title: String, count: Int, star: Boolean = false) {
+    val c = signumColors
+    Row(
+        Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (star) {
+            Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFCD34D), modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(title, color = c.text, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        Text("$count", color = c.muted, fontSize = 11.sp)
+    }
+}
+
+/** Заглушка карточки, пока грузится каталог или идёт поиск. */
+@Composable
+private fun SkeletonCard() {
+    val c = signumColors
+    val pulse = rememberInfiniteTransition(label = "skeleton")
+    val alpha by pulse.animateFloat(
+        initialValue = 0.05f,
+        targetValue = 0.12f,
+        animationSpec = infiniteRepeatable(tween(850), RepeatMode.Reverse),
+        label = "skeleton-alpha",
+    )
+    val block = c.text.copy(alpha = alpha)
+    Panel {
+        Column(Modifier.fillMaxWidth().heightIn(min = CARD_MIN_HEIGHT)) {
+            Box(Modifier.size(ICON_SIZE).clip(RoundedCornerShape(ICON_CORNER)).background(block))
+            Spacer(Modifier.height(22.dp))
+            Box(Modifier.fillMaxWidth(0.8f).height(14.dp).clip(RoundedCornerShape(6.dp)).background(block))
+            Spacer(Modifier.height(8.dp))
+            Box(Modifier.fillMaxWidth(0.5f).height(10.dp).clip(RoundedCornerShape(6.dp)).background(block))
+        }
+    }
+}
+
+@Composable
+private fun EmptyState(title: String, text: String, extra: @Composable ColumnScope.() -> Unit = {}) {
+    val c = signumColors
+    Panel {
+        Column(Modifier.fillMaxWidth().padding(vertical = 14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(Icons.Outlined.Search, contentDescription = null, tint = c.muted.copy(alpha = 0.7f), modifier = Modifier.size(28.dp))
+            Spacer(Modifier.height(10.dp))
+            Text(title, color = c.text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(4.dp))
+            Text(text, color = c.muted, fontSize = 12.sp, lineHeight = 17.sp, textAlign = TextAlign.Center)
+            extra()
+        }
+    }
+}
+
+@Composable
+private fun ErrorBox(text: String) {
+    val color = if (signumColors.isDark) Color(0xFFFDA4AF) else Color(0xFFBE123C)
+    Text(
+        text,
+        color = color,
+        fontSize = 12.sp,
+        lineHeight = 17.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(color.copy(alpha = 0.08f))
+            .border(1.dp, color.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    )
+}
+
+private val ICON_SIZE = 72.dp
+private val ICON_CORNER = 18.dp
+private val CARD_MIN_HEIGHT = 196.dp
+
+/** `#5b6cf0` из каталога → цвет; без цвета — фирменный, как на ПК. */
+private fun accentColor(raw: String?): Color {
+    val hex = raw?.trim()?.removePrefix("#").orEmpty()
+    val value = when (hex.length) {
+        6 -> hex.toLongOrNull(16)?.let { 0xFF000000 or it }
+        8 -> hex.toLongOrNull(16)
+        else -> null
+    } ?: return Brand500
+    return Color(value)
+}
+
+/**
+ * Значок приложения со скруглением и мягкой подсветкой цвета приложения.
+ * Не загрузился — первая буква на фирменном градиенте, как на ПК.
+ */
+@Composable
+private fun AppIcon(url: String?, title: String, accent: Color, size: Dp = ICON_SIZE, corner: Dp = ICON_CORNER, glow: Boolean = true) {
+    val c = signumColors
+    var broken by remember(url) { mutableStateOf(false) }
+    Box(contentAlignment = Alignment.Center) {
+        if (glow) {
+            Box(
+                Modifier
+                    .size(size + 18.dp)
+                    .background(Brush.radialGradient(listOf(accent.copy(alpha = 0.35f), Color.Transparent))),
+            )
+        }
+        val shape = RoundedCornerShape(corner)
+        if (url.isNullOrBlank() || broken) {
+            Box(
+                Modifier.size(size).clip(shape).background(c.brandBrush),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(title.take(1), color = Color.White, fontWeight = FontWeight.Black, fontSize = (size.value * 0.36f).sp)
+            }
+        } else {
+            AsyncImage(
+                url,
+                contentDescription = null,
+                onError = { broken = true },
+                modifier = Modifier
+                    .size(size)
+                    .clip(shape)
+                    .border(1.dp, Color.White.copy(alpha = 0.16f), shape),
+                contentScale = ContentScale.Crop,
+            )
+        }
+    }
+}
+
+private enum class BadgeTone { Good, Warn, Violet }
+
+@Composable
+private fun CardBadge(text: String, icon: ImageVector, tone: BadgeTone) {
+    val dark = signumColors.isDark
+    val color = when (tone) {
+        BadgeTone.Good -> if (dark) Color(0xFF6EE7B7) else Color(0xFF047857)
+        BadgeTone.Warn -> if (dark) Color(0xFFFCD34D) else Color(0xFFB45309)
+        BadgeTone.Violet -> if (dark) Color(0xFFC4B5FD) else Color(0xFF6D28D9)
+    }
+    val shape = RoundedCornerShape(8.dp)
+    Row(
+        Modifier
+            .clip(shape)
+            .background(color.copy(alpha = 0.12f))
+            .border(1.dp, color.copy(alpha = 0.22f), shape)
+            .padding(horizontal = 7.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(11.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(
+            text.uppercase(),
+            color = color,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.6.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** Квадратная кнопка в углу карточки: избранное, выбор, «открыть». */
+@Composable
+private fun CornerButton(
+    icon: ImageVector,
+    tint: Color,
+    background: Color,
+    contentDescription: String?,
+    onClick: (() -> Unit)? = null,
+) {
+    Box(
+        Modifier
+            .size(32.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(background)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(16.dp))
+    }
+}
+
+/**
+ * Карточка приложения каталога — та же, что `AppCard` на ПК: значок с
+ * подсветкой, метка «App Store» / «Из покупок», «Активация», название,
+ * версия, звезда избранного и стрелка (или отметка в режиме выбора).
+ */
+@Composable
+private fun CatalogAppCard(
     app: CatalogApp,
     favorite: Boolean = false,
     selectable: Boolean = false,
     selected: Boolean = false,
+    onAccount: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val c = signumColors
     val store = app.in_store == true
-    Panel(onClick = onClick) {
-        Column(Modifier.fillMaxWidth().animateContentSize()) {
-            if (!app.icon_url.isNullOrBlank()) {
-                AsyncImage(
-                    app.icon_url,
-                    contentDescription = null,
-                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(16.dp)),
-                    contentScale = ContentScale.Crop,
-                )
-            } else {
-                Box(
-                    Modifier
-                        .size(64.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Brand500),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(app.title.take(1), color = Color.White, fontWeight = FontWeight.Black, fontSize = 22.sp)
+    val accent = remember(app.color) { accentColor(app.color) }
+    val ring = if (selected) Modifier.border(2.dp, Brand400, RoundedCornerShape(18.dp)) else Modifier
+    Panel(modifier = ring, onClick = onClick) {
+        Column(Modifier.fillMaxWidth().heightIn(min = CARD_MIN_HEIGHT)) {
+            Row(verticalAlignment = Alignment.Top) {
+                AppIcon(app.icon_url, app.title, accent)
+                Spacer(Modifier.weight(1f))
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    if (store) CardBadge("App Store", Icons.Outlined.Storefront, BadgeTone.Good)
+                    else CardBadge("Из покупок", Icons.Outlined.Restore, BadgeTone.Warn)
+                    if (app.activation != null) CardBadge("Активация", Icons.Outlined.QrCode2, BadgeTone.Violet)
+                    if (onAccount) CardBadge("Есть на Apple ID", Icons.Outlined.Restore, BadgeTone.Good)
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (store) Color(0x334ADE80) else Color(0x33FBBF24))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            ) {
-                Text(
-                    if (store) "App Store" else "Из покупок",
-                    color = if (store) Color(0xFF6EE7B7) else Color(0xFFFCD34D),
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            Text(app.title, color = c.text, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(16.dp))
+            Text(
+                app.title,
+                color = c.text,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                lineHeight = 20.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(3.dp))
             Text(
                 CatalogSearch.formatVersion(app.version, app.min_ios),
                 color = c.muted,
@@ -1180,40 +1418,285 @@ private fun AppCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (selectable || onToggleFavorite != null) {
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (onToggleFavorite != null) {
-                        Text(
-                            if (favorite) "★ В избранном" else "☆ В избранное",
-                            color = if (favorite) Color(0xFFFCD34D) else c.muted,
-                            fontSize = 11.sp,
-                            modifier = Modifier.clickable(onClick = onToggleFavorite),
-                        )
-                    }
-                    if (selectable) {
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            if (selected) "Выбрано" else "Выбрать",
-                            color = if (selected) Brand300 else c.muted,
-                            fontSize = 11.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                        )
-                    }
+            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (onToggleFavorite != null) {
+                    CornerButton(
+                        icon = if (favorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                        tint = if (favorite) Color(0xFFFCD34D) else c.muted,
+                        background = if (favorite) Color(0x26FBBF24) else c.text.copy(alpha = 0.05f),
+                        contentDescription = if (favorite) "Убрать из избранного" else "В избранное",
+                        onClick = onToggleFavorite,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                if (selectable) {
+                    CornerButton(
+                        icon = if (selected) Icons.Filled.Check else Icons.Outlined.CheckBoxOutlineBlank,
+                        tint = if (selected) Color.White else c.muted,
+                        background = if (selected) Brand500 else c.text.copy(alpha = 0.05f),
+                        contentDescription = if (selected) "Выбрано" else "Выбрать",
+                    )
+                } else {
+                    CornerButton(
+                        icon = Icons.Outlined.NorthEast,
+                        tint = if (c.isDark) Brand300 else Brand600,
+                        background = c.text.copy(alpha = 0.05f),
+                        contentDescription = null,
+                    )
                 }
             }
         }
     }
 }
 
+/**
+ * Результат App Store без карточки в каталоге — как `StoreHitCard` на ПК:
+ * значок, «Есть на Apple ID» / «Нет в App Store», название и разработчик.
+ */
+@Composable
+private fun StoreHitCard(hit: AppStoreSearchHit, onClick: () -> Unit) {
+    val c = signumColors
+    Panel(onClick = onClick) {
+        Column(Modifier.fillMaxWidth().heightIn(min = CARD_MIN_HEIGHT)) {
+            Row(verticalAlignment = Alignment.Top) {
+                AppIcon(hit.artwork, hit.name, Brand500)
+                Spacer(Modifier.weight(1f))
+                when {
+                    hit.foundOnAccount -> CardBadge("Есть на Apple ID", Icons.Outlined.Restore, BadgeTone.Good)
+                    hit.removedFromStore -> CardBadge("Нет в App Store", Icons.Outlined.Storefront, BadgeTone.Warn)
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                hit.name,
+                color = c.text,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                lineHeight = 20.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            val sub = hit.artist?.trim().orEmpty()
+            if (sub.isNotEmpty()) {
+                Spacer(Modifier.height(3.dp))
+                Text(sub, color = c.muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            val meta = listOfNotNull(
+                hit.version?.takeIf { it.isNotBlank() }?.let { "v$it" },
+                hit.minIos?.takeIf { it.isNotBlank() }?.let { "iOS $it+" },
+            ).joinToString(" · ")
+            if (meta.isNotEmpty()) {
+                Text(meta, color = c.muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(14.dp))
+            Row {
+                Spacer(Modifier.weight(1f))
+                CornerButton(
+                    icon = Icons.Outlined.NorthEast,
+                    tint = if (c.isDark) Brand300 else Brand600,
+                    background = c.text.copy(alpha = 0.05f),
+                    contentDescription = null,
+                )
+            }
+        }
+    }
+}
+
+/** Три значка приложений разработчика внахлёст. */
+@Composable
+private fun StackedIcons(icons: List<String>, name: String, size: Dp = 32.dp) {
+    val list = icons.ifEmpty { listOf("") }.take(3)
+    Box(Modifier.width(size + (size * 0.6f) * (list.size - 1)).height(size)) {
+        list.forEachIndexed { index, icon ->
+            Box(
+                Modifier
+                    .padding(start = (size * 0.6f) * index)
+                    .clip(RoundedCornerShape(9.dp))
+                    .border(2.dp, signumColors.surface, RoundedCornerShape(9.dp)),
+            ) {
+                AppIcon(icon.ifBlank { null }, name, Brand500, size = size, corner = 9.dp, glow = false)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeveloperRow(dev: StoreDeveloper, onClick: () -> Unit) {
+    val c = signumColors
+    Panel(onClick = onClick) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StackedIcons(dev.icons, dev.name)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(dev.name, color = c.text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${dev.appCount} ${pluralApps(dev.appCount)} в App Store", color = c.muted, fontSize = 11.sp)
+            }
+            Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.muted)
+        }
+    }
+}
+
+/**
+ * Страница разработчика: все его приложения, отметка для пакетной загрузки
+ * и «Скачать отмеченные» — как на ПК.
+ */
+@Composable
+private fun DeveloperDialog(
+    dev: StoreDeveloper,
+    apps: List<AppStoreSearchHit>,
+    loading: Boolean,
+    error: String,
+    picked: Set<String>,
+    batchBusy: Boolean,
+    onTogglePick: (String) -> Unit,
+    onToggleAll: () -> Unit,
+    onDownloadPicked: () -> Unit,
+    onOpen: (AppStoreSearchHit) -> Unit,
+    onClose: () -> Unit,
+) {
+    val titleColor = Color(0xFFF8FAFC)
+    val muted = Color(0xFF94A3B8)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = 680.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(Space800)
+            .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp))
+            .padding(18.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StackedIcons(dev.icons.ifEmpty { apps.mapNotNull { it.artwork }.take(3) }, dev.name, size = 36.dp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(dev.name, color = titleColor, fontWeight = FontWeight.Bold, fontSize = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(
+                    if (loading) "Спрашиваем Apple…" else "${apps.size} ${pluralApps(apps.size)} в App Store",
+                    color = muted,
+                    fontSize = 12.sp,
+                )
+            }
+        }
+        if (error.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            Text(error, color = Color(0xFFFDA4AF), fontSize = 12.sp, lineHeight = 17.sp)
+        }
+        if (!loading && apps.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton(if (picked.size == apps.size) "Снять все" else "Выбрать все", onClick = onToggleAll)
+                PrimaryButton(
+                    if (batchBusy) "Ставим в очередь…" else "Скачать отмеченные" + if (picked.isEmpty()) "" else " · ${picked.size}",
+                    onClick = onDownloadPicked,
+                    loading = batchBusy,
+                    enabled = picked.isNotEmpty() && !batchBusy,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Apple отдаёт только то, что сейчас в магазине. Снятые с продажи ищите по названию или номеру.",
+                color = muted,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        if (loading) {
+            Row(Modifier.padding(vertical = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(16.dp), color = Brand300, strokeWidth = 2.dp)
+                Spacer(Modifier.width(10.dp))
+                Text("Спрашиваем Apple…", color = muted, fontSize = 13.sp)
+            }
+        }
+        // Высота ограничена: у крупной студии сотня приложений.
+        LazyColumn(Modifier.weight(1f, fill = false), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(apps, key = { "d${it.adamId}" }) { hit ->
+                val on = hit.adamId in picked
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (on) Brand500.copy(alpha = 0.14f) else Color(0x0DFFFFFF))
+                        .border(1.dp, if (on) Brand400.copy(alpha = 0.4f) else Color.Transparent, RoundedCornerShape(12.dp))
+                        .padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Отметка отдельной кнопкой: нажатие на строку открывает
+                    // приложение, а не молча его отмечает.
+                    Box(
+                        Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onTogglePick(hit.adamId) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            Modifier
+                                .size(20.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (on) Brand500 else Color.Transparent)
+                                .border(1.5.dp, if (on) Brand400 else Color(0x55FFFFFF), RoundedCornerShape(6.dp)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (on) Icon(Icons.Filled.Check, contentDescription = "Отмечено", tint = Color.White, modifier = Modifier.size(14.dp))
+                        }
+                    }
+                    Row(
+                        Modifier.weight(1f).clickable { onOpen(hit) },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AppIcon(hit.artwork, hit.name, Brand500, size = 44.dp, corner = 11.dp, glow = false)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(hit.name, color = Color(0xFFE2E8F0), fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                listOfNotNull(
+                                    hit.version?.let { "v$it" },
+                                    hit.minIos?.let { "iOS $it+" },
+                                ).joinToString(" · ").ifEmpty { hit.adamId },
+                                color = muted,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                            )
+                        }
+                        Icon(Icons.Outlined.Download, contentDescription = null, tint = muted, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        SecondaryButton("Закрыть", onClick = onClose, modifier = Modifier.fillMaxWidth(), enabled = !batchBusy)
+    }
+}
+
+/** «1 разработчик», «2 разработчика», «5 разработчиков». */
+private fun pluralDevs(count: Int): String = plural(count, "разработчик", "разработчика", "разработчиков")
+
+/** «1 приложение», «2 приложения», «5 приложений». */
+private fun pluralApps(count: Int): String = plural(count, "приложение", "приложения", "приложений")
+
+private fun plural(count: Int, one: String, few: String, many: String): String {
+    val tail = count % 100
+    if (tail in 11..14) return many
+    return when (count % 10) {
+        1 -> one
+        2, 3, 4 -> few
+        else -> many
+    }
+}
+
 /** Строка «подпись — значение» с копированием: вводить это придётся на iPhone. */
 @Composable
 private fun CopyRow(label: String, value: String) {
-    val clipboard = LocalClipboardManager.current
+    val copy = pw.appbank.signum.ui.components.rememberCopyText()
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable { clipboard.setText(AnnotatedString(value)) },
+            .clickable { copy(value) },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {

@@ -39,7 +39,14 @@ rcgen = "0.13"
 aes = "0.8"
 cbc = "0.1"
                                                                
-isideload = { path = "vendor/isideload/isideload", default-features = false, features = ["fs-storage", "install"] }
+# Vendored isideload 0.5.2 with local fixes (grep "Signum patch" in vendor/isideload).
+isideload = { path = "vendor/isideload/isideload", default-features = false, features = ["fs-storage", "install", "tokio-mt"] }
+rootcause = "0.12"
+# Свой сертификат (.p12 + .mobileprovision): проверка пароля/профиля и подпись
+# без zsign (на macOS/Linux zsign не поставляется). Те же версии, что тянет isideload.
+apple-codesign-quick = "0.1.0"
+p12-keystore = { package = "isideload-p12-keystore", version = "0.3.0-rc4" }
+x509-cert = "0.2.5"
 tracing = "0.1"
 
 [profile.release]

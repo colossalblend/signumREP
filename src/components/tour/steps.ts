@@ -119,7 +119,7 @@ export const STEPS: TourStep[] = [
     anchor: "find-input",
     eyebrow: "Единый поиск",
     title: "Введите название",
-    text: "Signum сначала показывает совпадения из каталога, а затем автоматически проверяет AppMagic и iTunes. Переключать источник не нужно.",
+    text: "Signum сначала показывает совпадения из каталога, а затем автоматически ищет в App Store. Переключать источник не нужно.",
     prefer: "below",
     state: ({ navigate, signal }) => {
       navigate("/");

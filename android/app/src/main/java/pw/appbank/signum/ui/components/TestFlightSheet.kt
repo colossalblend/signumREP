@@ -166,7 +166,7 @@ private fun shareLink(ctx: Context, url: String) {
  * Уровень коррекции M, а не H: ссылки TestFlight короткие, запаса хватает, а
  * модули остаются крупными — камера телефона ловит код с экрана увереннее.
  */
-private fun qrBitmap(text: String, size: Int = 512): ImageBitmap? = runCatching {
+internal fun qrBitmap(text: String, size: Int = 512): ImageBitmap? = runCatching {
     val hints = mapOf(
         EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
         EncodeHintType.MARGIN to 1,

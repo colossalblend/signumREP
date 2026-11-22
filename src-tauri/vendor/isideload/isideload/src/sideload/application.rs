@@ -5,15 +5,24 @@ use crate::SideloadError;
 use crate::dev::app_ids::{AppId, AppIdsApi};
 use crate::dev::developer_session::DeveloperSession;
 use crate::dev::teams::DeveloperTeam;
+use crate::sideload::builder::ExtensionsBehavior;
 use crate::sideload::bundle::Bundle;
 use crate::sideload::cert_identity::CertificateIdentity;
+use aes_gcm::{
+    Aes256Gcm, Nonce,
+    aead::{Aead, Generate, KeyInit},
+};
+use isideload_vfs::fs::File;
 use rootcause::option_ext::OptionExt;
 use rootcause::prelude::*;
-use std::fs::File;
+use sha1::Digest;
+use sha2::Sha256;
+use std::io::Write;
 use std::path::PathBuf;
-use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 use zip::ZipArchive;
+
+static ALT_PAIRING_FILE: &str = "ALTPairingFile.dat";
 
 pub struct Application {
     pub bundle: Bundle,
@@ -22,7 +31,7 @@ pub struct Application {
 
 impl Application {
     pub fn new(path: PathBuf) -> Result<Self, Report> {
-        if !path.exists() {
+        if !isideload_vfs::fs::metadata(&path).is_ok() {
             bail!(SideloadError::InvalidBundle(
                 "Application path does not exist".to_string(),
             ));
@@ -31,8 +40,8 @@ impl Application {
         let mut bundle_path = path.clone();
         //let mut temp_path = PathBuf::new();
 
-        if path.is_file() {
-            let temp_dir = std::env::temp_dir();
+        if isideload_vfs::fs::metadata(&bundle_path)?.is_file() {
+            let temp_dir = isideload_vfs::fs::temp_dir();
             let temp_path = temp_dir.join(
                 path.file_name()
                     .ok_or_report()?
@@ -40,22 +49,24 @@ impl Application {
                     .to_string()
                     + "_extracted",
             );
-            if temp_path.exists() {
-                std::fs::remove_dir_all(&temp_path)
+            if isideload_vfs::fs::metadata(&temp_path).is_ok() {
+                isideload_vfs::fs::remove_dir_all(&temp_path)
                     .context("Failed to remove existing temporary directory")?;
             }
-            std::fs::create_dir_all(&temp_path).context("Failed to create temporary directory")?;
+            isideload_vfs::fs::create_dir_all(&temp_path)
+                .context("Failed to create temporary directory")?;
 
             let file = File::open(&path).context("Failed to open application archive")?;
             let mut archive =
                 ZipArchive::new(file).context("Failed to open application archive")?;
+
             archive
                 .extract(&temp_path)
                 .context("Failed to extract application archive")?;
 
             let payload_folder = temp_path.join("Payload");
-            if payload_folder.exists() && payload_folder.is_dir() {
-                let app_dirs: Vec<_> = std::fs::read_dir(&payload_folder)
+            if isideload_vfs::fs::metadata(&payload_folder).is_ok() && payload_folder.is_dir() {
+                let app_dirs: Vec<_> = isideload_vfs::fs::read_dir(&payload_folder)
                     .context("Failed to read Payload directory")?
                     .filter_map(Result::ok)
                     .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
@@ -73,9 +84,22 @@ impl Application {
                     ));
                 }
             } else {
-                bail!(SideloadError::InvalidBundle(
-                    "No Payload directory found in the application archive".to_string(),
-                ));
+                // gather the directory contents as a string for debugging
+                let mut contents = String::new();
+                if isideload_vfs::fs::metadata(&temp_path).is_ok() && temp_path.is_dir() {
+                    let entries = isideload_vfs::fs::read_dir(&temp_path)
+                        .context("Failed to read temporary directory for error reporting")?;
+                    for entry in entries {
+                        if let Ok(entry) = entry {
+                            contents
+                                .push_str(&format!("{}\n", entry.file_name().to_string_lossy()));
+                        }
+                    }
+                }
+                bail!(SideloadError::InvalidBundle(format!(
+                    "No Payload directory found in the application archive, instead: {}",
+                    contents
+                ),));
             }
         }
         let bundle = Bundle::new(bundle_path)?;
@@ -165,13 +189,21 @@ impl Application {
 
     pub async fn register_app_ids(
         &self,
-        //mode: &ExtensionsBehavior,
+        mode: &ExtensionsBehavior,
         dev_session: &mut DeveloperSession,
         team: &DeveloperTeam,
     ) -> Result<Vec<AppId>, Report> {
-        let extension_refs: Vec<_> = self.bundle.app_extensions().iter().collect();
         let mut bundles_with_app_id = vec![&self.bundle];
-        bundles_with_app_id.extend(extension_refs);
+
+        match mode {
+            ExtensionsBehavior::ReuseMain => {
+                // nothing to do
+            }
+            ExtensionsBehavior::RegisterAll => {
+                let extension_refs: Vec<_> = self.bundle.app_extensions().iter().collect();
+                bundles_with_app_id.extend(extension_refs);
+            }
+        }
 
         let list_app_ids_response = dev_session
             .list_app_ids(team, None)
@@ -238,6 +270,8 @@ impl Application {
         special: &Option<SpecialApp>,
         group_identifier: &str,
         cert: &CertificateIdentity,
+        pairing_file: Option<&[u8]>,
+        device_udid: Option<&str>,
     ) -> Result<(), Report> {
         let Some(special) = special.as_ref() else {
             return Ok(());
@@ -255,6 +289,15 @@ impl Application {
                     "ALTAppGroups".to_string(),
                     plist::Value::Array(vec![plist::Value::String(group_identifier.to_string())]),
                 );
+                let extensions = self.bundle.app_extensions_mut();
+                for ext in extensions.iter_mut() {
+                    ext.app_info.insert(
+                        "ALTAppGroups".to_string(),
+                        plist::Value::Array(vec![plist::Value::String(
+                            group_identifier.to_string(),
+                        )]),
+                    );
+                }
             }
             info!("Injecting certificate for {}", special);
 
@@ -286,12 +329,48 @@ impl Application {
                     .context("Failed to encode cert as p12")?;
                 let alt_cert_path = target_bundle.bundle_dir.join(cert_file_name);
 
-                let mut file = tokio::fs::File::create(&alt_cert_path)
-                    .await
+                let mut file = isideload_vfs::fs::File::create(&alt_cert_path)
                     .context(format!("Failed to create {}", cert_file_name))?;
                 file.write_all(&p12_bytes)
-                    .await
                     .context(format!("Failed to write {}", cert_file_name))?;
+            }
+        }
+
+        if matches!(special, SpecialApp::AltStore) {
+            if let Some(pairing_file) = pairing_file {
+                info!("Injecting pairing file for AltStore");
+
+                let key_bytes = Sha256::digest(cert.machine_id.as_bytes());
+
+                let cipher = Aes256Gcm::new(&key_bytes);
+
+                let nonce = Nonce::generate();
+                let ciphertext = cipher.encrypt(&nonce, pairing_file)?;
+
+                let mut sealed_box = Vec::with_capacity(nonce.len() + ciphertext.len());
+                sealed_box.extend_from_slice(&nonce);
+                sealed_box.extend_from_slice(&ciphertext);
+
+                let mut file =
+                    isideload_vfs::fs::File::create(&self.bundle.bundle_dir.join(ALT_PAIRING_FILE))
+                        .context(format!("Failed to create {}", ALT_PAIRING_FILE))?;
+                file.write_all(&sealed_box)
+                    .context(format!("Failed to write {}", ALT_PAIRING_FILE))?;
+            } else {
+                warn!(
+                    "Pairing file is required for AltStore remote AltServer setup, but was not provided"
+                )
+            }
+
+            if let Some(device_udid) = device_udid {
+                self.bundle.app_info.insert(
+                    "ALTDeviceId".to_string(),
+                    plist::Value::String(device_udid.to_string()),
+                );
+            } else {
+                warn!(
+                    "Device UDID is required for AltStore remote AltServer setup, but was not provided"
+                )
             }
         }
         Ok(())

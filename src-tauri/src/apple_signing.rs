@@ -173,6 +173,9 @@ pub struct SignedIpaResult {
     pub team_id: String,
     pub team_name: String,
     pub team_kind: String,
+    /// Когда подпись перестанет работать (профиль или сертификат), ISO-8601.
+    pub expires_at: Option<String>,
+    pub expires_unix: Option<u64>,
 }
 
                                                                               
@@ -293,6 +296,7 @@ pub fn save_custom_cert(
     if !is_safe_cert_file_name(name) {
         return Err("Недопустимое имя сертификата.".into());
     }
+    validate_cert_pair(p12_src, prov_src, password)?;
     let dir = saved_certs_dir(app_data).join(name);
     fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать папку сертификата: {e}"))?;
     fs::copy(p12_src, dir.join("cert.p12")).map_err(|e| format!("Не удалось сохранить .p12: {e}"))?;
@@ -306,6 +310,30 @@ pub fn save_custom_cert(
         set_custom_cert_password(name, password)?;
     }
     Ok(dir)
+}
+
+/// Проверить пару .p12 + .mobileprovision ещё при сохранении: неверный
+/// пароль или профиль от другого сертификата раньше всплывали только при
+/// подписи, а то и при установке на iPhone.
+fn validate_cert_pair(p12: &Path, prov: &Path, password: &str) -> Result<(), String> {
+    let raw = fs::read(prov).map_err(|e| format!("Не удалось прочитать профиль: {e}"))?;
+    let profile = crate::signing_profile::parse_profile(&raw)
+        .map_err(|e| format!("Файл .mobileprovision не читается ({e})."))?;
+    match read_p12(p12, password) {
+        P12Check::WrongPassword => Err(p12_shape_message(p12).into()),
+        P12Check::Ok(identity) => {
+            if profile.includes_certificate(&identity.cert_der) {
+                Ok(())
+            } else {
+                Err("Сертификат .p12 и профиль .mobileprovision не пара: профиль выписан на другой сертификат.".into())
+            }
+        }
+        // Редкий формат шифрования: не мешаем сохранить, zsign может справиться.
+        P12Check::Unreadable(_) => match p12_shape(p12) {
+            P12Shape::LooksLikeP12 => Ok(()),
+            _ => Err(p12_shape_message(p12).into()),
+        },
+    }
 }
 
 /// Пути к файлам сохранённого сертификата + пароль из Credential Manager.
@@ -415,51 +443,99 @@ fn delete_custom_cert_password(name: &str) {
 }
 
                                                                                   
-fn wait_for_signing_2fa_code(
+/// Ждём код 2FA из окна Signum (Signing2faGate).
+///
+/// Асинхронно: раньше ожидание блокировало поток рантайма на три минуты.
+/// В ответ можно прислать код, `__resend__` (ещё раз), `__sms__` (прислать SMS)
+/// или пустую строку — отмена.
+async fn wait_for_signing_2fa_code(
     app: &tauri::AppHandle,
-    sms: bool,
+    params: &isideload::auth::apple_account::TwoFactorCallbackParams,
 ) -> isideload::auth::apple_account::TwoFactorCallbackResponse {
     use isideload::auth::apple_account::TwoFactorCallbackResponse;
     use tauri::{Emitter, Manager};
 
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    if let Some(state) = app.try_state::<crate::AppState>() {
-        if let Ok(mut slot) = state.signing_2fa_reply.lock() {
-            *slot = Some(tx);
-        }
-    } else {
-        return TwoFactorCallbackResponse::Abort;
+    let first_number = params
+        .selected_number_id
+        .or_else(|| params.numbers.first().map(|n| n.id));
+
+    // Apple не сказала, каким способом подтверждать (прошлый способ не
+    // сработал): код ввести некуда, поэтому сразу выбираем доставку.
+    if params.unknown {
+        return match first_number {
+            Some(id) => TwoFactorCallbackResponse::SendSms(id),
+            None => TwoFactorCallbackResponse::SendToDevices,
+        };
     }
 
-    let message = if sms {
-        "Apple отправил SMS. Введите 6-значный код."
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    match app.try_state::<crate::AppState>() {
+        Some(state) => {
+            if let Ok(mut slot) = state.signing_2fa_reply.lock() {
+                *slot = Some(tx);
+            }
+        }
+        None => return TwoFactorCallbackResponse::Abort,
+    }
+
+    let phone_hint = params
+        .numbers
+        .iter()
+        .find(|n| Some(n.id) == params.selected_number_id)
+        .or_else(|| params.numbers.first())
+        .map(|n| n.number_with_dial_code.clone());
+    let mut message = if params.sms {
+        match &phone_hint {
+            Some(phone) => format!("Apple отправил SMS на {phone}. Введите 6-значный код."),
+            None => "Apple отправил SMS. Введите 6-значный код.".to_string(),
+        }
     } else {
-        "Apple отправил код на iPhone. Введите 6 цифр."
+        "Apple отправил код на iPhone. Введите 6 цифр.".to_string()
     };
+    if params.last_error.is_some() {
+        message = format!("Код не подошёл или устарел. {message}");
+    }
     let _ = app.emit(
         "signing-2fa-required",
         serde_json::json!({
             "message": message,
-            "sms": sms,
+            "sms": params.sms,
+            "can_sms": first_number.is_some() && !params.sms,
+            "retry": params.last_error.is_some(),
         }),
     );
 
-    match rx.recv_timeout(Duration::from_secs(180)) {
-        Ok(code) if code == "__resend__" => TwoFactorCallbackResponse::ResendCode,
-        Ok(code) => {
-            let digits: String = code
-                .chars()
-                .filter(|c| c.is_ascii_digit())
-                .take(6)
-                .collect();
-            if digits.len() >= 6 {
+    let reply = tokio::time::timeout(Duration::from_secs(300), rx).await;
+    let response = match reply {
+        Ok(Ok(code)) if code == "__resend__" => TwoFactorCallbackResponse::ResendCode,
+        Ok(Ok(code)) if code == "__sms__" => match first_number {
+            Some(id) => TwoFactorCallbackResponse::SendSms(id),
+            None => TwoFactorCallbackResponse::ResendCode,
+        },
+        Ok(Ok(code)) => {
+            let digits = only_code_digits(&code);
+            if digits.len() == 6 {
                 TwoFactorCallbackResponse::SubmitCode(digits)
             } else {
                 TwoFactorCallbackResponse::Abort
             }
         }
-        Err(_) => TwoFactorCallbackResponse::Abort,
+        // Окно закрыли / время вышло.
+        _ => TwoFactorCallbackResponse::Abort,
+    };
+    if matches!(response, TwoFactorCallbackResponse::Abort) {
+        if let Some(state) = app.try_state::<crate::AppState>() {
+            if let Ok(mut slot) = state.signing_2fa_reply.lock() {
+                *slot = None;
+            }
+        }
+        let _ = app.emit("signing-2fa-closed", serde_json::json!({}));
     }
+    response
+}
+
+fn only_code_digits(code: &str) -> String {
+    code.chars().filter(|c| c.is_ascii_digit()).take(6).collect()
 }
 
 fn report_text(err: impl std::fmt::Display) -> String {
@@ -480,23 +556,33 @@ fn report_text(err: impl std::fmt::Display) -> String {
 
 fn map_sign_app_err(err: impl std::fmt::Display) -> String {
     let s = report_text(err);
-    let lower = s.to_ascii_lowercase();
-    if lower.contains("not enough available app id")
-        || (lower.contains("app id") && lower.contains("required") && lower.contains("available"))
-    {
-        return "SIGN_IPA_APP_ID_LIMIT: На этом Apple ID кончился лимит подписей — у бесплатного их 10. Включите «Удалить плагины» или войдите другим Apple ID.".into();
-    }
-    if lower.contains("8220")
-        || lower.contains("no devices from which to generate")
-        || lower.contains("team has no devices")
-        || (lower.contains("provisioning profile") && lower.contains("no device"))
-    {
-        return "SIGN_IPA_NO_TEAM_DEVICE: Для подписи Apple нужна хотя бы одна регистрация iPhone на этом Apple ID. Подключите iPhone кабелем, нажмите «Доверять» и повторите. Потом файл можно сохранять и без телефона.".into();
-    }
     if s.trim().is_empty() {
         return "SIGN_IPA_CERT_FAILED: Не удалось подписать файл. Повторите попытку или войдите другим Apple ID.".into();
     }
     map_isideload_err(s)
+}
+
+const APP_ID_LIMIT_TEXT: &str = "SIGN_IPA_APP_ID_LIMIT: На этом Apple ID кончился лимит App ID — бесплатный аккаунт даёт 10 штук на 7 дней, и каждое расширение внутри приложения занимает ещё один. Включите «Удалить плагины», подождите, пока старые App ID освободятся, или войдите другим Apple ID.";
+
+/// «Not enough available app IDs. 3 are required, but only 1 is available.»
+fn is_app_id_limit(lower: &str) -> bool {
+    lower.contains("not enough available app id")
+        || (lower.contains("app id") && lower.contains("required") && lower.contains("available"))
+        // 9401: «Cannot create more than 10 App IDs within 7 days» и т.п.
+        || lower.contains("maximum app id")
+        || (lower.contains("app ids") && lower.contains("7 days"))
+}
+
+/// Перехваченное TLS-соединение (антивирус с HTTPS-проверкой, корпоративный
+/// прокси). Это не про сертификат разработчика, хотя слово то же.
+fn is_tls_interception(lower: &str) -> bool {
+    lower.contains("invalid peer certificate")
+        || lower.contains("unknownissuer")
+        || lower.contains("unknown issuer")
+        || lower.contains("certificate verify failed")
+        || lower.contains("self signed certificate")
+        || lower.contains("self-signed certificate")
+        || lower.contains("badsignature")
 }
 
 /// Похоже ли на временный отказ Apple, который имеет смысл просто переждать.
@@ -526,10 +612,8 @@ fn has_status_code(text: &str, code: &str) -> bool {
 fn map_isideload_err(err: impl std::fmt::Display) -> String {
     let s = report_text(err);
     let lower = s.to_ascii_lowercase();
-    if lower.contains("not enough available app id")
-        || (lower.contains("app id") && lower.contains("required") && lower.contains("available"))
-    {
-        return "SIGN_IPA_APP_ID_LIMIT: На этом Apple ID кончился лимит подписей — у бесплатного их 10. Включите «Удалить плагины» или войдите другим Apple ID.".into();
+    if is_app_id_limit(&lower) {
+        return APP_ID_LIMIT_TEXT.into();
     }
     if lower.contains("8220")
         || lower.contains("no devices from which to generate")
@@ -541,13 +625,19 @@ fn map_isideload_err(err: impl std::fmt::Display) -> String {
     if lower.contains("2fa")
         || lower.contains("two-factor")
         || lower.contains("two factor")
-        || lower.contains("no 2fa code")
-        || lower.contains("abort")
+        || lower.contains("aborting")
     {
-        return "SIGN_IPA_DEV_LOGIN_FAILED: нужен код 2FA для Developer. Введите код в окне Signum (не только вход в «Аккаунт»).".into();
+        return "SIGN_IPA_DEV_LOGIN_FAILED: Apple ждёт код подтверждения (2FA). Введите его в окне Signum, которое появится во время подписи.".into();
     }
-    if lower.contains("password") || lower.contains("credential") || lower.contains("-22406") {
+    if lower.contains("-20101")
+        || lower.contains("-22406")
+        || lower.contains("password")
+        || lower.contains("credential")
+    {
         return "SIGN_IPA_DEV_LOGIN_FAILED: Apple не принял пароль. Выйдите и войдите снова в «Аккаунт».".into();
+    }
+    if is_tls_interception(&lower) {
+        return "SIGN_IPA_NETWORK: Защищённое соединение с Apple подменено — обычно это антивирус с проверкой HTTPS или прокси. Отключите проверку HTTPS (или добавьте Signum в исключения) и повторите.".into();
     }
     if lower.contains("anisette") {
         return "SIGN_IPA_DEV_LOGIN_FAILED: Apple не подтвердила этот компьютер. Проверьте интернет и повторите.".into();
@@ -556,12 +646,10 @@ fn map_isideload_err(err: impl std::fmt::Display) -> String {
     // не проблема пароля. Без этой ветки текст падал в общий случай и
     // показывался пользователю сырым дампом.
     if is_apple_outage(&lower) {
-        return "SIGN_IPA_DEV_LOGIN_FAILED: Apple временно не отвечает (сервис входа перегружен).                 Это не ошибка пароля — подождите несколько минут и повторите."
+        return "SIGN_IPA_DEV_LOGIN_FAILED: Apple временно не отвечает (сервис входа перегружен). Это не ошибка пароля — подождите несколько минут и повторите."
             .into();
     }
-    if lower.contains("team")
-        && (lower.contains("empty") || lower.contains("none") || lower.contains("no "))
-    {
+    if lower.contains("no developer teams") || lower.contains("no team selected") {
         return "SIGN_IPA_TEAM_NONE".into();
     }
     if lower.contains("appidname")
@@ -574,6 +662,23 @@ fn map_isideload_err(err: impl std::fmt::Display) -> String {
         || lower.contains("failed to add developer app group")
     {
         return "SIGN_IPA_CERT_FAILED: Apple не приняла имя приложения — обычно из-за кириллицы. Обновите Signum и повторите: имена подчищаются сами.".into();
+    }
+    // Сеть проверяем до «certificate»: обёртка «Failed to retrieve certificate
+    // identity» иначе выдавала обрыв связи за проблему сертификата.
+    // Apple was simply unreachable — the retry advice is about the network,
+    // not about the Apple ID.
+    if lower.contains("failed to fetch url bag")
+        || lower.contains("error sending request")
+        || lower.contains("connectionreset")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("dns error")
+        || lower.contains("timed out")
+    {
+        return "SIGN_IPA_NETWORK: Не удалось связаться с серверами Apple. Проверьте интернет или VPN и повторите попытку.".into();
+    }
+    if lower.contains("7460") || lower.contains("maximum number of certificates") {
+        return "SIGN_IPA_CERT_FAILED: на Apple ID уже выпущен максимум сертификатов разработки, и освободить место не удалось. Отзовите лишний сертификат на developer.apple.com (Certificates) или подождите и повторите.".into();
     }
     if lower.contains("certificate")
         || lower.contains("7252")
@@ -591,18 +696,6 @@ fn map_isideload_err(err: impl std::fmt::Display) -> String {
         || lower.contains("mismatched extension bundle")
     {
         return format!("SIGN_IPA_BUNDLE_INVALID: В приложении есть расширение с чужим идентификатором, Apple такой пакет не подписывает. Включите «Удалить плагины / extensions» в опциях подписи и повторите. {s}");
-    }
-    // Apple was simply unreachable — the retry advice is about the network,
-    // not about the Apple ID.
-    if lower.contains("failed to fetch url bag")
-        || lower.contains("error sending request")
-        || lower.contains("connectionreset")
-        || lower.contains("connection reset")
-        || lower.contains("connection refused")
-        || lower.contains("dns error")
-        || lower.contains("timed out")
-    {
-        return "SIGN_IPA_NETWORK: Не удалось связаться с серверами Apple. Проверьте интернет или VPN и повторите попытку.".into();
     }
     format!("SIGN_IPA_DEV_LOGIN_FAILED: {s}")
 }
@@ -629,10 +722,16 @@ pub async fn sign_ipa_for_device(
 ) -> Result<SignedIpaResult, String> {
     use isideload::{
         anisette::remote_v3::RemoteV3AnisetteProvider,
-        auth::apple_account::AppleAccount,
+        auth::apple_account::{AppleAccount, TwoFactorCallbackParams},
         dev::{developer_session::DeveloperSession, devices::DevicesApi},
-        sideload::{builder::MaxCertsBehavior, SideloaderBuilder, TeamSelection},
-        util::fs_storage::FsStorage,
+        sideload::{
+            builder::{ExtensionsBehavior, ExtensionsBehaviorSelection, MaxCertsBehavior},
+            SideloaderBuilder, TeamSelection,
+        },
+        util::{
+            callbacks::{ExtensionsBehaviorCallbackBox, MaxCertsCallbackBox},
+            fs_storage::FsStorage,
+        },
     };
     if !ipa_path.is_file() {
         return Err("SIGN_IPA_FILE_REQUIRED".into());
@@ -642,6 +741,7 @@ pub async fn sign_ipa_for_device(
         return Err("SIGN_IPA_AUTH_REQUIRED".into());
     }
 
+    // Повторный вызов возвращает ошибку «hooks already installed» — это норма.
     let _ = isideload::init();
 
     progress(3.0, "Читаем файл…");
@@ -656,9 +756,11 @@ pub async fn sign_ipa_for_device(
     fs::create_dir_all(&work_dir).ok();
 
     progress(5.0, "Готовим приложение…");
-    let prepared_ipa = prepare_ipa_with_options(ipa_path, &work_dir, &mut metadata, options)?;
+    let prepared = prepare_app_dir_with_options(ipa_path, &work_dir, &mut metadata, options)?;
+    // Watch-приложения, App Clip и ExtensionKit подписчик не трогает, а
+    // неподписанный вложенный бандл iOS не установит вовсе.
+    strip_unsignable_nested(&prepared.app_dir);
 
-    progress(8.0, "Проверяем устройство…");
     progress(12.0, "Входим в Apple ID…");
 
     // Сервис входа Apple регулярно отвечает 503 на несколько секунд. Раньше
@@ -679,13 +781,17 @@ pub async fn sign_ipa_for_device(
             .set_storage(Box::new(FsStorage::new(anisette_store.clone())))
             .set_serial_number(crate::apple_store::v6_serial().unwrap_or_else(|| "SIGNUM-1".into()));
         let app_for_2fa = app.clone();
-        let two_factor = Box::new(
-            move |params: isideload::auth::apple_account::TwoFactorCallbackParams| {
-                wait_for_signing_2fa_code(&app_for_2fa, params.sms)
-            },
-        );
+        let two_factor = move |params: TwoFactorCallbackParams| {
+            let app = app_for_2fa.clone();
+            async move {
+                Ok::<_, rootcause::Report>(wait_for_signing_2fa_code(&app, &params).await)
+            }
+        };
+        // danger_debug(true) отключал проверку TLS-сертификатов Apple: пароль
+        // Apple ID уходил бы и через подменённое соединение. isideload 0.5
+        // сам доверяет корневому сертификату Apple, отладка не нужна.
         match AppleAccount::builder(email.trim())
-            .danger_debug(true)
+            .danger_debug(false)
             .anisette_provider(anisette)
             .login(password, two_factor)
             .await
@@ -703,39 +809,28 @@ pub async fn sign_ipa_for_device(
             }
         }
     }
-    let account = match account {
+    let mut account = match account {
         Some(account) => account,
         None => return Err(last_error),
     };
 
     progress(22.0, "Получаем разрешение Apple…");
-    let mut account = account;
-    let dev_session = DeveloperSession::from_account(&mut account)
+    let mut dev_session = DeveloperSession::from_account(&mut account)
         .await
         .map_err(map_isideload_err)?;
 
     progress(30.0, "Выбираем аккаунт разработчика…");
-    let mut sideloader = SideloaderBuilder::new(dev_session, email.trim().to_string())
-        .team_selection(TeamSelection::First)
-        .max_certs_behavior(MaxCertsBehavior::Revoke)
-        .storage(Box::new(FsStorage::new(cert_store)))
-        .machine_name("Signum".into())
-        .delete_app_after_install(false)
-        .build();
-
-    let team = select_team_isideload(&mut sideloader, cert_mode).await?;
+    let team = select_team(&mut dev_session, cert_mode).await?;
 
     if let Some(udid) = udid {
         progress(38.0, "Регистрируем устройство…");
-        sideloader
-            .get_dev_session()
+        dev_session
             .ensure_device_registered(&team, device_name, udid, None)
             .await
             .map_err(map_sign_app_err)?;
     } else {
         progress(38.0, "Проверяем iPhone в аккаунте…");
-        let known = sideloader
-            .get_dev_session()
+        let known = dev_session
             .list_devices(&team, None)
             .await
             .map_err(map_sign_app_err)?;
@@ -746,43 +841,75 @@ pub async fn sign_ipa_for_device(
         }
     }
 
-    progress(48.0, "Выпускаем сертификат…");
-    let sign_fut = sideloader.sign_app(prepared_ipa.clone(), Some(team.clone()), false);
-    let (bundle_dir, _special) = tokio::time::timeout(Duration::from_secs(240), sign_fut)
+    let mut sideloader =
+        SideloaderBuilder::<MaxCertsCallbackBox, ExtensionsBehaviorCallbackBox>::new(
+            dev_session,
+            email.trim().to_string(),
+        )
+        .team_selection(TeamSelection::First)
+        .max_certs_behavior(MaxCertsBehavior::Revoke)
+        // Каждому расширению — свой App ID и профиль: с чужим профилем
+        // расширение iOS не примет. Лимит App ID при этом расходуется быстрее,
+        // поэтому при нехватке объясняем, что делать.
+        .extensions_behavior(ExtensionsBehaviorSelection::Fixed(
+            ExtensionsBehavior::RegisterAll,
+        ))
+        .storage(Box::new(FsStorage::new(cert_store)))
+        .machine_name(SIGNUM_MACHINE_NAME.into())
+        .delete_app_after_install(false)
+        .build();
+
+    progress(48.0, "Выпускаем сертификат и профиль…");
+    let sign_fut = sideloader.sign_app(
+        prepared.app_dir.clone(),
+        Some(team.clone()),
+        false,
+        None::<fn(f32) -> std::future::Ready<()>>,
+        None,
+        udid,
+    );
+    // Сама подпись большого приложения (сотни МБ) идёт минуты на слабом ПК,
+    // поэтому запас щедрый: таймаут ловит зависшую сеть, а не медленный диск.
+    let sign_result = tokio::time::timeout(Duration::from_secs(600), sign_fut)
         .await
         .map_err(|_| {
-            "SIGN_IPA_DEV_LOGIN_FAILED: таймаут подписи (Apple Developer / сеть). Проверьте VPN/интернет и повторите."
+            "SIGN_IPA_NETWORK: Apple слишком долго не отвечает при подписи. Проверьте VPN/интернет и повторите."
                 .to_string()
-        })?
-        .map_err(map_sign_app_err)?;
+        })?;
+    let (bundle_dir, _special) = match sign_result {
+        Ok(done) => done,
+        Err(error) => {
+            let mapped = map_sign_app_err(error);
+            if mapped.starts_with("SIGN_IPA_APP_ID_LIMIT") {
+                if let Some(when) = next_app_id_release(sideloader.get_dev_session(), &team).await
+                {
+                    return Err(format!(
+                        "{mapped} Ближайший App ID освободится {}.",
+                        crate::signing_profile::unix_to_ru_date(when)
+                    ));
+                }
+            }
+            return Err(mapped);
+        }
+    };
+
+    // Когда подпись перестанет работать — из профиля, который выдала Apple:
+    // у бесплатного аккаунта неделя, у платного — до года.
+    let expires_unix = fs::read(bundle_dir.join("embedded.mobileprovision"))
+        .ok()
+        .and_then(|raw| crate::signing_profile::parse_profile(&raw).ok())
+        .and_then(|profile| profile.expires_unix);
 
     progress(75.0, "Собираем приложение…");
-    if let Some(parent) = output_ipa.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Не удалось создать папку: {e}"))?;
-    }
     pack_app_dir_to_ipa(&bundle_dir, output_ipa)?;
+    drop(prepared);
 
-    let _ = fs::remove_dir_all(
-        bundle_dir
-            .parent()
-            .and_then(|p| {
-                p.parent().and_then(|pp| {
-                    if pp
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.ends_with("_extracted"))
-                    {
-                        Some(pp)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or(bundle_dir.as_path()),
-    );
-    let _ = fs::remove_file(&prepared_ipa);
-
-    let team_kind = team_kind_label(&team, cert_mode);
+    // Тип команды Apple отдаёт не всегда; надёжнее срок профиля: бесплатный
+    // выдаётся на 7 дней, платный — на год.
+    let team_kind = match expires_unix {
+        Some(at) if at <= crate::signing_profile::unix_now() + 8 * 86_400 => "free".to_string(),
+        _ => team_kind_label(&team),
+    };
     let team_name = team.name.clone().unwrap_or_else(|| "Team".into());
 
     progress(90.0, "Подпись готова");
@@ -792,7 +919,34 @@ pub async fn sign_ipa_for_device(
         team_id: team.team_id.clone(),
         team_name,
         team_kind,
+        expires_at: expires_unix.map(crate::signing_profile::unix_to_iso),
+        expires_unix,
     })
+}
+
+/// Имя «машины» в сертификате разработки: по нему Signum узнаёт свои
+/// сертификаты и при нехватке места отзывает в первую очередь их.
+const SIGNUM_MACHINE_NAME: &str = "Signum";
+
+/// Когда освободится ближайший App ID (бесплатный аккаунт: 7 дней от создания).
+async fn next_app_id_release(
+    session: &mut isideload::dev::developer_session::DeveloperSession,
+    team: &isideload::dev::teams::DeveloperTeam,
+) -> Option<u64> {
+    use isideload::dev::app_ids::AppIdsApi;
+    let list = session.list_app_ids(team, None).await.ok()?;
+    let now = crate::signing_profile::unix_now();
+    list.app_ids
+        .iter()
+        .filter_map(|id| id.expiration_date)
+        .filter_map(|d| {
+            std::time::SystemTime::from(d)
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+        })
+        .map(|d| d.as_secs())
+        .filter(|at| *at > now)
+        .min()
 }
 
 /// На что похож выбранный файл сертификата.
@@ -846,20 +1000,80 @@ fn der_payload_start(bytes: &[u8]) -> Option<usize> {
     Some(2 + count)
 }
 
-/// Подпись через zsign с пользовательским сертификатом (.p12 + .mobileprovision).
-/// Не трогает Apple ID: подходит для годовых/enterprise сертификатов.
+/// Сертификат и ключ, вынутые из .p12.
+struct P12Identity {
+    key_der: Vec<u8>,
+    cert_der: Vec<u8>,
+    chain_der: Vec<Vec<u8>>,
+}
+
+enum P12Check {
+    Ok(P12Identity),
+    WrongPassword,
+    /// Не удалось разобрать: не .p12 или редкий формат шифрования.
+    Unreadable(String),
+}
+
+fn read_p12(path: &Path, password: &str) -> P12Check {
+    use p12_keystore::{error::Error as P12Error, KeyStore, Pkcs12ImportPolicy};
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => return P12Check::Unreadable(e.to_string()),
+    };
+    match KeyStore::from_pkcs12(&bytes, password, Pkcs12ImportPolicy::Relaxed) {
+        Ok(store) => match store.private_key_chain() {
+            Some((_, chain)) if !chain.certs().is_empty() => P12Check::Ok(P12Identity {
+                key_der: chain.key().as_der().to_vec(),
+                cert_der: chain.certs()[0].as_der().to_vec(),
+                chain_der: chain.certs()[1..]
+                    .iter()
+                    .map(|c| c.as_der().to_vec())
+                    .collect(),
+            }),
+            _ => P12Check::Unreadable("в .p12 нет закрытого ключа с сертификатом".into()),
+        },
+        Err(P12Error::MacError(_)) => P12Check::WrongPassword,
+        Err(e) => P12Check::Unreadable(e.to_string()),
+    }
+}
+
+/// Текст для «файл не тот», а не «пароль не тот».
+fn p12_shape_message(path: &Path) -> &'static str {
+    match p12_shape(path) {
+        P12Shape::Pem => {
+            "Это не .p12, а текстовый PEM-файл. Экспортируйте сертификат из «Связки ключей» как «Личный обмен информацией (.p12)»."
+        }
+        P12Shape::NotDer => {
+            "Это не файл .p12. Похоже, выбран сертификат .cer или профиль .mobileprovision — а нужен .p12, в котором лежит и ключ."
+        }
+        P12Shape::Empty => "Файл сертификата пустой. Выберите .p12 заново.",
+        P12Shape::LooksLikeP12 => "Неверный пароль от сертификата .p12. Проверьте его и повторите.",
+    }
+}
+
+/// Подпись своим сертификатом (.p12 + .mobileprovision), без Apple ID:
+/// годовые / enterprise сертификаты.
+///
+/// До подписи проверяем то, что раньше всплывало только ошибкой установки на
+/// iPhone: срок профиля и сертификата, пару сертификат—профиль, UDID в
+/// профиле и Bundle ID. Подписывает zsign, если он есть (Windows), иначе — или
+/// если zsign не справился — встроенный подписчик.
 pub async fn sign_ipa_with_custom_cert(
     _app: &tauri::AppHandle,
     ipa_path: &Path,
     p12_path: &Path,
     mprov_path: &Path,
     password: &str,
+    udid: Option<&str>,
     options: &SignOptions,
-    zsign_exe: &Path,
+    zsign_exe: Option<&Path>,
     cache_dir: &Path,
     output_ipa: &Path,
     mut progress: impl FnMut(f64, &str),
 ) -> Result<SignedIpaResult, String> {
+    use crate::signing_profile::{
+        certificate_not_after, earliest, parse_profile, unix_now, unix_to_iso, unix_to_ru_date,
+    };
     if !ipa_path.is_file() {
         return Err("SIGN_IPA_FILE_REQUIRED".into());
     }
@@ -870,7 +1084,67 @@ pub async fn sign_ipa_with_custom_cert(
         return Err("Файл .mobileprovision не найден. Выберите его заново.".into());
     }
 
-    progress(3.0, "Читаем файл…");
+    progress(3.0, "Проверяем сертификат и профиль…");
+    let profile_raw =
+        fs::read(mprov_path).map_err(|e| format!("Не удалось прочитать .mobileprovision: {e}"))?;
+    let profile = parse_profile(&profile_raw)
+        .map_err(|e| format!("Файл .mobileprovision не читается ({e}). Выберите профиль заново."))?;
+    let profile_name = if profile.name.is_empty() {
+        "профиль".to_string()
+    } else {
+        format!("профиль «{}»", profile.name)
+    };
+    let now = unix_now();
+    if profile.is_expired(now) {
+        let date = profile.expires_unix.map(unix_to_ru_date).unwrap_or_default();
+        return Err(format!(
+            "SIGN_IPA_PROFILE_EXPIRED: {profile_name} истёк {date}. Нужен новый .mobileprovision от того, кто выдал сертификат."
+        ));
+    }
+    if let Some(udid) = udid.map(str::trim).filter(|v| !v.is_empty()) {
+        if !profile.allows_device(udid) {
+            return Err(format!(
+                "SIGN_IPA_DEVICE_NOT_IN_PROFILE: Этот iPhone (UDID {udid}) не добавлен в {profile_name}. Приложение не установится: попросите владельца сертификата добавить UDID и прислать новый .mobileprovision."
+            ));
+        }
+    }
+
+    let zsign = zsign_exe.filter(|p| p.is_file());
+    let identity = match read_p12(p12_path, password) {
+        P12Check::Ok(identity) => Some(identity),
+        P12Check::WrongPassword => {
+            return Err(format!(
+                "{}\n\nПодробности: проверка пароля .p12 не прошла.",
+                p12_shape_message(p12_path)
+            ))
+        }
+        // Редкое шифрование .p12 может оказаться по силам zsign — тогда не
+        // мешаем ему. Без zsign подписать нечем.
+        P12Check::Unreadable(detail) if zsign.is_some() => {
+            eprintln!("custom cert: p12 not parsed natively ({detail}), leaving it to zsign");
+            None
+        }
+        P12Check::Unreadable(detail) => {
+            return Err(format!("{}\n\nПодробности: {detail}", p12_shape_message(p12_path)))
+        }
+    };
+    let mut cert_expires = None;
+    if let Some(identity) = &identity {
+        cert_expires = certificate_not_after(&identity.cert_der);
+        if cert_expires.is_some_and(|at| at <= now) {
+            return Err(format!(
+                "SIGN_IPA_CERT_EXPIRED: Сертификат .p12 истёк {}. Подписанное им приложение не запустится — нужен действующий сертификат.",
+                cert_expires.map(unix_to_ru_date).unwrap_or_default()
+            ));
+        }
+        if !profile.includes_certificate(&identity.cert_der) {
+            return Err(format!(
+                "SIGN_IPA_CERT_PROFILE_MISMATCH: Сертификат .p12 и {profile_name} не пара: профиль выписан на другой сертификат. Возьмите .mobileprovision, который выдали вместе с этим .p12."
+            ));
+        }
+    }
+
+    progress(8.0, "Читаем файл…");
     let mut metadata = parse_ipa_metadata(ipa_path)?;
 
     fs::create_dir_all(cache_dir).map_err(|e| format!("Не удалось создать кэш подписи: {e}"))?;
@@ -878,61 +1152,125 @@ pub async fn sign_ipa_with_custom_cert(
     fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
 
     progress(12.0, "Готовим приложение…");
-    let prepared_ipa = prepare_ipa_with_options(ipa_path, &work_dir, &mut metadata, options)?;
+    let prepared = prepare_app_dir_with_options(ipa_path, &work_dir, &mut metadata, options)?;
+
+    // Явный профиль подходит ровно одному Bundle ID. С другим идентификатором
+    // приложение подписывалось, но iPhone отказывал в установке.
+    if !profile.allows_bundle(&metadata.bundle_id) {
+        let wanted = profile.bundle_id_for(&metadata.bundle_id);
+        progress(20.0, &format!("Bundle ID под профиль: {wanted}"));
+        set_bundle_id(&prepared.app_dir, &metadata.bundle_id, &wanted)?;
+        metadata.bundle_id = wanted;
+    }
 
     progress(30.0, "Подписываем сертификатом…");
-    let mut args: Vec<String> = vec![
-        "-k".into(),
-        p12_path.to_string_lossy().into_owned(),
-        "-m".into(),
-        mprov_path.to_string_lossy().into_owned(),
-        "-z".into(),
-        "9".into(),
-    ];
-    if let Some(bundle_id) = options
-        .custom_bundle_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .filter(|_| !options.auto_bundle_id)
-    {
-        args.push("-b".into());
-        args.push(bundle_id.to_string());
-    }
-    if options.change_app_name {
-        if let Some(name) = options
-            .app_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            args.push("-n".into());
-            args.push(name.to_string());
+    let mut zsign_error: Option<String> = None;
+    if let Some(zsign) = zsign {
+        let prepared_ipa = work_dir.join(format!(
+            "{}.ipa",
+            prepared
+                .root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("prepared")
+        ));
+        pack_dir_to_ipa(&prepared.root, &prepared_ipa)?;
+        let result =
+            run_zsign(zsign, p12_path, mprov_path, password, &prepared_ipa, output_ipa).await;
+        let _ = fs::remove_file(&prepared_ipa);
+        match result {
+            Ok(()) => {}
+            // Неверный пароль/файл zsign не исправит и встроенный подписчик.
+            Err(ZsignError::Credentials(detail)) if identity.is_none() => {
+                return Err(format!(
+                    "{}\n\nПодробности: {detail}",
+                    p12_shape_message(p12_path)
+                ));
+            }
+            Err(ZsignError::Credentials(detail)) | Err(ZsignError::Other(detail)) => {
+                zsign_error = Some(detail);
+            }
         }
     }
-    if options.change_version {
-        if let Some(version) = options
-            .app_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            args.push("-r".into());
-            args.push(version.to_string());
+    let signed_by_zsign = zsign.is_some() && zsign_error.is_none();
+    if !signed_by_zsign {
+        let Some(identity) = identity else {
+            let detail = zsign_error.unwrap_or_default();
+            let lowered = detail.to_ascii_lowercase();
+            let friendly = if lowered.contains("provision") {
+                "Файл .mobileprovision не подошёл к сертификату. Проверьте оба файла."
+            } else {
+                "Не удалось подписать IPA этим сертификатом. Проверьте, что файлы не повреждены."
+            };
+            return Err(format!("{friendly}\n\nПодробности: {detail}"));
+        };
+        if zsign_error.is_some() {
+            progress(45.0, "Пробуем встроенный подписчик…");
         }
+        let app_dir = prepared.app_dir.clone();
+        let bundle_id = metadata.bundle_id.clone();
+        let raw = profile_raw.clone();
+        tokio::task::spawn_blocking(move || sign_bundle_with_p12(&app_dir, &raw, &identity, &bundle_id))
+            .await
+            .map_err(|e| format!("Не удалось запустить подпись: {e}"))?
+            .map_err(|e| match &zsign_error {
+                Some(z) => format!("Не удалось подписать IPA этим сертификатом.\n\nПодробности: {e}\nzsign: {z}"),
+                None => format!("Не удалось подписать IPA этим сертификатом.\n\nПодробности: {e}"),
+            })?;
+        progress(75.0, "Собираем приложение…");
+        pack_app_dir_to_ipa(&prepared.app_dir, output_ipa)?;
     }
-    args.push("-o".into());
-    args.push(output_ipa.to_string_lossy().into_owned());
-    args.push(prepared_ipa.to_string_lossy().into_owned());
+    drop(prepared);
 
+    let expires_unix = earliest(profile.expires_unix, cert_expires);
+    progress(90.0, "Подпись готова");
+    Ok(SignedIpaResult {
+        signed_ipa: output_ipa.to_path_buf(),
+        metadata,
+        team_id: profile.team_id.clone(),
+        team_name: "Свой сертификат".into(),
+        team_kind: "custom".into(),
+        expires_at: expires_unix.map(unix_to_iso),
+        expires_unix,
+    })
+}
+
+enum ZsignError {
+    /// zsign говорит про пароль / pkcs12.
+    Credentials(String),
+    Other(String),
+}
+
+async fn run_zsign(
+    zsign: &Path,
+    p12_path: &Path,
+    mprov_path: &Path,
+    password: &str,
+    input_ipa: &Path,
+    output_ipa: &Path,
+) -> Result<(), ZsignError> {
+    // Bundle ID, имя и версия уже записаны в Info.plist (в том числе у
+    // расширений), поэтому -b/-n/-r не передаём.
+    let mut args: Vec<String> = Vec::new();
     // -p только если пароль непустой — иначе zsign падает на пустом.
-    if !password.trim().is_empty() {
-        let mut with_pass = vec!["-p".to_string(), password.to_string()];
-        with_pass.extend(std::mem::take(&mut args));
-        args = with_pass;
+    if !password.is_empty() {
+        args.push("-p".into());
+        args.push(password.to_string());
     }
+    args.extend([
+        "-k".to_string(),
+        p12_path.to_string_lossy().into_owned(),
+        "-m".to_string(),
+        mprov_path.to_string_lossy().into_owned(),
+        "-z".to_string(),
+        "9".to_string(),
+        "-o".to_string(),
+        output_ipa.to_string_lossy().into_owned(),
+        input_ipa.to_string_lossy().into_owned(),
+    ]);
+    let _ = fs::remove_file(output_ipa);
 
-    let exe = zsign_exe.to_path_buf();
+    let exe = zsign.to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new(&exe);
         command
@@ -950,95 +1288,160 @@ pub async fn sign_ipa_with_custom_cert(
         command.output()
     })
     .await
-    .map_err(|e| format!("Не удалось запустить подпись: {e}"))?
-    .map_err(|e| format!("Не удалось запустить подпись: {e}"))?;
+    .map_err(|e| ZsignError::Other(format!("Не удалось запустить zsign: {e}")))?
+    .map_err(|e| ZsignError::Other(format!("Не удалось запустить zsign: {e}")))?;
 
-    if !output.status.success() || !output_ipa.is_file() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let detail = format!("{stderr}\n{stdout}")
-            .trim()
-            .chars()
-            .take(600)
-            .collect::<String>();
-        let lowered = detail.to_ascii_lowercase();
-        // zsign на любую неудачу с сертификатом отвечает «input the correct file
-        // and password», поэтому слово password в тексте не значит, что дело в
-        // пароле. Смотрим на сам файл, иначе человек будет перебирать верный
-        // пароль к файлу, который в принципе не .p12.
-        let cert_shape = p12_shape(p12_path);
-        let friendly = if lowered.contains("password") || lowered.contains("pkcs12") {
-            match cert_shape {
-                P12Shape::Pem => {
-                    "Это не .p12, а текстовый PEM-файл. Экспортируйте сертификат из «Связки ключей» как «Личный обмен информацией (.p12)»."
-                }
-                P12Shape::NotDer => {
-                    "Это не файл .p12. Похоже, выбран сертификат .cer или профиль .mobileprovision — а нужен .p12, в котором лежит и ключ."
-                }
-                P12Shape::Empty => "Файл сертификата пустой. Выберите .p12 заново.",
-                P12Shape::LooksLikeP12 => {
-                    "Неверный пароль от сертификата .p12. Проверьте его и повторите."
-                }
-            }
-        } else if lowered.contains("provision") {
-            "Файл .mobileprovision не подошёл к сертификату. Проверьте оба файла."
-        } else {
-            "Не удалось подписать IPA этим сертификатом. Проверьте, что файлы не повреждены."
-        };
-        return Err(format!("{friendly}\n\nПодробности: {detail}"));
+    if output.status.success() && output_ipa.is_file() {
+        return Ok(());
     }
-
-    let _ = fs::remove_dir_all(&work_dir);
-
-    progress(90.0, "Подпись готова");
-    SignedIpaResult::from_paths(output_ipa, metadata, "custom")
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = format!("{stderr}\n{stdout}")
+        .trim()
+        .chars()
+        .take(600)
+        .collect::<String>();
+    let lowered = detail.to_ascii_lowercase();
+    // zsign на любую неудачу с сертификатом отвечает «input the correct file
+    // and password», поэтому слово password не значит, что дело в пароле.
+    if lowered.contains("password") || lowered.contains("pkcs12") {
+        Err(ZsignError::Credentials(detail))
+    } else {
+        Err(ZsignError::Other(detail))
+    }
 }
 
-impl SignedIpaResult {
-    fn from_paths(
-        output_ipa: &Path,
-        metadata: IpaMetadata,
-        team_kind: &str,
-    ) -> Result<SignedIpaResult, String> {
-        Ok(SignedIpaResult {
-            signed_ipa: output_ipa.to_path_buf(),
-            metadata,
-            team_id: String::new(),
-            team_name: "Свой сертификат".into(),
-            team_kind: team_kind.to_string(),
-        })
+/// Встроенная подпись (тот же движок, что у isideload 0.5) сертификатом из .p12.
+fn sign_bundle_with_p12(
+    app_dir: &Path,
+    profile_raw: &[u8],
+    identity: &P12Identity,
+    bundle_id: &str,
+) -> Result<(), String> {
+    use apple_codesign_quick::{sign_bundle, BundleSigningSettings, ProvisioningProfile, RustCryptoCmsSigner};
+
+    let parsed = ProvisioningProfile::parse(profile_raw).map_err(|e| e.to_string())?;
+    let mut chain = identity.chain_der.clone();
+    chain.extend(parsed.certificate_chain_der().iter().cloned());
+    let signer = RustCryptoCmsSigner::from_der(&identity.key_der, &identity.cert_der, chain)
+        .map_err(|e| e.to_string())?;
+    let team_id = parsed.team_id().to_string();
+    let base = parsed.entitlements().clone();
+
+    let mut settings = BundleSigningSettings::new(
+        team_id.clone(),
+        entitlements_for_bundle(&base, &team_id, bundle_id),
+        Some(&signer),
+    );
+    settings.embedded_mobileprovision = Some(profile_raw);
+    for nested in nested_bundle_ids(app_dir) {
+        settings
+            .entitlements_by_bundle_id
+            .insert(nested.clone(), entitlements_for_bundle(&base, &team_id, &nested));
+        settings
+            .embedded_mobileprovisions_by_bundle_id
+            .insert(nested, profile_raw);
     }
+    sign_bundle(app_dir, &settings).map_err(|e| e.to_string())
+}
+
+/// Права из профиля для конкретного бандла: в шаблонном профиле
+/// `application-identifier` = `TEAM.*`, а в подписи должен стоять полный ID.
+fn entitlements_for_bundle(
+    base: &plist::Dictionary,
+    team_id: &str,
+    bundle_id: &str,
+) -> plist::Dictionary {
+    let mut out = base.clone();
+    for key in ["application-identifier", "com.apple.application-identifier"] {
+        let wildcard = out
+            .get(key)
+            .and_then(|v| v.as_string())
+            .is_some_and(|v| v.ends_with('*'));
+        if wildcard {
+            out.insert(
+                key.to_string(),
+                plist::Value::String(format!("{team_id}.{bundle_id}")),
+            );
+        }
+    }
+    out
+}
+
+/// Идентификаторы расширений (PlugIns/*.appex), которые подписываются отдельно.
+fn nested_bundle_ids(app_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(app_dir.join("PlugIns")) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let plist_path = entry.path().join("Info.plist");
+        if let Ok(value) = plist::Value::from_file(&plist_path) {
+            if let Some(id) = value
+                .as_dictionary()
+                .and_then(|d| d.get("CFBundleIdentifier"))
+                .and_then(|v| v.as_string())
+            {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
 }
 
                                                                                             
-fn prepare_ipa_with_options(
+/// Распакованное и подготовленное приложение. Папка удаляется сама, когда
+/// значение выходит из области видимости — в том числе на любой ошибке.
+struct PreparedApp {
+    /// Корень распаковки (в нём лежит `Payload/`).
+    root: PathBuf,
+    /// `Payload/<Name>.app`.
+    app_dir: PathBuf,
+}
+
+impl Drop for PreparedApp {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Распаковать IPA и применить опции подписи (Info.plist, удаление плагинов…).
+///
+/// Подписчик получает готовую папку `.app`: раньше её снова упаковывали в
+/// IPA, а isideload тут же распаковывал обратно — двойная работа и потеря
+/// прав доступа к файлам на Windows.
+fn prepare_app_dir_with_options(
     ipa_path: &Path,
     work_dir: &Path,
     metadata: &mut IpaMetadata,
     options: &SignOptions,
-) -> Result<PathBuf, String> {
+) -> Result<PreparedApp, String> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let extract_dir = work_dir.join(format!("extract-{stamp}"));
-    let out_ipa = work_dir.join(format!("prepared-{stamp}.ipa"));
-    if extract_dir.exists() {
-        let _ = fs::remove_dir_all(&extract_dir);
+    let root = work_dir.join(format!("extract-{stamp}"));
+    if root.exists() {
+        let _ = fs::remove_dir_all(&root);
     }
-    fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let mut prepared = PreparedApp {
+        root: root.clone(),
+        app_dir: PathBuf::new(),
+    };
 
-              
     {
         let file = fs::File::open(ipa_path).map_err(|e| e.to_string())?;
-        let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
-        archive.extract(&extract_dir).map_err(|e| e.to_string())?;
+        let mut archive =
+            ZipArchive::new(file).map_err(|e| format!("Не удалось прочитать IPA: {e}"))?;
+        archive
+            .extract(&root)
+            .map_err(|e| format!("Не удалось распаковать IPA: {e}"))?;
     }
 
-    let payload = extract_dir.join("Payload");
-    let app_dir = find_app_bundle(&payload)?;
+    let app_dir = find_app_bundle(&root.join("Payload"))?;
+    prepared.app_dir = app_dir.clone();
 
-                                                                  
     if options.strip_plugins {
         let _ = fs::remove_dir_all(app_dir.join("PlugIns"));
         let _ = fs::remove_dir_all(app_dir.join("Extensions"));
@@ -1052,35 +1455,160 @@ fn prepare_ipa_with_options(
         let _ = fs::remove_dir_all(app_dir.join("com.apple.WatchPlaceholder"));
     }
     if options.strip_frameworks {
-                                                                                      
         let fw = app_dir.join("Frameworks");
-        if fw.is_dir() {
-            if let Ok(entries) = fs::read_dir(&fw) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                                                                                                              
-                    let drop = name.ends_with(".framework")
-                        && (name.contains("Widget")
-                            || name.contains("Extension")
-                            || name.contains("Watch")
-                            || name.contains("Notification")
-                            || name.contains("Intent")
-                            || name.contains("Share"));
-                    if drop {
-                        let _ = fs::remove_dir_all(&p);
-                    }
+        if let Ok(entries) = fs::read_dir(&fw) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let drop = name.ends_with(".framework")
+                    && (name.contains("Widget")
+                        || name.contains("Extension")
+                        || name.contains("Watch")
+                        || name.contains("Notification")
+                        || name.contains("Intent")
+                        || name.contains("Share"));
+                if drop {
+                    let _ = fs::remove_dir_all(&p);
                 }
             }
         }
     }
 
+    let original_bundle_id = metadata.bundle_id.clone();
     patch_info_plist(&app_dir.join("Info.plist"), metadata, options)?;
+    // Сменили Bundle ID приложения — расширения должны остаться «детьми»
+    // нового идентификатора, иначе Apple отвергает весь пакет
+    // («is not part of the main app bundle identifier»).
+    if metadata.bundle_id != original_bundle_id {
+        rebase_nested_bundle_ids(&app_dir, &original_bundle_id, &metadata.bundle_id)?;
+    }
+    Ok(prepared)
+}
 
-             
-    pack_dir_to_ipa(&extract_dir, &out_ipa)?;
-    let _ = fs::remove_dir_all(&extract_dir);
-    Ok(out_ipa)
+/// Убрать то, что подписчик Apple ID не подписывает: Watch-приложения,
+/// App Clip и ExtensionKit-расширения. Неподписанный вложенный бандл ломает
+/// установку всего приложения, а работать они без своих профилей не будут.
+fn strip_unsignable_nested(app_dir: &Path) {
+    for dir in [
+        "Watch",
+        "WatchKit",
+        "WatchKitSupport",
+        "WatchKitSupport2",
+        "com.apple.WatchPlaceholder",
+        "AppClips",
+        "Extensions",
+    ] {
+        let path = app_dir.join(dir);
+        if path.exists() {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// Поменять Bundle ID у уже подготовленного приложения (вместе с расширениями).
+fn set_bundle_id(app_dir: &Path, old: &str, new: &str) -> Result<(), String> {
+    let path = app_dir.join("Info.plist");
+    let mut value = plist::Value::from_file(&path).map_err(|e| format!("Info.plist: {e}"))?;
+    let dict = value
+        .as_dictionary_mut()
+        .ok_or_else(|| "Info.plist: не словарь".to_string())?;
+    dict.insert(
+        "CFBundleIdentifier".into(),
+        plist::Value::String(new.to_string()),
+    );
+    value
+        .to_file_xml(&path)
+        .map_err(|e| format!("Info.plist write: {e}"))?;
+    rebase_nested_bundle_ids(app_dir, old, new)
+}
+
+/// `old.ext` -> `new.ext` во всех вложенных бандлах (PlugIns, Extensions,
+/// AppClips, Watch и их PlugIns) плюс ссылки Watch на «родителя».
+fn rebase_nested_bundle_ids(app_dir: &Path, old: &str, new: &str) -> Result<(), String> {
+    if old.is_empty() || old == new {
+        return Ok(());
+    }
+    let mut stack = vec![app_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(ext.as_str(), "appex" | "app") {
+                rebase_one_plist(&path.join("Info.plist"), old, new)?;
+                stack.push(path);
+            } else if matches!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some("PlugIns" | "Extensions" | "AppClips" | "Watch")
+            ) {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rebase_id(value: &str, old: &str, new: &str) -> Option<String> {
+    if value == old {
+        return Some(new.to_string());
+    }
+    value
+        .strip_prefix(old)
+        .filter(|rest| rest.starts_with('.'))
+        .map(|rest| format!("{new}{rest}"))
+}
+
+fn rebase_one_plist(path: &Path, old: &str, new: &str) -> Result<(), String> {
+    let Ok(mut value) = plist::Value::from_file(path) else {
+        return Ok(());
+    };
+    let Some(dict) = value.as_dictionary_mut() else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for key in ["CFBundleIdentifier", "WKCompanionAppBundleIdentifier"] {
+        if let Some(updated) = dict
+            .get(key)
+            .and_then(|v| v.as_string())
+            .and_then(|v| rebase_id(v, old, new))
+        {
+            dict.insert(key.into(), plist::Value::String(updated));
+            changed = true;
+        }
+    }
+    if let Some(attrs) = dict
+        .get_mut("NSExtension")
+        .and_then(|v| v.as_dictionary_mut())
+        .and_then(|d| d.get_mut("NSExtensionAttributes"))
+        .and_then(|v| v.as_dictionary_mut())
+    {
+        if let Some(updated) = attrs
+            .get("WKAppBundleIdentifier")
+            .and_then(|v| v.as_string())
+            .and_then(|v| rebase_id(v, old, new))
+        {
+            attrs.insert(
+                "WKAppBundleIdentifier".into(),
+                plist::Value::String(updated),
+            );
+            changed = true;
+        }
+    }
+    if changed {
+        value
+            .to_file_xml(path)
+            .map_err(|e| format!("Не удалось записать {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn find_app_bundle(payload: &Path) -> Result<PathBuf, String> {
@@ -1318,40 +1846,33 @@ fn add_dir_to_zip_rel(
             let mut f = fs::File::open(&path).map_err(|e| e.to_string())?;
             let mut buf = Vec::new();
             f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-            zip.start_file(rel, opts).map_err(|e| e.to_string())?;
+            zip.start_file(rel, zip_options_for(&path, &buf, opts)).map_err(|e| e.to_string())?;
             zip.write_all(&buf).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
 }
 
-async fn select_team_isideload(
-    sideloader: &mut isideload::sideload::sideloader::Sideloader,
+async fn select_team(
+    session: &mut isideload::dev::developer_session::DeveloperSession,
     mode: CertMode,
 ) -> Result<isideload::dev::teams::DeveloperTeam, String> {
     use isideload::dev::teams::TeamsApi;
 
-    match TeamsApi::list_teams(sideloader.get_dev_session()).await {
-        Ok(teams) if !teams.is_empty() => pick_team(&teams, mode)
-            .cloned()
-            .ok_or_else(|| "SIGN_IPA_TEAM_NONE".to_string()),
-        Ok(_) => Err("SIGN_IPA_TEAM_NONE".into()),
-        Err(_) => sideloader
-            .get_team()
-            .await
-            .map_err(|e| format!("SIGN_IPA_TEAM_NONE: {e}")),
-    }
+    let teams = session
+        .list_teams()
+        .await
+        .map_err(|e| format!("SIGN_IPA_TEAM_NONE: {}", report_text(e)))?;
+    pick_team(&teams, mode)
+        .cloned()
+        .ok_or_else(|| "SIGN_IPA_TEAM_NONE".to_string())
 }
 
 fn pick_team<'a>(
     teams: &'a [isideload::dev::teams::DeveloperTeam],
     mode: CertMode,
 ) -> Option<&'a isideload::dev::teams::DeveloperTeam> {
-    let is_free = |t: &isideload::dev::teams::DeveloperTeam| {
-        let ty = t.r#type.as_deref().unwrap_or("").to_ascii_lowercase();
-        let name = t.name.as_deref().unwrap_or("").to_ascii_lowercase();
-        ty.contains("free") || name.contains("free")
-    };
+    let is_free = team_is_free;
     match mode {
         CertMode::Paid => teams.iter().find(|t| !is_free(t)).or_else(|| teams.first()),
         CertMode::Free => teams.iter().find(|t| is_free(t)).or_else(|| teams.first()),
@@ -1363,14 +1884,15 @@ fn pick_team<'a>(
     }
 }
 
-fn team_kind_label(team: &isideload::dev::teams::DeveloperTeam, _mode: CertMode) -> String {
+fn team_is_free(team: &isideload::dev::teams::DeveloperTeam) -> bool {
     let ty = team.r#type.as_deref().unwrap_or("").to_ascii_lowercase();
     let name = team.name.as_deref().unwrap_or("").to_ascii_lowercase();
-    if ty.contains("free") || name.contains("free") {
-        "free".into()
-    } else {
-        "paid".into()
-    }
+    // Бесплатная команда Apple ID называется «Имя (Personal Team)».
+    ty.contains("free") || name.contains("free") || name.contains("personal team")
+}
+
+fn team_kind_label(team: &isideload::dev::teams::DeveloperTeam) -> String {
+    if team_is_free(team) { "free" } else { "paid" }.into()
 }
 
                                                                      
@@ -1398,6 +1920,39 @@ fn pack_app_dir_to_ipa(app_dir: &Path, output_ipa: &Path) -> Result<(), String> 
     Ok(())
 }
 
+/// Права файла в архиве. Без них zip пишет 0644 всем файлам, и у исполняемых
+/// файлов приложения (сама программа, dylib, бинарники расширений) пропадает
+/// бит запуска. На Windows прав у файлов нет вовсе, поэтому Mach-O узнаём по
+/// сигнатуре в начале файла.
+fn zip_options_for(path: &Path, data: &[u8], base: SimpleFileOptions) -> SimpleFileOptions {
+    base.unix_permissions(if is_executable_file(path, data) { 0o755 } else { 0o644 })
+}
+
+fn is_executable_file(path: &Path, data: &[u8]) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
+            return true;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    is_macho(data)
+}
+
+fn is_macho(data: &[u8]) -> bool {
+    const MAGICS: [[u8; 4]; 6] = [
+        [0xfe, 0xed, 0xfa, 0xce],
+        [0xfe, 0xed, 0xfa, 0xcf],
+        [0xce, 0xfa, 0xed, 0xfe],
+        [0xcf, 0xfa, 0xed, 0xfe],
+        [0xca, 0xfe, 0xba, 0xbe],
+        [0xbe, 0xba, 0xfe, 0xca],
+    ];
+    data.len() >= 4 && MAGICS.iter().any(|m| data[..4] == *m)
+}
+
 fn add_dir_to_zip(
     zip: &mut ZipWriter<fs::File>,
     dir: &Path,
@@ -1418,7 +1973,7 @@ fn add_dir_to_zip(
             let mut f = fs::File::open(&path).map_err(|e| e.to_string())?;
             let mut buf = Vec::new();
             f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-            zip.start_file(zip_path, opts).map_err(|e| e.to_string())?;
+            zip.start_file(zip_path, zip_options_for(&path, &buf, opts)).map_err(|e| e.to_string())?;
             zip.write_all(&buf).map_err(|e| e.to_string())?;
         }
     }
@@ -1614,5 +2169,248 @@ mod outage_tests {
         assert!(is_apple_outage("gsa.apple.com returned 503"));
         assert!(is_apple_outage("http status: 502 bad gateway"));
         assert!(is_apple_outage("service temporarily unavailable"));
+    }
+}
+
+#[cfg(test)]
+mod signing_flow_tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "signum-signing-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_plist(path: &Path, pairs: &[(&str, &str)]) {
+        let mut dict = plist::Dictionary::new();
+        for (k, v) in pairs {
+            dict.insert((*k).into(), plist::Value::String((*v).into()));
+        }
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        plist::Value::Dictionary(dict).to_file_binary(path).unwrap();
+    }
+
+    fn read_id(path: &Path, key: &str) -> String {
+        plist::Value::from_file(path)
+            .unwrap()
+            .as_dictionary()
+            .unwrap()
+            .get(key)
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn rebase_only_touches_children_of_the_old_id() {
+        assert_eq!(rebase_id("com.a.app", "com.a.app", "x.y"), Some("x.y".into()));
+        assert_eq!(
+            rebase_id("com.a.app.widget", "com.a.app", "x.y"),
+            Some("x.y.widget".into())
+        );
+        assert_eq!(rebase_id("com.a.application", "com.a.app", "x.y"), None);
+        assert_eq!(rebase_id("org.other", "com.a.app", "x.y"), None);
+    }
+
+    #[test]
+    fn changing_the_bundle_id_moves_extensions_along() {
+        let dir = temp_dir("rebase");
+        let app = dir.join("Payload/Bank.app");
+        write_plist(&app.join("Info.plist"), &[("CFBundleIdentifier", "ru.bank")]);
+        let ext = app.join("PlugIns/Widget.appex/Info.plist");
+        write_plist(&ext, &[("CFBundleIdentifier", "ru.bank.widget")]);
+        let watch = app.join("Watch/W.app/Info.plist");
+        write_plist(
+            &watch,
+            &[
+                ("CFBundleIdentifier", "ru.bank.watchkitapp"),
+                ("WKCompanionAppBundleIdentifier", "ru.bank"),
+            ],
+        );
+        let framework = app.join("Frameworks/Lib.framework/Info.plist");
+        write_plist(&framework, &[("CFBundleIdentifier", "ru.bank.lib")]);
+
+        set_bundle_id(&app, "ru.bank", "ru.bank.u1").unwrap();
+
+        assert_eq!(read_id(&app.join("Info.plist"), "CFBundleIdentifier"), "ru.bank.u1");
+        assert_eq!(read_id(&ext, "CFBundleIdentifier"), "ru.bank.u1.widget");
+        assert_eq!(read_id(&watch, "CFBundleIdentifier"), "ru.bank.u1.watchkitapp");
+        assert_eq!(read_id(&watch, "WKCompanionAppBundleIdentifier"), "ru.bank.u1");
+        // Фреймворки не обязаны быть «детьми» приложения — их не трогаем.
+        assert_eq!(read_id(&framework, "CFBundleIdentifier"), "ru.bank.lib");
+        assert_eq!(nested_bundle_ids(&app), vec!["ru.bank.u1.widget".to_string()]);
+
+        strip_unsignable_nested(&app);
+        assert!(!app.join("Watch").exists());
+        assert!(app.join("PlugIns").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wildcard_entitlements_get_the_concrete_bundle_id() {
+        let mut base = plist::Dictionary::new();
+        base.insert(
+            "application-identifier".into(),
+            plist::Value::String("TEAM123456.*".into()),
+        );
+        base.insert("get-task-allow".into(), plist::Value::Boolean(true));
+        let ent = entitlements_for_bundle(&base, "TEAM123456", "ru.bank.widget");
+        assert_eq!(
+            ent.get("application-identifier").unwrap().as_string(),
+            Some("TEAM123456.ru.bank.widget")
+        );
+        assert_eq!(ent.get("get-task-allow").unwrap().as_boolean(), Some(true));
+
+        let mut explicit = plist::Dictionary::new();
+        explicit.insert(
+            "application-identifier".into(),
+            plist::Value::String("TEAM123456.com.foo".into()),
+        );
+        let ent = entitlements_for_bundle(&explicit, "TEAM123456", "com.foo");
+        assert_eq!(
+            ent.get("application-identifier").unwrap().as_string(),
+            Some("TEAM123456.com.foo")
+        );
+    }
+
+    #[test]
+    fn executables_keep_the_exec_bit_in_the_archive() {
+        let dir = temp_dir("perm");
+        let file = dir.join("data.txt");
+        fs::write(&file, b"hello").unwrap();
+        assert!(is_macho(&[0xcf, 0xfa, 0xed, 0xfe, 0x0c]));
+        assert!(is_macho(&[0xca, 0xfe, 0xba, 0xbe]));
+        assert!(!is_macho(b"hello"));
+        assert!(is_executable_file(&file, &[0xcf, 0xfa, 0xed, 0xfe]));
+        #[cfg(unix)]
+        assert!(!is_executable_file(&file, b"hello"));
+
+        // Упаковка .app: у Mach-O в архиве 0755, у ресурсов 0644.
+        let app = dir.join("A.app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("A"), [0xcf, 0xfa, 0xed, 0xfe, 0, 0]).unwrap();
+        fs::write(app.join("Info.plist"), b"<plist/>").unwrap();
+        let ipa = dir.join("out.ipa");
+        pack_app_dir_to_ipa(&app, &ipa).unwrap();
+        let mut zip = ZipArchive::new(fs::File::open(&ipa).unwrap()).unwrap();
+        let exe_mode = zip.by_name("Payload/A.app/A").unwrap().unix_mode().unwrap();
+        let res_mode = zip
+            .by_name("Payload/A.app/Info.plist")
+            .unwrap()
+            .unix_mode()
+            .unwrap();
+        assert_eq!(exe_mode & 0o777, 0o755);
+        assert_eq!(res_mode & 0o777, 0o644);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn errors_are_classified_for_the_user() {
+        // Обрыв сети внутри выпуска сертификата — это сеть, а не сертификат.
+        assert!(map_isideload_err(
+            "Failed to retrieve certificate identity: error sending request for url (https://developerservices2.apple.com)"
+        )
+        .starts_with("SIGN_IPA_NETWORK"));
+        // Подменённый TLS — не «сертификат разработки».
+        assert!(map_isideload_err("invalid peer certificate: UnknownIssuer")
+            .contains("антивирус"));
+        assert!(map_isideload_err(
+            "Not enough available app IDs. 3 are required, but only 1 is available."
+        )
+        .starts_with("SIGN_IPA_APP_ID_LIMIT"));
+        assert!(map_isideload_err("Developer error 7460: Maximum number of certificates reached")
+            .starts_with("SIGN_IPA_CERT_FAILED"));
+        assert!(map_isideload_err("No 2FA code provided, aborting")
+            .contains("2FA"));
+        assert!(map_isideload_err(
+            "Extension Widget is not part of the main app bundle identifier: x"
+        )
+        .starts_with("SIGN_IPA_BUNDLE_INVALID"));
+        // «team» в произвольном тексте больше не означает «нет команды».
+        assert!(!map_isideload_err("Failed to list app IDs for the developer team: no response")
+            .starts_with("SIGN_IPA_TEAM_NONE"));
+        assert_eq!(map_isideload_err("No developer teams available"), "SIGN_IPA_TEAM_NONE");
+    }
+
+    #[test]
+    fn personal_team_counts_as_free() {
+        let team = |name: &str, ty: Option<&str>| isideload::dev::teams::DeveloperTeam {
+            name: Some(name.into()),
+            team_id: name.into(),
+            r#type: ty.map(str::to_string),
+            status: None,
+        };
+        let teams = vec![
+            team("Ivan Petrov (Personal Team)", Some("Individual")),
+            team("Company LLC", Some("Company/Organization")),
+        ];
+        assert_eq!(team_kind_label(&teams[0]), "free");
+        assert_eq!(team_kind_label(&teams[1]), "paid");
+        assert_eq!(pick_team(&teams, CertMode::Free).unwrap().team_id, teams[0].team_id);
+        assert_eq!(pick_team(&teams, CertMode::Paid).unwrap().team_id, teams[1].team_id);
+        assert_eq!(pick_team(&teams, CertMode::Auto).unwrap().team_id, teams[1].team_id);
+    }
+
+    #[test]
+    fn two_factor_code_is_six_digits() {
+        assert_eq!(only_code_digits(" 123-456 "), "123456");
+        assert_eq!(only_code_digits("12345"), "12345");
+        assert_eq!(only_code_digits("1234567"), "123456");
+    }
+}
+
+#[cfg(test)]
+mod custom_cert_tests {
+    use super::*;
+
+    fn make_p12(password: &str) -> (Vec<u8>, Vec<u8>) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["signum.test".into()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let cert_der = cert.der().to_vec();
+        let chain = p12_keystore::PrivateKeyChain::new(
+            vec![1, 2, 3, 4],
+            p12_keystore::PrivateKey::from_der(&key.serialize_der()).unwrap(),
+            vec![p12_keystore::Certificate::from_der(&cert_der).unwrap()],
+        );
+        let mut store = p12_keystore::KeyStore::new();
+        store.add_entry("test", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+        (store.writer(password).write().unwrap(), cert_der)
+    }
+
+    #[test]
+    fn p12_password_and_certificate_are_checked_natively() {
+        let dir = std::env::temp_dir().join(format!("signum-p12-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cert.p12");
+        let (p12, cert_der) = make_p12("секрет 1");
+        fs::write(&path, p12).unwrap();
+
+        match read_p12(&path, "секрет 1") {
+            P12Check::Ok(identity) => {
+                assert_eq!(identity.cert_der, cert_der);
+                assert!(!identity.key_der.is_empty());
+                let not_after =
+                    crate::signing_profile::certificate_not_after(&identity.cert_der).unwrap();
+                assert!(not_after > crate::signing_profile::unix_now());
+            }
+            _ => panic!("valid p12 not read"),
+        }
+        assert!(matches!(read_p12(&path, "wrong"), P12Check::WrongPassword));
+        // Пробелы по краям — часть пароля, обрезать их нельзя.
+        assert!(matches!(read_p12(&path, "секрет 1 "), P12Check::WrongPassword));
+
+        let garbage = dir.join("not.p12");
+        fs::write(&garbage, b"-----BEGIN CERTIFICATE-----").unwrap();
+        assert!(matches!(read_p12(&garbage, ""), P12Check::Unreadable(_)));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

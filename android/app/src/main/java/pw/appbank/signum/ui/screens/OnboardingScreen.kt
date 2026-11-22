@@ -45,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -98,7 +99,7 @@ private val OnbIndigo = Color(0xFF6545E8)
 
 @Composable
 fun OnboardingScreen(reduceMotion: Boolean, onFinish: () -> Unit) {
-    var index by remember { mutableIntStateOf(0) }
+    var index by rememberSaveable { mutableIntStateOf(0) }
     val isLast = index == ONB_SLIDES.size - 1
 
     // Gentle icon float (disabled under reduce-motion).

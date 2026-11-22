@@ -18,6 +18,7 @@ import pw.appbank.signum.data.api.DiagLog
 import pw.appbank.signum.data.api.Errors
 import pw.appbank.signum.data.catalog.CatalogResolve
 import pw.appbank.signum.data.catalog.CatalogSearch
+import pw.appbank.signum.data.catalog.StoreSearch
 import pw.appbank.signum.data.apple.BankOtp
 import pw.appbank.signum.data.engine.SignumEngine
 import pw.appbank.signum.data.models.AccountRestoreScan
@@ -120,6 +121,14 @@ data class UiState(
     val openedDeveloper: StoreDeveloper? = null,
     val developerApps: List<AppStoreSearchHit> = emptyList(),
     val developerLoading: Boolean = false,
+    val developerError: String = "",
+    /** Отмеченные для пакетной загрузки приложения разработчика (App Store ID). */
+    val developerPicked: Set<String> = emptySet(),
+    val developerBatchBusy: Boolean = false,
+    /** Поиск разработчиков идёт параллельно поиску приложений — свой флаг. */
+    val devSearching: Boolean = false,
+    /** Сборки, для которых ещё выясняем минимальную iOS (рисуем «iOS…»). */
+    val versionsIosPending: Set<String> = emptySet(),
     val ota: OtaUpdateInfo? = null,
     val otaBusy: Boolean = false,
     val otaPercent: Float = 0f,
@@ -133,7 +142,44 @@ data class UiState(
     val signPath: String = "",
     val signOptions: SignOptions = SignOptions(),
     val signMessage: String = "",
+    // ── Экраны аккаунта, устройств, файла и настроек ──
+    /** Сведения о выбранном IPA: имя, bundle id, версия, минимальная iOS. */
+    val signMeta: pw.appbank.signum.data.models.IpaMetadata? = null,
+    val signBusy: Boolean = false,
+    val historyHasMore: Boolean = false,
+    val historyNextBatchId: String? = null,
+    val historyLoadingMore: Boolean = false,
+    /** Форма входа поверх уже вошедшего аккаунта: «Добавить Apple ID» и «Войти снова». */
+    val addingAccount: Boolean = false,
+    val installedLoading: Boolean = false,
+    val otaChecking: Boolean = false,
+    val otaCheckMessage: String = "",
+    val cacheBytes: Long = -1L,
+    /** Окно с QR активации: из карточки приложения или сразу после установки. */
+    val activation: ActivationView? = null,
+    /** Сервер не принимает эту версию Signum — экран закрыт окном обновления. */
+    val clientOutdated: pw.appbank.signum.data.api.ClientOutdated? = null,
 )
+
+/** QR активации, готовый к показу: живые коды tb.php уже подставлены. */
+data class ActivationView(
+    val appTitle: String,
+    val source: pw.appbank.signum.data.models.AppActivation,
+    val items: List<ActivationItemView>,
+    val loading: Boolean = false,
+    val error: String = "",
+)
+
+data class ActivationItemView(
+    val item: pw.appbank.signum.data.models.AppActivationItem,
+    val payload: String,
+    val hint: String,
+    /** Когда код перестанет действовать (мс), если сервер дал срок. */
+    val expiresAt: Long? = null,
+) {
+    val inApp: Boolean get() = item.mode == "in_app_scan"
+    val live: Boolean get() = !item.tb_id.isNullOrBlank()
+}
 
 class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     private val _state = MutableStateFlow(
@@ -157,6 +203,150 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         checkOta()
         recoverRegionAfterCrash()
         restoreRegionWhenQueueIdle()
+        watchClientOutdated()
+        showActivationAfterInstall()
+    }
+
+    // ── Устаревший клиент ──────────────────────────────────────────────
+
+    private fun watchClientOutdated() {
+        viewModelScope.launch {
+            pw.appbank.signum.data.api.SignumApi.clientOutdated.collect { info ->
+                if (info != null) _state.update { it.copy(clientOutdated = info) }
+            }
+        }
+    }
+
+    // ── Активация после установки ──────────────────────────────────────
+    //
+    // Некоторым банкам после установки нужна активация по QR. Как на ПК:
+    // если у выбранной версии есть свой QR, показываем его, как только дело
+    // в очереди завершилось.
+
+    private val pendingActivations = java.util.concurrent.ConcurrentHashMap<String, Pair<String, pw.appbank.signum.data.models.AppActivation>>()
+
+    private fun showActivationAfterInstall() {
+        viewModelScope.launch {
+            engine.jobs.jobsFlow.collect { jobs ->
+                if (pendingActivations.isEmpty()) return@collect
+                for (job in jobs) {
+                    when (job.status) {
+                        JobStatus.done -> {
+                            val (title, activation) = pendingActivations.remove(job.id) ?: continue
+                            openActivation(title, activation, force = true)
+                        }
+                        JobStatus.failed, JobStatus.cancelled -> pendingActivations.remove(job.id)
+                        else -> Unit
+                    }
+                }
+            }
+        }
+    }
+
+    /** Активация из карточки каталога, без пустых пунктов. */
+    fun activationFor(appId: String?): pw.appbank.signum.data.models.AppActivation? {
+        if (appId.isNullOrBlank()) return null
+        val raw = _state.value.catalog.firstOrNull { it.id == appId }?.activation ?: return null
+        if (raw.enabled == false) return null
+        val items = raw.items.filter {
+            !it.qr_payload.isNullOrBlank() || !it.url.isNullOrBlank() || !it.tb_id.isNullOrBlank()
+        }
+        return if (items.isEmpty()) null else raw.copy(items = items)
+    }
+
+    /** Пункт активации именно для ставящейся версии: по App Store ID, bundle ID или названию. */
+    private fun activationForInstalled(
+        full: pw.appbank.signum.data.models.AppActivation,
+        appStoreId: String?,
+        bundleId: String?,
+        title: String?,
+    ): pw.appbank.signum.data.models.AppActivation? {
+        val store = appStoreId?.trim().orEmpty()
+        val bundle = bundleId?.trim().orEmpty()
+        val name = title?.trim()?.lowercase().orEmpty()
+        val item = full.items.firstOrNull { store.isNotEmpty() && it.app_store_id?.trim() == store }
+            ?: full.items.firstOrNull { bundle.isNotEmpty() && bundle != "NONE" && it.bundle_id?.trim() == bundle }
+            ?: full.items.firstOrNull { name.isNotEmpty() && it.title.trim().lowercase() == name }
+            ?: return null
+        return pw.appbank.signum.data.models.AppActivation(
+            enabled = true,
+            provider = full.provider,
+            title = full.title?.takeIf { it.isNotBlank() } ?: "Активация после установки",
+            message = item.hint?.takeIf { it.isNotBlank() } ?: full.message
+                ?: "Для входа в банк нужно активировать установленное приложение.",
+            items = listOf(item),
+        )
+    }
+
+    fun openActivation(appTitle: String, activation: pw.appbank.signum.data.models.AppActivation, force: Boolean = false) {
+        _state.update {
+            it.copy(
+                activation = ActivationView(
+                    appTitle = appTitle,
+                    source = activation,
+                    items = activation.items.map(::staticActivationItem),
+                    loading = activation.items.any { item -> !item.tb_id.isNullOrBlank() },
+                ),
+            )
+        }
+        refreshActivation(force)
+    }
+
+    fun closeActivation() = _state.update { it.copy(activation = null) }
+
+    private var activationRequest = 0
+
+    /** Подставить живые коды tb.php. force — попросить у сервера новый код. */
+    fun refreshActivation(force: Boolean) {
+        val current = _state.value.activation ?: return
+        if (current.source.items.none { !it.tb_id.isNullOrBlank() }) return
+        val request = ++activationRequest
+        _state.update { st -> st.copy(activation = st.activation?.copy(loading = true, error = "")) }
+        viewModelScope.launch {
+            val items = coroutineScope {
+                current.source.items.map { item ->
+                    async {
+                        val tb = item.tb_id?.trim().orEmpty()
+                        if (tb.isEmpty()) return@async staticActivationItem(item)
+                        runCatching { engine.fetchTbActivation(tb, force) }.fold(
+                            { live ->
+                                ActivationItemView(
+                                    item = item,
+                                    payload = live.payload,
+                                    hint = item.hint?.takeIf { it.isNotBlank() } ?: live.hint?.takeIf { it.isNotBlank() }
+                                        ?: "Отсканируйте QR камерой iPhone. Код действует 10 минут, затем обновляется.",
+                                    // Без срока (0) код считаем бессрочным, иначе окно обновляло бы его без конца.
+                                    expiresAt = if (live.expiresInSec > 0) System.currentTimeMillis() + live.expiresInSec * 1000L else null,
+                                )
+                            },
+                            { e ->
+                                val base = staticActivationItem(item)
+                                base.copy(
+                                    payload = if (force) "" else base.payload,
+                                    hint = "Не удалось сгенерировать QR: " + Errors.localize(e.message ?: "ошибка сети"),
+                                )
+                            },
+                        )
+                    }
+                }.awaitAll()
+            }
+            if (request != activationRequest) return@launch
+            _state.update { st ->
+                val view = st.activation ?: return@update st
+                if (view.source != current.source) return@update st
+                st.copy(activation = view.copy(items = items, loading = false))
+            }
+        }
+    }
+
+    private fun staticActivationItem(item: pw.appbank.signum.data.models.AppActivationItem): ActivationItemView {
+        val payload = (item.qr_payload ?: item.url ?: "").trim()
+        val hint = item.hint?.trim()?.takeIf { it.isNotEmpty() } ?: if (item.mode == "in_app_scan") {
+            "Откройте приложение и отсканируйте QR внутри него (не через системную камеру iPhone)."
+        } else {
+            "Отсканируйте QR камерой iPhone — откроется приложение."
+        }
+        return ActivationItemView(item = item, payload = payload, hint = hint)
     }
 
     /**
@@ -246,55 +436,167 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
 
     fun setSearch(q: String) {
         val storeScope = q.trim().length >= 2
-        _state.update { it.copy(search = q, storeHits = emptyList(), devHits = emptyList(), storeSearchError = "", storeSearching = storeScope) }
         searchJob?.cancel()
-        if (!storeScope || q.trim().length < 2) {
-            _state.update { it.copy(storeHits = emptyList(), devHits = emptyList(), storeSearching = false) }
-            return
+        _state.update {
+            it.copy(
+                search = q,
+                storeHits = emptyList(),
+                devHits = emptyList(),
+                storeSearchError = "",
+                storeSearching = storeScope,
+                devSearching = storeScope,
+            )
         }
+        if (!storeScope) return
         searchJob = viewModelScope.launch {
             // Пауза после последнего нажатия: пока человек печатает, в сеть
             // не ходим вовсе.
-            delay(350)
-            // authStatus() читает зашифрованные настройки — четыре обращения к
-            // диску с расшифровкой. На главном потоке это заметный рывок на
-            // каждую букву, поэтому проверка ушла в фоновый поток вместе с
-            // самим поиском.
+            delay(300)
+            // Разработчиков ищем тем же вводом и параллельно, как на ПК:
+            // приложения показываем выше, студии — ниже, и если студий не
+            // нашлось, раздела просто нет.
+            launch {
+                val devs = try {
+                    StoreSearch.searchDevelopers(q)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                if (_state.value.search == q) _state.update { it.copy(devHits = devs, devSearching = false) }
+            }
             val hits = try {
-                engine.searchStore(q)
+                StoreSearch.searchApps(q, ownedOnAccount = ::ownedOnActiveAccount)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
                 if (_state.value.search == q) {
-                    _state.update { it.copy(storeSearching = false, storeSearchError = Errors.localize(e.message ?: "Не удалось выполнить поиск.")) }
+                    _state.update {
+                        it.copy(
+                            storeSearching = false,
+                            storeSearchError = Errors.localize(e.message ?: "Не удалось выполнить поиск."),
+                        )
+                    }
                 }
                 return@launch
             }
             if (_state.value.search != q) return@launch
-            // Разработчики собираются из тех же ответов: отдельный запрос ради
-            // них не нужен, artistId приходит в каждом результате.
-            val devs = hits
-                .filter { !it.artistId.isNullOrBlank() && !it.artist.isNullOrBlank() }
-                .groupBy { it.artistId!! }
-                .map { (id, apps) -> StoreDeveloper(id, apps.first().artist!!, apps.size) }
-                .sortedByDescending { it.appCount }
-                .take(8)
-            _state.update { it.copy(storeHits = hits, devHits = devs, storeSearching = false) }
+            _state.update { it.copy(storeHits = hits, storeSearching = false) }
+            val withIcons = runCatching { StoreSearch.fillIosIcons(hits) }.getOrNull() ?: return@launch
+            if (withIcons !== hits && _state.value.search == q) _state.update { it.copy(storeHits = withIcons) }
         }
+    }
+
+    /**
+     * Есть ли номер приложения в покупках текущего Apple ID. Спрашиваем, только
+     * когда введён номер, которого не знает ни один магазин: приложение могли
+     * снять с продажи, а в покупках оно осталось.
+     */
+    private suspend fun ownedOnActiveAccount(adamId: String): Boolean {
+        val owner = engine.settings.activeEmail() ?: return false
+        val owned = runCatching { engine.listVersionIds(adamId).isNotEmpty() }.getOrDefault(false)
+        return owned && engine.settings.activeEmail() == owner
     }
 
     /** Открыть разработчика и показать всё, что у него есть в магазине. */
     fun openDeveloper(dev: StoreDeveloper) {
-        _state.update { it.copy(openedDeveloper = dev, developerApps = emptyList(), developerLoading = true) }
+        _state.update {
+            it.copy(
+                openedDeveloper = dev,
+                developerApps = emptyList(),
+                developerLoading = true,
+                developerError = "",
+                developerPicked = emptySet(),
+            )
+        }
         viewModelScope.launch {
-            val apps = runCatching { engine.developerApps(dev.artistId) }.getOrDefault(emptyList())
+            val result = runCatching { StoreSearch.developerApps(dev.artistId) }
             if (_state.value.openedDeveloper?.artistId != dev.artistId) return@launch
-            _state.update { it.copy(developerApps = apps, developerLoading = false) }
+            _state.update {
+                it.copy(
+                    developerApps = result.getOrDefault(emptyList()),
+                    developerLoading = false,
+                    developerError = result.exceptionOrNull()
+                        ?.let { e -> Errors.localize(e.message ?: "Не удалось загрузить приложения разработчика.") }
+                        .orEmpty(),
+                )
+            }
         }
     }
 
-    fun closeDeveloper() =
-        _state.update { it.copy(openedDeveloper = null, developerApps = emptyList(), developerLoading = false) }
+    fun closeDeveloper() = _state.update {
+        it.copy(
+            openedDeveloper = null,
+            developerApps = emptyList(),
+            developerLoading = false,
+            developerError = "",
+            developerPicked = emptySet(),
+        )
+    }
+
+    fun toggleDeveloperPick(adamId: String) = _state.update { state ->
+        val next = state.developerPicked.toMutableSet()
+        if (!next.remove(adamId)) next.add(adamId)
+        state.copy(developerPicked = next)
+    }
+
+    /** «Выбрать все» / «Снять все». */
+    fun toggleDeveloperPickAll() = _state.update { state ->
+        val all = state.developerApps.mapTo(HashSet()) { it.adamId }
+        state.copy(developerPicked = if (state.developerPicked.size == all.size) emptySet() else all)
+    }
+
+    /**
+     * Скачать отмеченные приложения разработчика разом.
+     *
+     * Ставим по одному и не прерываемся на ошибке: если одно не встало в
+     * очередь, остальные всё равно должны уехать — иначе непонятно, что
+     * скачалось, а что нет.
+     */
+    fun queueDeveloperPicked(onDone: () -> Unit) {
+        val state = _state.value
+        if (state.developerPicked.isEmpty() || state.developerBatchBusy) return
+        if (!engine.authStatus().authenticated) {
+            _state.update { it.copy(developerError = "Сначала войдите в Apple ID на странице «Аккаунт».") }
+            return
+        }
+        val chosen = state.developerApps.filter { it.adamId in state.developerPicked }
+        DiagLog.note("ui", "нажал «Скачать отмеченные» — ${chosen.size} шт · ${state.openedDeveloper?.name.orEmpty()}")
+        _state.update { it.copy(developerBatchBusy = true, developerError = "") }
+        val failed = mutableListOf<String>()
+        for (hit in chosen) {
+            runCatching {
+                engine.enqueueInstall(
+                    title = hit.name,
+                    adamId = hit.adamId,
+                    bundleId = hit.bundleId,
+                    inStore = !hit.removedFromStore,
+                    alreadyOwned = hit.removedFromStore,
+                    version = null,
+                    externalVersionId = null,
+                    install = false,
+                )
+            }.onFailure { failed += hit.name }
+        }
+        if (failed.size == chosen.size) {
+            _state.update {
+                it.copy(developerBatchBusy = false, developerError = "Не удалось поставить в очередь ни одно приложение.")
+            }
+            return
+        }
+        _state.update {
+            it.copy(
+                developerBatchBusy = false,
+                developerPicked = emptySet(),
+                developerError = if (failed.isEmpty()) "" else
+                    "Не удалось поставить в очередь: ${failed.joinToString(", ")}. Остальные скачиваются.",
+            )
+        }
+        if (failed.isEmpty()) {
+            closeDeveloper()
+            onDone()
+        }
+    }
 
     fun setGroup(id: String) = _state.update { it.copy(groupFilter = id) }
 
@@ -366,22 +668,46 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     }
 
     fun openStoreHit(hit: AppStoreSearchHit) {
+        DiagLog.note("ui", "открыл результат App Store — ${hit.name} · ${hit.adamId}")
+        val gone = hit.removedFromStore
         val offer = engine.resolveOffer(
-            appId = hit.adamId,
+            appId = "store:${hit.adamId}",
             title = hit.name,
             icon = hit.artwork,
-            inStore = !hit.foundOnAccount,
+            inStore = !gone && !hit.foundOnAccount,
             version = hit.version,
             minIos = hit.minIos,
             bundleId = hit.bundleId,
             storeId = hit.adamId,
             deviceIos = _state.value.selectedDevice?.productVersion,
         )
-        val resolved = if (hit.foundOnAccount) offer.copy(
-            source = "restore",
-            message = "Приложение найдено в покупках текущего Apple ID. Можно скачать IPA или установить на iPhone.",
-        ) else offer
-        _state.update { it.copy(offer = resolved, versions = emptyList(), chosenVersion = null) }
+        // Тексты те же, что на ПК: человек должен сразу понимать, откуда
+        // возьмётся приложение.
+        val resolved = when {
+            hit.foundOnAccount -> offer.copy(
+                source = "restore",
+                message = "Приложение найдено в покупках текущего Apple ID. Можно скачать IPA или установить на iPhone.",
+            )
+            gone -> offer.copy(
+                source = "restore",
+                message = "Этого приложения уже нет в App Store. Установить можно, только если оно есть в покупках этого Apple ID.",
+            )
+            else -> offer
+        }
+        _state.update {
+            it.copy(
+                offer = resolved,
+                offerError = "",
+                versions = emptyList(),
+                chosenVersion = null,
+                versionsError = "",
+                versionsSearch = "",
+                versionsVisibleCount = 12,
+                versionsIosPending = emptySet(),
+                restoreOpen = false,
+                bankAltOpen = false,
+            )
+        }
         loadStoreVersions(hit.adamId, force = false)
     }
 
@@ -798,7 +1124,7 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
             return false
         }
         val chosen = _state.value.chosenVersion
-        engine.enqueueInstall(
+        val jobId = engine.enqueueInstall(
             title = offer.title,
             adamId = adam,
             bundleId = offer.bundleId,
@@ -808,6 +1134,11 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
             externalVersionId = chosen?.externalVersionId,
             install = install,
         )
+        if (install) {
+            activationFor(offer.appId)
+                ?.let { activationForInstalled(it, adam, offer.bundleId, offer.title) }
+                ?.let { pendingActivations[jobId] = offer.appTitle to it }
+        }
         _state.update { it.copy(offer = null, offerError = "", bankAltOpen = false) }
         return true
     }
@@ -831,7 +1162,15 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
             return
         }
         viewModelScope.launch {
-            _state.update { it.copy(versions = emptyList(), chosenVersion = null, versionsLoading = true, versionsError = "") }
+            _state.update {
+                it.copy(
+                    versions = emptyList(),
+                    chosenVersion = null,
+                    versionsLoading = true,
+                    versionsError = "",
+                    versionsIosPending = emptySet(),
+                )
+            }
             val ids = runCatching { engine.listVersionIds(adamId, force) }
                 .onFailure { e ->
                     if (_state.value.offer?.appStoreId == adamId) {
@@ -899,7 +1238,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                     )
                 }
             }
-            _state.update { it.copy(versionsLoading = false) }
+            val pendingIos = ids.filter { knownIos[it].isNullOrBlank() }.toSet()
+            _state.update { it.copy(versionsLoading = false, versionsIosPending = pendingIos) }
             withContext(Dispatchers.IO) {
                 runCatching {
                     engine.store.versionMinIosBatch(adamId, ids) { ext, value ->
@@ -907,11 +1247,14 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                             _state.update { state -> state.copy(
                                 versions = state.versions.map { if (it.externalVersionId == ext) it.copy(minIos = value) else it },
                                 chosenVersion = state.chosenVersion?.let { if (it.externalVersionId == ext) it.copy(minIos = value) else it },
+                                versionsIosPending = state.versionsIosPending - ext,
                             ) }
                         }
                     }
                 }
             }
+            // Совместимость — подсказка, а не условие: неудача не мешает скачать.
+            if (request == storeVersionsRequest) _state.update { it.copy(versionsIosPending = emptySet()) }
         }
     }
 
@@ -1019,6 +1362,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         _state.update {
             it.copy(
                 history = emptyList(),
+                historyHasMore = false,
+                historyNextBatchId = null,
                 historyNeeds2fa = false,
                 history2fa = "",
                 historyMessage = "",
@@ -1030,6 +1375,9 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     }
 
     fun loadHistory(force: Boolean) {
+        // Двойное нажатие запускало два запроса подряд, и Apple присылала
+        // два кода — второй делал первый недействительным.
+        if (_state.value.historyLoading) return
         viewModelScope.launch {
             _state.update { it.copy(historyLoading = true, historyMessage = "") }
             engine.cachedHistory()?.let { cached ->
@@ -1048,6 +1396,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                             historyNeeds2fa = r.needs2fa,
                             historyMessage = r.message.orEmpty(),
                             history2fa = if (r.needs2fa) it.history2fa else "",
+                            historyHasMore = if (keepShown) it.historyHasMore else r.hasMore,
+                            historyNextBatchId = if (keepShown) it.historyNextBatchId else r.nextBatchId,
                         )
                     }
                 }
@@ -1210,19 +1560,47 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
 
     fun loadInstalled() {
         DiagLog.note("ui", "запросил список приложений на iPhone")
+        if (_state.value.installedLoading) return
         viewModelScope.launch {
+            _state.update { it.copy(installedLoading = true) }
             runCatching { engine.installedApps() }
-                .onSuccess { apps -> _state.update { it.copy(installed = apps) } }
-                .onFailure { e -> _state.update { it.copy(deviceMessage = Errors.localize(e.message ?: "")) } }
+                .onSuccess { apps -> _state.update { it.copy(installed = apps, installedLoading = false) } }
+                .onFailure { e ->
+                    _state.update { it.copy(installedLoading = false, deviceMessage = Errors.localize(e.message ?: "")) }
+                }
         }
     }
 
     fun restoreOffloaded(app: InstalledApp) {
         if (!app.isPlaceholder) return
+        viewModelScope.launch { restoreOffloadedNow(app) }
+    }
+
+    /**
+     * «Восстановить все» — по одному, а не пачкой параллельных запросов:
+     * раньше каждое приложение било в App Store одновременно, а сообщения
+     * затирали друг друга, и человек видел только последнее.
+     */
+    fun restoreAllOffloaded() {
+        val apps = _state.value.installed.filter { it.isPlaceholder }
+        if (apps.isEmpty()) return
+        viewModelScope.launch {
+            var ok = 0
+            for (app in apps) if (restoreOffloadedNow(app)) ok++
+            _state.update {
+                it.copy(deviceMessage = "В очередь восстановления добавлено: $ok из ${apps.size}.")
+            }
+        }
+    }
+
+    private suspend fun restoreOffloadedNow(app: InstalledApp): Boolean {
         val owner = engine.settings.activeEmail()
         val deviceIos = _state.value.selectedDevice?.productVersion
-        viewModelScope.launch {
-            _state.update { it.copy(deviceMessage = "Проверяем покупку приложения…") }
+        _state.update { it.copy(deviceMessage = "Проверяем покупку: ${app.name ?: app.bundleId}…") }
+        // resolveAdamId, versionMinIos и ownsListing ходят в сеть синхронно.
+        // На главном потоке это NetworkOnMainThreadException: восстановление
+        // сгруженного приложения не работало никогда, всегда падало с ошибкой.
+        return withContext(Dispatchers.IO) {
             runCatching {
                 if (owner.isNullOrBlank()) error("Сначала войдите в Apple ID на странице «Аккаунт».")
                 if (deviceIos.isNullOrBlank()) error("Не удалось определить версию iOS устройства.")
@@ -1250,7 +1628,7 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                 _state.update { it.copy(deviceMessage = "${app.name ?: app.bundleId} добавлено в очередь восстановления.") }
             }.onFailure { error ->
                 _state.update { it.copy(deviceMessage = Errors.localize(error.message ?: "Не удалось восстановить приложение.")) }
-            }
+            }.isSuccess
         }
     }
 
@@ -1285,6 +1663,23 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     private fun checkOta() {
         viewModelScope.launch {
             val info = runCatching { engine.fetchOta() }.getOrNull() ?: return@launch
+            // Устаревший клиент закрываем окном обновления всегда — даже при
+            // выключенной автопроверке: сервер его всё равно не примет.
+            if (!info.clientSupported) {
+                _state.update {
+                    it.copy(
+                        ota = info,
+                        clientOutdated = pw.appbank.signum.data.api.ClientOutdated(
+                            message = info.notes?.trim()?.takeIf { n -> n.isNotEmpty() }
+                                ?: "Эта версия Signum устарела. Обновите приложение.",
+                            minClientVersion = info.minClientVersion,
+                        ),
+                    )
+                }
+                return@launch
+            }
+            // Настройка «Автопроверка обновлений»: баннер не показываем.
+            if (!engine.settingsFlow.value.autoUpdate) return@launch
             if (!info.hasUpdate || info.downloadUrl.isNullOrBlank()) return@launch
             _state.update { it.copy(ota = info) }
         }
@@ -1309,6 +1704,34 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                         it.copy(otaBusy = false, otaMessage = Errors.localize(e.message ?: "Не удалось скачать обновление."))
                     }
                 }
+        }
+    }
+
+    /**
+     * «Обновить Signum» из окна устаревшего клиента. Окно могло открыться по
+     * ответу 426 на любой запрос, когда сведений об обновлении ещё нет, —
+     * тогда сначала спрашиваем ota.php.
+     */
+    fun updateFromOutdatedGate() {
+        if (_state.value.otaBusy || _state.value.otaChecking) return
+        if (_state.value.ota?.downloadUrl.isNullOrBlank().not()) {
+            downloadOta()
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(otaChecking = true, otaMessage = "") }
+            val info = runCatching { engine.fetchOta() }.getOrNull()
+            if (info == null || info.downloadUrl.isNullOrBlank()) {
+                _state.update {
+                    it.copy(
+                        otaChecking = false,
+                        otaMessage = "Ссылка на обновление недоступна. Скачайте новую версию на сайте appbank.pw.",
+                    )
+                }
+                return@launch
+            }
+            _state.update { it.copy(otaChecking = false, ota = info.copy(mandatory = true)) }
+            downloadOta()
         }
     }
 
@@ -1361,6 +1784,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         _state.update {
             it.copy(
                 history = emptyList(),
+                historyHasMore = false,
+                historyNextBatchId = null,
                 historySelected = emptySet(),
                 historyMessage = "",
                 loginMessage = "Выбран Apple ID $email",
@@ -1375,6 +1800,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         _state.update {
             it.copy(
                 history = emptyList(),
+                historyHasMore = false,
+                historyNextBatchId = null,
                 historySelected = emptySet(),
                 loginMessage = "Apple ID $email убран",
             )
@@ -1390,6 +1817,207 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
 
     fun refreshAuth() {
         _state.update { it.copy(auth = engine.authStatus()) }
+    }
+
+    // ── Аккаунт: несколько Apple ID и история покупок по страницам ──────
+
+    /** «Добавить Apple ID» при уже вошедшем аккаунте. */
+    fun startAddAccount() = _state.update {
+        it.copy(
+            addingAccount = true,
+            loginEmail = "",
+            loginPassword = "",
+            loginCode = "",
+            loginStep = "credentials",
+            loginMessage = "",
+        )
+    }
+
+    /** «Войти снова» для сохранённого Apple ID без действующего входа. */
+    fun startRelogin(email: String) = _state.update {
+        it.copy(
+            addingAccount = true,
+            loginEmail = email,
+            loginPassword = "",
+            loginCode = "",
+            loginStep = "credentials",
+            loginMessage = "Введите пароль Apple ID $email",
+        )
+    }
+
+    fun cancelAddAccount() = _state.update {
+        it.copy(addingAccount = false, loginStep = "credentials", loginCode = "", loginPassword = "", loginMessage = "")
+    }
+
+    /** Вызывается экраном, когда вход завершился: форму добавления закрываем. */
+    fun finishAddAccountIfDone() {
+        val s = _state.value
+        if (s.addingAccount && s.auth.authenticated && s.loginStep == "credentials" && !s.loginBusy &&
+            s.auth.email.equals(s.loginEmail.trim(), ignoreCase = true)
+        ) {
+            _state.update { it.copy(addingAccount = false, loginPassword = "") }
+        }
+    }
+
+    /**
+     * «Загрузить ещё» и «До конца». Apple отдаёт историю страницами; страницу
+     * приклеиваем к уже показанному списку без дублей.
+     */
+    fun loadMoreHistory(all: Boolean) {
+        if (_state.value.historyLoadingMore || !_state.value.historyHasMore) return
+        viewModelScope.launch {
+            _state.update { it.copy(historyLoadingMore = true, historyMessage = "") }
+            var pages = 0
+            try {
+                while (true) {
+                    val batch = _state.value.historyNextBatchId ?: break
+                    val r = engine.fetchHistory(null, true, batch, false)
+                    _state.update {
+                        val known = it.history.mapTo(HashSet()) { a -> a.adamId }
+                        val merged = it.history + r.apps.filter { a -> known.add(a.adamId) }
+                        it.copy(
+                            history = merged,
+                            historyHasMore = r.hasMore && !r.nextBatchId.isNullOrBlank() && r.nextBatchId != batch,
+                            historyNextBatchId = r.nextBatchId,
+                            historyMessage = "Загружено покупок: ${merged.size}",
+                        )
+                    }
+                    pages++
+                    // Ограничение на случай, если Apple будет возвращать ту же страницу.
+                    if (!all || !_state.value.historyHasMore || pages >= 200) break
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(historyMessage = Errors.localize(e.message ?: "")) }
+            } finally {
+                _state.update { it.copy(historyLoadingMore = false) }
+            }
+        }
+    }
+
+    // ── Свой файл ──────────────────────────────────────────────────────
+
+    /**
+     * Скопировать выбранный IPA к себе и прочитать его Info.plist.
+     *
+     * Раньше копирование шло прямо в обработчике выбора файла, на главном
+     * потоке: файл в сотни мегабайт вешал экран до «Приложение не отвечает».
+     * И каждая копия оставалась в кэше навсегда — теперь прежняя удаляется.
+     */
+    fun pickIpa(ctx: android.content.Context, uri: android.net.Uri) {
+        if (_state.value.signBusy) return
+        val previous = _state.value.signPath
+        viewModelScope.launch {
+            _state.update { it.copy(signBusy = true, signMessage = "Копируем файл…", signMeta = null) }
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val name = queryDisplayName(ctx, uri)
+                    val dest = java.io.File(ctx.cacheDir, "picked/${System.currentTimeMillis()}-${name.ifBlank { "app.ipa" }}")
+                    dest.parentFile?.mkdirs()
+                    val input = ctx.contentResolver.openInputStream(uri) ?: error("Не удалось открыть файл")
+                    input.use { src -> dest.outputStream().use { src.copyTo(it, 256 * 1024) } }
+                    val meta = runCatching { pw.appbank.signum.data.signing.IpaTweaks.metadata(dest) }.getOrElse {
+                        dest.delete()
+                        error("Это не IPA-файл или он повреждён.")
+                    }
+                    if (previous.isNotBlank() && previous != dest.absolutePath && previous.contains("/picked")) {
+                        runCatching { java.io.File(previous).delete() }
+                    }
+                    dest to meta
+                }
+            }
+            outcome.onSuccess { (file, meta) ->
+                _state.update { it.copy(signBusy = false, signPath = file.absolutePath, signMeta = meta, signMessage = "") }
+            }.onFailure { e ->
+                _state.update { it.copy(signBusy = false, signMessage = Errors.localize(e.message ?: "Не удалось прочитать файл")) }
+            }
+        }
+    }
+
+    private fun queryDisplayName(ctx: android.content.Context, uri: android.net.Uri): String {
+        val raw = runCatching {
+            ctx.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: ""
+        return raw.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").take(80)
+    }
+
+    fun clearPickedIpa() {
+        val path = _state.value.signPath
+        if (path.contains("/picked")) runCatching { java.io.File(path).delete() }
+        _state.update { it.copy(signPath = "", signMeta = null, signMessage = "") }
+    }
+
+    // ── Настройки ───────────────────────────────────────────────────────
+
+    /** Ручная проверка обновлений — работает и при выключенной автопроверке. */
+    fun checkUpdatesNow() {
+        if (_state.value.otaChecking) return
+        viewModelScope.launch {
+            _state.update { it.copy(otaChecking = true, otaCheckMessage = "") }
+            val result = runCatching { engine.fetchOta() }
+            _state.update { st ->
+                result.fold(
+                    { info ->
+                        if (!info.clientSupported) {
+                            st.copy(
+                                otaChecking = false,
+                                ota = info,
+                                clientOutdated = pw.appbank.signum.data.api.ClientOutdated(
+                                    message = info.notes?.trim()?.takeIf { n -> n.isNotEmpty() }
+                                        ?: "Эта версия Signum устарела. Обновите приложение.",
+                                    minClientVersion = info.minClientVersion,
+                                ),
+                            )
+                        } else if (info.hasUpdate && !info.downloadUrl.isNullOrBlank()) {
+                            st.copy(otaChecking = false, ota = info, otaCheckMessage = "Доступна версия ${info.version.orEmpty()}".trim())
+                        } else {
+                            st.copy(otaChecking = false, otaCheckMessage = "Установлена последняя версия")
+                        }
+                    },
+                    { e -> st.copy(otaChecking = false, otaCheckMessage = Errors.localize(e.message ?: "Не удалось проверить обновления")) },
+                )
+            }
+        }
+    }
+
+    /** Все наши временные файлы: кэш IPA, подготовленные, выбранные и недокачанные. */
+    private fun cacheRoots(): List<java.io.File> = listOf(
+        engine.settings.ipaCacheDir(),
+        engine.settings.signedDir(),
+        java.io.File(engine.settings.cacheDir(), "picked"),
+        java.io.File(engine.settings.cacheDir(), "temp"),
+    )
+
+    fun refreshCacheSize() {
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                cacheRoots().sumOf { root -> root.walkTopDown().filter { it.isFile }.sumOf { it.length() } }
+            }
+            _state.update { it.copy(cacheBytes = bytes) }
+        }
+    }
+
+    /**
+     * Очистить кэш. Файлы идущих дел не трогаем: удалить их посреди загрузки
+     * или установки — значит уронить дело.
+     */
+    fun clearCacheNow() {
+        val busy = engine.jobs.jobsFlow.value.any { it.status == JobStatus.running || it.status == JobStatus.queued }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val keep = _state.value.signPath
+                cacheRoots().forEachIndexed { index, root ->
+                    // temp — папки идущих загрузок; при активной очереди не трогаем.
+                    if (busy && index >= 1) return@forEachIndexed
+                    root.listFiles()?.forEach { f ->
+                        if (f.absolutePath != keep) f.deleteRecursively()
+                    }
+                }
+            }
+            refreshCacheSize()
+        }
     }
 
     class Factory(private val engine: SignumEngine) : ViewModelProvider.Factory {

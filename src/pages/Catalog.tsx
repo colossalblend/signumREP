@@ -137,6 +137,9 @@ export default function Catalog() {
   const [versionsTotal, setVersionsTotal] = useState(0);
   const [chosenVersion, setChosenVersion] = useState<AppStoreVersion | null>(null);
   const [fitBusy, setFitBusy] = useState(false);
+  // Двойной клик по «Установить»/«Скачать» ставил задачу в очередь дважды.
+  const [queueBusy, setQueueBusy] = useState(false);
+  const queueBusyRef = useRef(false);
 
   const [versionsVisibleCount, setVersionsVisibleCount] = useState(12);
   const [restoreVisibleCount, setRestoreVisibleCount] = useState(12);
@@ -341,6 +344,12 @@ export default function Catalog() {
     });
   }, []);
 
+  // В разделе App Store карточка каталога всегда открывает установку: режим
+  // выбора относится к сетке каталога выше.
+  const onStoreCatalogCardClick = useCallback((app: CatalogApp) => {
+    void latestRef.current.openInstallOffer(app);
+  }, []);
+
   const onCardFavorite = useCallback((app: CatalogApp) => {
     void latestRef.current.toggleFavorite(app.id);
   }, []);
@@ -416,6 +425,8 @@ export default function Catalog() {
   async function scanAppRestoreVersions(target: CatalogInstallOffer, force = false) {
     logUi(force ? "нажал «Обновить список»" : "нажал «Выбрать другую версию»", target.title);
     const appId = target.app_id;
+    // Ответ для окна, которое уже закрыли или сменили, не должен его перезаписать.
+    const request = offerRequestRef.current;
     setAppRestoreOpen(true);
     setRestoreVisibleCount(VERSIONS_PAGE);
     setRestoreVersionsSearch("");
@@ -431,17 +442,19 @@ export default function Catalog() {
           currentBundleId: target.bundle_id ?? null,
         },
       });
+      if (request !== offerRequestRef.current) return;
       setAppRestoreScan({
         ...scan,
         items: scan.items ?? [],
       });
     } catch (e) {
+      if (request !== offerRequestRef.current) return;
       setAppRestoreScan({
         items: [],
         message: errorMessage(e) || "Не удалось загрузить другие версии. Повторите попытку.",
       });
     } finally {
-      setDetailLoading(false);
+      if (request === offerRequestRef.current) setDetailLoading(false);
     }
   }
 
@@ -543,7 +556,12 @@ export default function Catalog() {
     if (temporaryUsRegion && !window.confirm(
       "Happ пока нет в покупках этого Apple ID. Установка временно сменит страну магазина на США и сразу после установки вернёт вашу страну обратно.\n\nЕсли на счету Apple ID есть деньги, сменить страну не получится — проверьте баланс заранее.\n\nПродолжить?",
     )) return;
-    const jobId = await command<string>("enqueue_catalog_install", { input: {
+    if (queueBusyRef.current) return;
+    queueBusyRef.current = true;
+    setQueueBusy(true);
+    let jobId: string;
+    try {
+      jobId = await command<string>("enqueue_catalog_install", { input: {
       title: selected.title,
       bundle_id: selected.bundle_id,
       app_store_id: selected.app_store_id,
@@ -553,7 +571,16 @@ export default function Catalog() {
       external_version_id: chosenVersion?.externalVersionId,
       already_owned: versionConfirmedOnAccount,
       temporary_us_region: temporaryUsRegion,
-    }});
+      }});
+    } catch (e) {
+      // Без этого ошибка очереди уходила в необработанный reject, а окно
+      // молча оставалось открытым.
+      setVersionsError(errorMessage(e));
+      return;
+    } finally {
+      queueBusyRef.current = false;
+      setQueueBusy(false);
+    }
                                                                                         
     const full = resolveAppActivation(apps.find(a => a.id === selected.app_id)?.activation);
     if (full) {
@@ -582,16 +609,27 @@ export default function Catalog() {
       setVersionsError("На этом Apple ID нет подтверждённой версии для скачивания. Откройте другой Apple ID или обновите список версий.");
       return;
     }
-    await command<string>("enqueue_catalog_export", { input: {
-      title: selected.title,
-      bundle_id: selected.bundle_id,
-      app_store_id: selected.app_store_id,
-      in_store: selected.in_store,
-      min_ios: selected.min_ios,
-      version: chosenVersion?.version ?? selected.version,
-      external_version_id: chosenVersion?.externalVersionId,
-      already_owned: versionConfirmedOnAccount,
-    }});
+    if (queueBusyRef.current) return;
+    queueBusyRef.current = true;
+    setQueueBusy(true);
+    try {
+      await command<string>("enqueue_catalog_export", { input: {
+        title: selected.title,
+        bundle_id: selected.bundle_id,
+        app_store_id: selected.app_store_id,
+        in_store: selected.in_store,
+        min_ios: selected.min_ios,
+        version: chosenVersion?.version ?? selected.version,
+        external_version_id: chosenVersion?.externalVersionId,
+        already_owned: versionConfirmedOnAccount,
+      }});
+    } catch (e) {
+      setVersionsError(errorMessage(e));
+      return;
+    } finally {
+      queueBusyRef.current = false;
+      setQueueBusy(false);
+    }
     setExportQueued(true);
     sessionStorage.setItem("signum-export-queued", "1");
     setOffer(null);
@@ -650,6 +688,8 @@ export default function Catalog() {
     () => (tourDemo ? [tourCatalogApp, ...foundApps] : foundApps),
     [foundApps, tourDemo],
   );
+
+  const shownCatalogIds = useMemo(() => new Set(visibleApps.map(app => app.id)), [visibleApps]);
 
   const favoriteApps = useMemo(
     () => (searchQuery.trim() || catalogSort !== "default" || compatibilityFilter !== "all"
@@ -939,7 +979,7 @@ export default function Catalog() {
                <div className="mx-auto mt-6 max-w-sm rounded-2xl border border-white/[0.08] bg-black/15 p-4">
                  <p className="text-xs leading-5 text-slate-400">
                    В каталоге собраны проверенные приложения и специальные сборки.
-                   Для остальных названий результаты AppMagic и iTunes появятся ниже автоматически.
+                   Для остальных названий результаты App Store появятся ниже автоматически.
                  </p>
                </div>
               {searchBankAlt && (
@@ -974,7 +1014,7 @@ export default function Catalog() {
                   <h2 className="flex items-center gap-2 text-lg font-bold tracking-tight text-white">
                     <Star size={16} className="fill-amber-300 text-amber-300" />Избранное
                   </h2>
-                  <span className="text-[11px] text-slate-600">{favoriteApps.length}</span>
+                  <span className="section-count">{favoriteApps.length}</span>
                 </div>
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4">
                   {favoriteApps.map(app => (
@@ -997,7 +1037,7 @@ export default function Catalog() {
                 <section key={section.id}>
                   <div className="mb-4 flex items-end justify-between gap-3">
                     <h2 className="text-lg font-bold tracking-tight text-white">{section.title}</h2>
-                    <span className="text-[11px] text-slate-600">{section.apps.length}</span>
+                    <span className="section-count">{section.apps.length}</span>
                   </div>
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4">
                     {section.apps.map(app => (
@@ -1037,16 +1077,21 @@ export default function Catalog() {
       </div>
 
       {effectiveSearchQuery.trim().length >= 2 && (
-        <section className="mt-12 border-t border-white/[0.06] pt-8">
+        <section className="mt-12 border-t border-subtle pt-8">
           <div className="mb-4 flex items-end justify-between gap-3">
-            <h2 className="text-lg font-bold tracking-tight text-white">Результаты AppMagic и iTunes</h2>
+            <h2 className="flex items-center gap-2 text-lg font-bold tracking-tight text-white">
+              <Store size={16} className="text-brand-300" />Результаты App Store
+            </h2>
             {storeSearching && <span className="inline-flex items-center gap-2 pb-0.5 text-xs text-slate-500"><LoaderCircle size={14} className="animate-spin text-brand-300" />Ищем…</span>}
           </div>
           <StoreSearch
             query={effectiveSearchQuery}
             tourShowHits={tourShowHits}
-            catalogMatches={[]}
-            onOpenCatalogApp={app => void openInstallOffer(app)}
+            catalogApps={apps}
+            shownCatalogIds={shownCatalogIds}
+            onOpenCatalogApp={onStoreCatalogCardClick}
+            favoriteIds={favorites}
+            onToggleFavorite={onCardFavorite}
             onSearchingChange={setStoreSearching}
           />
         </section>
@@ -1504,7 +1549,7 @@ export default function Catalog() {
               <button
                 data-tour="sheet-install"
                 className="btn-primary w-full"
-                disabled={catalogActionDisabled || versionsLoading}
+                disabled={catalogActionDisabled || versionsLoading || queueBusy}
                 onClick={() => void queueInstall(offer)}
               >
                 <Smartphone size={15} />
@@ -1522,7 +1567,7 @@ export default function Catalog() {
                 /* Пока версии не загружены, скачивать нечего: подтверждённой
                    версии ещё нет, и задача повисала бы в очереди до конца
                    опроса — со стороны это выглядело зависанием. */
-                disabled={catalogActionDisabled || versionsLoading}
+                disabled={catalogActionDisabled || versionsLoading || queueBusy}
                 onClick={() => void queueExport(offer)}
               >
                 <Download size={15} />

@@ -20,7 +20,8 @@ pub struct DeveloperDevice {
     pub status: Option<String>,
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(feature = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait::async_trait)]
 pub trait DevicesApi {
     fn developer_session(&mut self) -> &mut DeveloperSession;
 
@@ -49,8 +50,8 @@ pub trait DevicesApi {
         udid: &str,
         device_type: impl Into<Option<DeveloperDeviceType>> + Send,
     ) -> Result<DeveloperDevice, Report> {
-        // Device names from iOS can be Cyrillic; Apple only accepts limited ASCII.
-        let safe_name = crate::dev::app_ids::sanitize_developer_app_id_name(name, udid);
+        // Signum patch: iPhone names are often Cyrillic; Apple only accepts ASCII.
+        let safe_name = crate::dev::sanitize_developer_name(name, "iPhone");
         let body = plist!(dict {
             "teamId": &team.team_id,
             "name": &safe_name,
@@ -78,7 +79,11 @@ pub trait DevicesApi {
         let device_type = device_type.into();
         let devices = self.list_devices(team, device_type.clone()).await?;
 
-        if devices.iter().any(|d| d.device_number == udid) {
+        // Signum patch: Apple may echo the UDID in another letter case.
+        if devices
+            .iter()
+            .any(|d| d.device_number.trim().eq_ignore_ascii_case(udid.trim()))
+        {
             info!("Device is a development device");
             return Ok(());
         }

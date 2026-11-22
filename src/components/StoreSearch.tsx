@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowUpRight, Check, ChevronRight, Download, LoaderCircle, RotateCcw, Search, ShoppingBag, Smartphone, Store, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import AppCard from "./AppCard";
 import Checkbox from "./Checkbox";
 import { isTwoFactorError } from "../lib/auth";
 import { formatMinIos, formatVersionWithIos } from "../lib/format";
@@ -46,6 +47,16 @@ function pluralApps(count: number): string {
 }
 
 import { tourSearchHits, useTourDemo } from "../lib/tourStore";
+
+/** App Store ID приходит и строкой, и числом; сравниваем только цифры. */
+function normalizeStoreId(value: unknown): string {
+  const text = value == null ? "" : String(value).trim();
+  return /^\d+$/.test(text) ? text.replace(/^0+(?=\d)/, "") : "";
+}
+
+function normalizeBundleId(value: unknown): string {
+  return value == null ? "" : String(value).trim().toLowerCase();
+}
 
 const VERSIONS_PAGE = 12;
 
@@ -108,7 +119,7 @@ function StoreHitCard({ hit, onClick, dataTour }: {
       type="button"
       data-tour={dataTour}
       onClick={onClick}
-      className="panel group relative min-h-[270px] overflow-hidden p-5 text-left transition duration-300 hover:-translate-y-1 hover:border-white/[0.13] hover:bg-white/[0.055]"
+      className="panel app-card group"
     >
       <div className="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full bg-brand-500 opacity-20 blur-3xl transition group-hover:opacity-35" />
       <div className="flex items-start justify-between gap-3">
@@ -134,12 +145,26 @@ function StoreHitCard({ hit, onClick, dataTour }: {
           </span>
         )}
       </div>
-      <div className="mt-6">
-        <h3 className="line-clamp-2 text-lg font-bold tracking-tight text-white">{hit.name}</h3>
+      <div className="mt-6 pb-10">
+        <h3 className="line-clamp-2 text-lg font-bold leading-snug tracking-tight text-white">{hit.name}</h3>
         {hit.publisher.trim() && <p className="mt-1 truncate text-xs text-slate-500">{hit.publisher.trim()}</p>}
       </div>
-      <span className="absolute bottom-5 right-5 grid h-8 w-8 place-items-center rounded-lg bg-white/[0.055] text-brand-300 transition group-hover:bg-brand-500 group-hover:text-white"><ArrowUpRight size={15} /></span>
+      <span className="absolute bottom-5 left-5 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+        <Store size={11} />App Store
+      </span>
+      <span className="card-corner-btn absolute bottom-5 right-5 bg-white/[0.055] text-brand-300 group-hover:bg-brand-500 group-hover:text-white group-focus-visible:bg-brand-500 group-focus-visible:text-white"><ArrowUpRight size={15} className="transition-transform duration-200 group-hover:-translate-y-px group-hover:translate-x-px" /></span>
     </button>
+  );
+}
+
+/** Заглушка карточки на время первого поиска — той же высоты, что настоящая. */
+function CardSkeleton() {
+  return (
+    <div aria-hidden className="panel min-h-[264px] animate-pulse p-5">
+      <div className="h-[78px] w-[78px] rounded-[20px] bg-slate-400/15" />
+      <div className="mt-8 h-4 w-3/4 rounded bg-slate-400/15" />
+      <div className="mt-2 h-3 w-1/2 rounded bg-slate-400/10" />
+    </div>
   );
 }
 
@@ -157,9 +182,14 @@ type StoreSearchProps = {
   query: string;
   /** Обучение показывает демо-результаты вместо запроса к Apple. */
   tourShowHits: boolean;
-  /** Совпадения в каталоге Signum по тому же запросу — показываем отдельной полкой. */
-  catalogMatches: CatalogApp[];
+  /** Весь каталог Signum: результат App Store с тем же ID объединяется с карточкой каталога. */
+  catalogApps: CatalogApp[];
+  /** Карточки каталога, уже показанные выше по этому запросу, — их дубли из App Store скрываем. */
+  shownCatalogIds: ReadonlySet<string>;
   onOpenCatalogApp: (app: CatalogApp) => void;
+  /** Избранное каталога: объединённая карточка ведёт себя так же, как выше. */
+  favoriteIds?: readonly string[];
+  onToggleFavorite?: (app: CatalogApp) => void;
   /** Сообщаем странице, идёт ли сетевой поиск, — для спиннера в строке ввода. */
   onSearchingChange?: (searching: boolean) => void;
 };
@@ -172,7 +202,7 @@ type StoreSearchProps = {
  * вкладка «App Store» и введено от двух символов.
  */
 export default function StoreSearch({
-  query, tourShowHits, catalogMatches, onOpenCatalogApp, onSearchingChange,
+  query, tourShowHits, catalogApps, shownCatalogIds, onOpenCatalogApp, favoriteIds, onToggleFavorite, onSearchingChange,
 }: StoreSearchProps) {
   const navigate = useNavigate();
   const [storeHits, setStoreHits] = useState<StoreSearchApp[]>([]);
@@ -224,6 +254,7 @@ export default function StoreSearch({
 
   const storeRequestRef = useRef(0);
   const devRequestRef = useRef(0);
+  const devAppsRequestRef = useRef(0);
   const versionsRequestRef = useRef(0);
   const versionsOffsetRef = useRef(0);
 
@@ -615,17 +646,21 @@ export default function StoreSearch({
   }
 
   async function showDeveloper(dev: StoreDeveloper) {
+    // Номер запроса: ответ по студии, которую уже закрыли или сменили на
+    // другую, не должен подменить её список приложений.
+    const request = ++devAppsRequestRef.current;
     setOpenDev(dev);
     setPicked(new Set());
     setDevApps([]);
     setDevAppsError("");
     setDevAppsLoading(true);
     try {
-      setDevApps(await developerApps(dev.artistId));
+      const apps = await developerApps(dev.artistId);
+      if (request === devAppsRequestRef.current) setDevApps(apps);
     } catch (e) {
-      setDevAppsError(errorMessage(e));
+      if (request === devAppsRequestRef.current) setDevAppsError(errorMessage(e));
     } finally {
-      setDevAppsLoading(false);
+      if (request === devAppsRequestRef.current) setDevAppsLoading(false);
     }
   }
 
@@ -635,39 +670,72 @@ export default function StoreSearch({
   useEffect(() => () => onSearchingChange?.(false), [onSearchingChange]);
 
   const shownHits = tourShowHits ? tourSearchHits : storeHits;
+
+  // Одно приложение — одна карточка. Если App Store ID результата совпадает с
+  // приложением каталога, показываем карточку каталога (у неё проверенные
+  // версии и восстановление из покупок), а если она уже есть выше — не
+  // дублируем её вовсе.
+  const catalogByStoreId = useMemo(() => {
+    const map = new Map<string, CatalogApp>();
+    for (const app of catalogApps) {
+      for (const id of app.app_store_ids ?? []) {
+        const key = normalizeStoreId(id);
+        if (key && !map.has(key)) map.set(key, app);
+      }
+    }
+    return map;
+  }, [catalogApps]);
+  // Запасной путь для карточек без App Store ID (старый сервер, приложение
+  // снято с продажи): сверяем bundle id, если iTunes его отдал.
+  const catalogByBundleId = useMemo(() => {
+    const map = new Map<string, CatalogApp>();
+    for (const app of catalogApps) {
+      if ((app.app_store_ids ?? []).some(id => normalizeStoreId(id))) continue;
+      for (const bundle of app.bundle_ids ?? []) {
+        const key = normalizeBundleId(bundle);
+        if (key && !map.has(key)) map.set(key, app);
+      }
+    }
+    return map;
+  }, [catalogApps]);
+  const mergedHits = useMemo(() => {
+    const seenCatalog = new Set<string>();
+    const seenStore = new Set<string>();
+    const out: Array<{ hit: StoreSearchApp; catalog: CatalogApp | null }> = [];
+    for (const hit of shownHits) {
+      const storeId = normalizeStoreId(hit.appStoreId);
+      // AppMagic и iTunes могут вернуть одно и то же приложение дважды:
+      // показываем его один раз, в порядке первого появления.
+      if (storeId) {
+        if (seenStore.has(storeId)) continue;
+        seenStore.add(storeId);
+      }
+      const bundle = normalizeBundleId(hit.bundleId);
+      const catalog = tourShowHits
+        ? null
+        : (storeId ? catalogByStoreId.get(storeId) : undefined)
+          ?? (bundle ? catalogByBundleId.get(bundle) : undefined)
+          ?? null;
+      if (catalog) {
+        if (shownCatalogIds.has(catalog.id) || seenCatalog.has(catalog.id)) continue;
+        seenCatalog.add(catalog.id);
+      }
+      out.push({ hit, catalog });
+    }
+    return out;
+  }, [catalogByBundleId, catalogByStoreId, shownCatalogIds, shownHits, tourShowHits]);
+  const allMergedAbove = !storeSearching && shownHits.length > 0 && mergedHits.length === 0;
   const typed = query.trim().length >= 2;
-  const showEmpty = typed && !storeSearching && storeHits.length === 0 && !storeError && !tourDemo;
+  const showEmpty = typed && !storeSearching && shownHits.length === 0 && !storeError && !tourDemo;
+  // Первый поиск: результатов ещё нет — рисуем заглушки карточек, чтобы
+  // раздел не «прыгал», когда ответ придёт.
+  const showSkeleton = typed && storeSearching && shownHits.length === 0;
+  // Повторный поиск: старые результаты остаются на месте, но приглушены,
+  // чтобы было видно, что они относятся к прошлому запросу.
+  const staleHits = storeSearching && shownHits.length > 0;
 
   return (
     <div>
-      {catalogMatches.length > 0 && !openDev && (
-        <section className="mt-6">
-          <div className="flex items-baseline gap-2">
-            <h2 className="text-sm font-bold text-slate-200">В каталоге Signum</h2>
-            <span className="text-xs text-slate-500">проверенные сборки, которых может не быть в App Store</span>
-          </div>
-          <div className="mt-3 grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2">
-            {catalogMatches.slice(0, 6).map(app => (
-              <button
-                key={app.id}
-                type="button"
-                onClick={() => onOpenCatalogApp(app)}
-                className="panel flex items-center gap-3 p-3 text-left transition hover:border-white/[0.12] hover:bg-white/[0.04]"
-              >
-                <ResultIcon url={app.icon_url || ""} name={app.title} />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-semibold text-slate-100">{app.title}</div>
-                  <div className="mt-0.5 truncate text-xs text-slate-500">{app.version ? `v${app.version}` : "Каталог Signum"}</div>
-                </div>
-              </button>
-            ))}
-          </div>
-          <div className="mt-6 flex items-baseline gap-2">
-            <h2 className="text-sm font-bold text-slate-200">В App Store</h2>
-          </div>
-        </section>
-      )}
-
       {storeError && (
         <p className="mt-4 rounded-xl border border-rose-400/15 bg-rose-400/5 px-4 py-3 text-xs text-rose-300">
           {storeError}
@@ -687,7 +755,7 @@ export default function StoreSearch({
           <div className="panel flex items-center gap-4 p-4">
             <button
               type="button"
-              onClick={() => setOpenDev(null)}
+              onClick={() => { ++devAppsRequestRef.current; setOpenDev(null); setDevAppsLoading(false); }}
               className="shrink-0 rounded-lg p-2 text-slate-400 transition hover:bg-white/[0.06] hover:text-white"
               aria-label="Назад к поиску"
             >
@@ -819,15 +887,36 @@ export default function StoreSearch({
       ) : (
         <>
           {/* ── Приложения ─────────────────────────────────────────────── */}
-          <div className={`${catalogMatches.length > 0 ? "mt-3" : "mt-6"} grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4`}>
-            {shownHits.map((hit, i) => (
-              <StoreHitCard
-                key={hit.appStoreId}
-                hit={hit}
-                dataTour={tourShowHits && i === 0 ? "find-hit" : undefined}
-                onClick={() => { if (!tourShowHits) openHit(hit); }}
-              />
+          <div
+            aria-busy={storeSearching}
+            className={`mt-2 grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4 transition-opacity duration-200 ${staleHits ? "opacity-60" : ""}`}
+          >
+            {showSkeleton && Array.from({ length: 4 }, (_, k) => <CardSkeleton key={`skeleton-${k}`} />)}
+
+            {mergedHits.map(({ hit, catalog }, i) => (
+              catalog ? (
+                <AppCard
+                  key={`catalog-${catalog.id}`}
+                  app={catalog}
+                  onClick={onOpenCatalogApp}
+                  favorite={favoriteIds?.includes(catalog.id)}
+                  onToggleFavorite={onToggleFavorite}
+                />
+              ) : (
+                <StoreHitCard
+                  key={`store-${normalizeStoreId(hit.appStoreId) || hit.appStoreId}-${i}`}
+                  hit={hit}
+                  dataTour={tourShowHits && i === 0 ? "find-hit" : undefined}
+                  onClick={() => { if (!tourShowHits) openHit(hit); }}
+                />
+              )
             ))}
+
+            {allMergedAbove && (
+              <div className="panel col-span-full px-6 py-6 text-center text-xs text-slate-500">
+                Всё, что нашлось в App Store, уже есть в каталоге выше.
+              </div>
+            )}
 
             {showEmpty && devHits.length === 0 && (
               <div className="panel col-span-full px-6 py-10 text-center">
