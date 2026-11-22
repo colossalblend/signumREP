@@ -105,9 +105,7 @@ class QueueService : Service() {
         val running = list.firstOrNull { it.status == JobStatus.running }
         val waiting = list.count { it.status == JobStatus.queued }
         val current = running ?: list.firstOrNull { it.status == JobStatus.queued }
-        // На паузе без идущего дела держать службу незачем: ожидающие стоят,
-        // пока человек не нажмёт «Продолжить», а тогда SignumApp запустит её снова.
-        if (current == null || !queue().hasActiveWork(list)) {
+        if (current == null) {
             stopping = true
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()

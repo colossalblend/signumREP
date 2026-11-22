@@ -18,6 +18,7 @@ import pw.appbank.signum.data.api.DiagLog
 import pw.appbank.signum.data.api.Errors
 import pw.appbank.signum.data.catalog.CatalogResolve
 import pw.appbank.signum.data.catalog.CatalogSearch
+import pw.appbank.signum.data.catalog.StoreSearch
 import pw.appbank.signum.data.apple.BankOtp
 import pw.appbank.signum.data.engine.SignumEngine
 import pw.appbank.signum.data.models.AccountRestoreScan
@@ -120,6 +121,14 @@ data class UiState(
     val openedDeveloper: StoreDeveloper? = null,
     val developerApps: List<AppStoreSearchHit> = emptyList(),
     val developerLoading: Boolean = false,
+    val developerError: String = "",
+    /** Отмеченные для пакетной загрузки приложения разработчика (App Store ID). */
+    val developerPicked: Set<String> = emptySet(),
+    val developerBatchBusy: Boolean = false,
+    /** Поиск разработчиков идёт параллельно поиску приложений — свой флаг. */
+    val devSearching: Boolean = false,
+    /** Сборки, для которых ещё выясняем минимальную iOS (рисуем «iOS…»). */
+    val versionsIosPending: Set<String> = emptySet(),
     val ota: OtaUpdateInfo? = null,
     val otaBusy: Boolean = false,
     val otaPercent: Float = 0f,
@@ -246,55 +255,167 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
 
     fun setSearch(q: String) {
         val storeScope = q.trim().length >= 2
-        _state.update { it.copy(search = q, storeHits = emptyList(), devHits = emptyList(), storeSearchError = "", storeSearching = storeScope) }
         searchJob?.cancel()
-        if (!storeScope || q.trim().length < 2) {
-            _state.update { it.copy(storeHits = emptyList(), devHits = emptyList(), storeSearching = false) }
-            return
+        _state.update {
+            it.copy(
+                search = q,
+                storeHits = emptyList(),
+                devHits = emptyList(),
+                storeSearchError = "",
+                storeSearching = storeScope,
+                devSearching = storeScope,
+            )
         }
+        if (!storeScope) return
         searchJob = viewModelScope.launch {
             // Пауза после последнего нажатия: пока человек печатает, в сеть
             // не ходим вовсе.
-            delay(350)
-            // authStatus() читает зашифрованные настройки — четыре обращения к
-            // диску с расшифровкой. На главном потоке это заметный рывок на
-            // каждую букву, поэтому проверка ушла в фоновый поток вместе с
-            // самим поиском.
+            delay(300)
+            // Разработчиков ищем тем же вводом и параллельно, как на ПК:
+            // приложения показываем выше, студии — ниже, и если студий не
+            // нашлось, раздела просто нет.
+            launch {
+                val devs = try {
+                    StoreSearch.searchDevelopers(q)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                if (_state.value.search == q) _state.update { it.copy(devHits = devs, devSearching = false) }
+            }
             val hits = try {
-                engine.searchStore(q)
+                StoreSearch.searchApps(q, ownedOnAccount = ::ownedOnActiveAccount)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
                 if (_state.value.search == q) {
-                    _state.update { it.copy(storeSearching = false, storeSearchError = Errors.localize(e.message ?: "Не удалось выполнить поиск.")) }
+                    _state.update {
+                        it.copy(
+                            storeSearching = false,
+                            storeSearchError = Errors.localize(e.message ?: "Не удалось выполнить поиск."),
+                        )
+                    }
                 }
                 return@launch
             }
             if (_state.value.search != q) return@launch
-            // Разработчики собираются из тех же ответов: отдельный запрос ради
-            // них не нужен, artistId приходит в каждом результате.
-            val devs = hits
-                .filter { !it.artistId.isNullOrBlank() && !it.artist.isNullOrBlank() }
-                .groupBy { it.artistId!! }
-                .map { (id, apps) -> StoreDeveloper(id, apps.first().artist!!, apps.size) }
-                .sortedByDescending { it.appCount }
-                .take(8)
-            _state.update { it.copy(storeHits = hits, devHits = devs, storeSearching = false) }
+            _state.update { it.copy(storeHits = hits, storeSearching = false) }
+            val withIcons = runCatching { StoreSearch.fillIosIcons(hits) }.getOrNull() ?: return@launch
+            if (withIcons !== hits && _state.value.search == q) _state.update { it.copy(storeHits = withIcons) }
         }
+    }
+
+    /**
+     * Есть ли номер приложения в покупках текущего Apple ID. Спрашиваем, только
+     * когда введён номер, которого не знает ни один магазин: приложение могли
+     * снять с продажи, а в покупках оно осталось.
+     */
+    private suspend fun ownedOnActiveAccount(adamId: String): Boolean {
+        val owner = engine.settings.activeEmail() ?: return false
+        val owned = runCatching { engine.listVersionIds(adamId).isNotEmpty() }.getOrDefault(false)
+        return owned && engine.settings.activeEmail() == owner
     }
 
     /** Открыть разработчика и показать всё, что у него есть в магазине. */
     fun openDeveloper(dev: StoreDeveloper) {
-        _state.update { it.copy(openedDeveloper = dev, developerApps = emptyList(), developerLoading = true) }
+        _state.update {
+            it.copy(
+                openedDeveloper = dev,
+                developerApps = emptyList(),
+                developerLoading = true,
+                developerError = "",
+                developerPicked = emptySet(),
+            )
+        }
         viewModelScope.launch {
-            val apps = runCatching { engine.developerApps(dev.artistId) }.getOrDefault(emptyList())
+            val result = runCatching { StoreSearch.developerApps(dev.artistId) }
             if (_state.value.openedDeveloper?.artistId != dev.artistId) return@launch
-            _state.update { it.copy(developerApps = apps, developerLoading = false) }
+            _state.update {
+                it.copy(
+                    developerApps = result.getOrDefault(emptyList()),
+                    developerLoading = false,
+                    developerError = result.exceptionOrNull()
+                        ?.let { e -> Errors.localize(e.message ?: "Не удалось загрузить приложения разработчика.") }
+                        .orEmpty(),
+                )
+            }
         }
     }
 
-    fun closeDeveloper() =
-        _state.update { it.copy(openedDeveloper = null, developerApps = emptyList(), developerLoading = false) }
+    fun closeDeveloper() = _state.update {
+        it.copy(
+            openedDeveloper = null,
+            developerApps = emptyList(),
+            developerLoading = false,
+            developerError = "",
+            developerPicked = emptySet(),
+        )
+    }
+
+    fun toggleDeveloperPick(adamId: String) = _state.update { state ->
+        val next = state.developerPicked.toMutableSet()
+        if (!next.remove(adamId)) next.add(adamId)
+        state.copy(developerPicked = next)
+    }
+
+    /** «Выбрать все» / «Снять все». */
+    fun toggleDeveloperPickAll() = _state.update { state ->
+        val all = state.developerApps.mapTo(HashSet()) { it.adamId }
+        state.copy(developerPicked = if (state.developerPicked.size == all.size) emptySet() else all)
+    }
+
+    /**
+     * Скачать отмеченные приложения разработчика разом.
+     *
+     * Ставим по одному и не прерываемся на ошибке: если одно не встало в
+     * очередь, остальные всё равно должны уехать — иначе непонятно, что
+     * скачалось, а что нет.
+     */
+    fun queueDeveloperPicked(onDone: () -> Unit) {
+        val state = _state.value
+        if (state.developerPicked.isEmpty() || state.developerBatchBusy) return
+        if (!engine.authStatus().authenticated) {
+            _state.update { it.copy(developerError = "Сначала войдите в Apple ID на странице «Аккаунт».") }
+            return
+        }
+        val chosen = state.developerApps.filter { it.adamId in state.developerPicked }
+        DiagLog.note("ui", "нажал «Скачать отмеченные» — ${chosen.size} шт · ${state.openedDeveloper?.name.orEmpty()}")
+        _state.update { it.copy(developerBatchBusy = true, developerError = "") }
+        val failed = mutableListOf<String>()
+        for (hit in chosen) {
+            runCatching {
+                engine.enqueueInstall(
+                    title = hit.name,
+                    adamId = hit.adamId,
+                    bundleId = hit.bundleId,
+                    inStore = !hit.removedFromStore,
+                    alreadyOwned = hit.removedFromStore,
+                    version = null,
+                    externalVersionId = null,
+                    install = false,
+                )
+            }.onFailure { failed += hit.name }
+        }
+        if (failed.size == chosen.size) {
+            _state.update {
+                it.copy(developerBatchBusy = false, developerError = "Не удалось поставить в очередь ни одно приложение.")
+            }
+            return
+        }
+        _state.update {
+            it.copy(
+                developerBatchBusy = false,
+                developerPicked = emptySet(),
+                developerError = if (failed.isEmpty()) "" else
+                    "Не удалось поставить в очередь: ${failed.joinToString(", ")}. Остальные скачиваются.",
+            )
+        }
+        if (failed.isEmpty()) {
+            closeDeveloper()
+            onDone()
+        }
+    }
 
     fun setGroup(id: String) = _state.update { it.copy(groupFilter = id) }
 
@@ -366,22 +487,46 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     }
 
     fun openStoreHit(hit: AppStoreSearchHit) {
+        DiagLog.note("ui", "открыл результат App Store — ${hit.name} · ${hit.adamId}")
+        val gone = hit.removedFromStore
         val offer = engine.resolveOffer(
-            appId = hit.adamId,
+            appId = "store:${hit.adamId}",
             title = hit.name,
             icon = hit.artwork,
-            inStore = !hit.foundOnAccount,
+            inStore = !gone && !hit.foundOnAccount,
             version = hit.version,
             minIos = hit.minIos,
             bundleId = hit.bundleId,
             storeId = hit.adamId,
             deviceIos = _state.value.selectedDevice?.productVersion,
         )
-        val resolved = if (hit.foundOnAccount) offer.copy(
-            source = "restore",
-            message = "Приложение найдено в покупках текущего Apple ID. Можно скачать IPA или установить на iPhone.",
-        ) else offer
-        _state.update { it.copy(offer = resolved, versions = emptyList(), chosenVersion = null) }
+        // Тексты те же, что на ПК: человек должен сразу понимать, откуда
+        // возьмётся приложение.
+        val resolved = when {
+            hit.foundOnAccount -> offer.copy(
+                source = "restore",
+                message = "Приложение найдено в покупках текущего Apple ID. Можно скачать IPA или установить на iPhone.",
+            )
+            gone -> offer.copy(
+                source = "restore",
+                message = "Этого приложения уже нет в App Store. Установить можно, только если оно есть в покупках этого Apple ID.",
+            )
+            else -> offer
+        }
+        _state.update {
+            it.copy(
+                offer = resolved,
+                offerError = "",
+                versions = emptyList(),
+                chosenVersion = null,
+                versionsError = "",
+                versionsSearch = "",
+                versionsVisibleCount = 12,
+                versionsIosPending = emptySet(),
+                restoreOpen = false,
+                bankAltOpen = false,
+            )
+        }
         loadStoreVersions(hit.adamId, force = false)
     }
 
@@ -831,7 +976,15 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
             return
         }
         viewModelScope.launch {
-            _state.update { it.copy(versions = emptyList(), chosenVersion = null, versionsLoading = true, versionsError = "") }
+            _state.update {
+                it.copy(
+                    versions = emptyList(),
+                    chosenVersion = null,
+                    versionsLoading = true,
+                    versionsError = "",
+                    versionsIosPending = emptySet(),
+                )
+            }
             val ids = runCatching { engine.listVersionIds(adamId, force) }
                 .onFailure { e ->
                     if (_state.value.offer?.appStoreId == adamId) {
@@ -899,7 +1052,8 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                     )
                 }
             }
-            _state.update { it.copy(versionsLoading = false) }
+            val pendingIos = ids.filter { knownIos[it].isNullOrBlank() }.toSet()
+            _state.update { it.copy(versionsLoading = false, versionsIosPending = pendingIos) }
             withContext(Dispatchers.IO) {
                 runCatching {
                     engine.store.versionMinIosBatch(adamId, ids) { ext, value ->
@@ -907,11 +1061,14 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                             _state.update { state -> state.copy(
                                 versions = state.versions.map { if (it.externalVersionId == ext) it.copy(minIos = value) else it },
                                 chosenVersion = state.chosenVersion?.let { if (it.externalVersionId == ext) it.copy(minIos = value) else it },
+                                versionsIosPending = state.versionsIosPending - ext,
                             ) }
                         }
                     }
                 }
             }
+            // Совместимость — подсказка, а не условие: неудача не мешает скачать.
+            if (request == storeVersionsRequest) _state.update { it.copy(versionsIosPending = emptySet()) }
         }
     }
 

@@ -69,8 +69,7 @@ class SignumApp : Application() {
         var running = false
         scope.launch {
             engine.jobs.jobsFlow.collect { list ->
-                // Ожидающие дела на паузе службу не держат.
-                val busy = engine.jobs.hasActiveWork(list)
+                val busy = list.any { it.status == JobStatus.queued || it.status == JobStatus.running }
                 if (busy && !running) QueueService.start(this@SignumApp)
                 running = busy
             }
