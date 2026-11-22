@@ -26,6 +26,10 @@ pub struct StoreSearchApp {
     publisher: String,
     icon_url: String,
     app_store_id: String,
+    /// Bundle id from iTunes; lets the catalogue recognise an app it only
+    /// knows by bundle. AppMagic does not send it, so it may stay empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    bundle_id: String,
                                                                      
     removed_from_store: bool,
     found_on_account: bool,
@@ -71,6 +75,7 @@ pub async fn search_store_apps(app: tauri::AppHandle, input: SearchStoreAppsInpu
         if let Some(existing) = apps.iter_mut().find(|item: &&mut StoreSearchApp| item.app_store_id == app.app_store_id) {
             if existing.icon_url.is_empty() { existing.icon_url = app.icon_url; }
             if existing.publisher.is_empty() { existing.publisher = app.publisher; }
+            if existing.bundle_id.is_empty() { existing.bundle_id = app.bundle_id; }
         } else if seen.insert(app.app_store_id.clone()) {
             apps.push(app);
         }
@@ -83,6 +88,7 @@ pub async fn search_store_apps(app: tauri::AppHandle, input: SearchStoreAppsInpu
             publisher: String::new(),
             icon_url: String::new(),
             app_store_id: query.clone(),
+            bundle_id: String::new(),
             removed_from_store: false,
             found_on_account: true,
         });
@@ -209,6 +215,7 @@ fn store_app_from_json(app: &JsonValue) -> Option<StoreSearchApp> {
         publisher,
         icon_url,
         app_store_id: adam,
+        bundle_id: String::new(),
         removed_from_store: removed_from_app_store(app),
         found_on_account: false,
     })
@@ -594,6 +601,7 @@ fn parse_itunes_apps(value: &JsonValue) -> Vec<StoreSearchApp> {
                 publisher: json_string(item, "artistName").unwrap_or_default(),
                 icon_url: itunes_icon(item).unwrap_or_default(),
                 app_store_id: numeric_field(item, "trackId")?,
+                bundle_id: json_string(item, "bundleId").unwrap_or_default(),
                 // Раз Apple его отдала — он в магазине есть.
                 removed_from_store: false,
                 found_on_account: false,
