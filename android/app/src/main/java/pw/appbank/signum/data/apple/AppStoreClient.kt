@@ -249,6 +249,13 @@ class AppStoreClient(
                     // supported Store endpoints from being tried.
                     lastFailure = AuthOutcome.Failed("Не удалось найти сервер App Store. Проверьте интернет и повторите вход.")
                     break
+                } catch (e: java.io.IOException) {
+                    // Bad routing replies (redirect without Location, malformed
+                    // hop) must not abort the endpoint loop: log the hop and
+                    // fall through to the next endpoint/attempt.
+                    android.util.Log.e("SignumLogin", "auth routing failed on $url", e)
+                    lastFailure = AuthOutcome.Failed("Сервер App Store не смог обработать запрос. Повторите попытку через пару минут.")
+                    break
                 }
                 val (respCode, headers, bytes) = response
                 logStoreAuth("pw-itunes", url, respCode, bytes)

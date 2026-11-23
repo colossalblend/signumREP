@@ -65,8 +65,14 @@ object StorePodRouting {
             }
             val explicitPod = validPod(reply.pod)
             if (reply.status in listOf(301, 302, 303, 307, 308)) {
-                val location = reply.location?.takeIf { it.isNotBlank() }
-                    ?: throw IOException("Apple не указала адрес следующего сервера App Store.")
+                // Некоторые edge-узлы Apple отвечают 3xx без Location. Следовать
+                // некуда: отдадим ответ как терминальный, чтобы вызывающий код
+                // разобрал тело (там может быть настоящая customerMessage), а не
+                // обрывал весь вход исключением.
+                val location = reply.location?.takeIf { it.isNotBlank() } ?: run {
+                    (explicitPod ?: podFromUrl(url))?.let(onPod)
+                    return reply.value
+                }
                 // Follow Apple's complete Location, including handshake query
                 // parameters such as mzcprh. Rebuilding from pod loses them.
                 val next = resolveRedirect(url, location)
