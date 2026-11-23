@@ -61,7 +61,7 @@ jobs:
       # on launch. Both symptoms were reported for 1.2.3, which shipped a
       # debug-typed build without a v1/v2 signature at all.
       - name: Unit tests
-        run: bash ./gradlew --no-daemon :app:testReleaseUnitTest
+        run: bash ./gradlew --no-daemon :app:testDebugUnitTest
 
       - name: Build signed release APK
         run: bash ./gradlew --no-daemon :app:assembleRelease
