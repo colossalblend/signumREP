@@ -50,8 +50,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
-pub(crate) const APP_VERSION: &str = "1.2.3";
-const APP_BUILD: &str = "40";
+pub(crate) const APP_VERSION: &str = "1.2.4";
+const APP_BUILD: &str = "44";
 const DEFAULT_API: &str = "https://api.appbank.pw/signum";
 const FALLBACK_API: Option<&str> = Some("https://apiz.appbank.pw/signum");
 const HAPP_APP_STORE_ID: &str = "6504287215";

@@ -51,7 +51,7 @@ jobs:
       - name: Verify Linux deb package
         run: |
           test -n "$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)"
-          dpkg-deb -f "$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)" Version | grep -qx '1.2.3'
+          dpkg-deb -f "$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)" Version | grep -qx '1.2.4'
 
       - name: Build Linux AppImage
         continue-on-error: true

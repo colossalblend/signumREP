@@ -80,7 +80,7 @@ jobs:
       - name: Verify installer version and payload
         shell: bash
         run: |
-          test -s installers/Signum_1.2.3_Setup.exe
+          test -s installers/Signum_1.2.4_Setup.exe
           python - <<'PY'
           import zipfile
           z = zipfile.ZipFile('installer/payload/SignumPayload.zip')
@@ -94,7 +94,7 @@ jobs:
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: signum-windows-installer-1.2.3
-          path: installers/Signum_1.2.3_Setup.exe
+          name: signum-windows-installer-1.2.4
+          path: installers/Signum_1.2.4_Setup.exe
           if-no-files-found: error
           retention-days: 14

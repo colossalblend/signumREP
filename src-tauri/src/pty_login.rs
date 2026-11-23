@@ -634,16 +634,28 @@ mod imp {
 
         let mut startup: STARTUPINFOEXW = std::mem::zeroed();
         startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        // Belt and braces with CREATE_NO_WINDOW: hide the window if the console
+        // host decides to create one anyway.
+        const STARTF_USESHOWWINDOW: u32 = 0x0000_0001;
+        const SW_HIDE: u16 = 0;
+        startup.StartupInfo.dwFlags = STARTF_USESHOWWINDOW;
+        startup.StartupInfo.wShowWindow = SW_HIDE;
         startup.lpAttributeList = attr_list;
         let mut process_info: PROCESS_INFORMATION = std::mem::zeroed();
 
+        // CREATE_NO_WINDOW is essential here: without it conhost behind the
+        // pseudoconsole could surface a real console window, and users saw the
+        // engine's raw «Enter 2FA code:» prompt there instead of the app's own
+        // 6-digit field. The prompt must stay in the hidden ConPTY pipe, where
+        // run_flow() notices it and hands the code entry back to the UI.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let ok = CreateProcessW(
             std::ptr::null(),
             command_line_utf16.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
             0,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
             environment
                 .as_ref()
                 .map(|block| block.as_ptr() as *const std::ffi::c_void)

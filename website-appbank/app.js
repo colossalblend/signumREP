@@ -8,10 +8,10 @@
   }
 
   var DOWNLOADS = {
-    windows: { id: "windows", label: "Скачать для Windows", shortLabel: "Windows", hint: "Windows 10/11 · версия 1.2.3", url: "download.php?platform=windows", version: "1.2.3", available: true },
-    macos: { id: "macos", label: "Скачать для Mac", shortLabel: "Mac", hint: "macOS · Apple Silicon и Intel · версия 1.2.3", url: "download.php?platform=macos", version: "1.2.3", available: true },
-    linux: { id: "linux", label: "Скачать для Linux", shortLabel: "Linux", hint: "Linux · AppImage · версия 1.2.3", url: "download.php?platform=linux", version: "1.2.3", available: true, debAvailable: null, debUrl: "download.php?platform=linux&format=deb" },
-    android: { id: "android", label: "Скачать для Android", shortLabel: "Android", hint: "Android 10+ · APK · версия 1.2.3", url: "download.php?platform=android", version: "1.2.3", available: true },
+    windows: { id: "windows", label: "Скачать для Windows", shortLabel: "Windows", hint: "Windows 10/11 · версия 1.2.2", url: "download.php?platform=windows", version: "1.2.2", available: true },
+    macos: { id: "macos", label: "Скачать для Mac", shortLabel: "Mac", hint: "macOS · Apple Silicon и Intel · версия 1.2.2", url: "download.php?platform=macos", version: "1.2.2", available: true },
+    linux: { id: "linux", label: "Скачать для Linux", shortLabel: "Linux", hint: "Linux · AppImage · версия 1.2.2", url: "download.php?platform=linux", version: "1.2.2", available: true, debAvailable: null, debUrl: "download.php?platform=linux&format=deb" },
+    android: { id: "android", label: "Скачать для Android", shortLabel: "Android", hint: "Android 10+ · APK · версия 1.2.2", url: "download.php?platform=android", version: "1.2.2", available: true },
   };
 
   function detectPlatform() {

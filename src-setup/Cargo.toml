@@ -1,6 +1,6 @@
 [package]
 name = "signum-setup"
-version = "1.2.3"
+version = "1.2.4"
 description = "Signum installer"
 authors = ["Signum"]
 edition = "2021"

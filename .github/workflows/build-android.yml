@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   apk:
-    name: APK (debug) + unit tests
+    name: Signed release APK + unit tests
     runs-on: ubuntu-latest
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
@@ -55,18 +55,49 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v5
 
-      # Релизный ключ в репозиторий не попадает: debug-сборка подписывается
-      # отладочным ключом Gradle, этого достаточно для проверки компиляции.
+      # The release APK is the only artefact users can install. A debug build is
+      # signed with the throwaway debug key, so installing it over an existing
+      # Signum fails with "package parse error" and, once installed, it crashes
+      # on launch. Both symptoms were reported for 1.2.3, which shipped a
+      # debug-typed build without a v1/v2 signature at all.
       - name: Unit tests
-        run: bash ./gradlew --no-daemon :app:testDebugUnitTest
+        run: bash ./gradlew --no-daemon :app:testReleaseUnitTest
 
-      - name: Build debug APK
-        run: bash ./gradlew --no-daemon :app:assembleDebug
+      - name: Build signed release APK
+        run: bash ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Verify the APK is signed and release-typed
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          test -n "$apk"
+          echo "APK: $apk ($(stat -c%s "$apk") bytes)"
+          # v1 signature (META-INF/*.RSA|DSA|EC) — Android 10 and older rely on it.
+          unzip -l "$apk" | grep -Eq 'META-INF/.*\.(RSA|DSA|EC)' || {
+            echo "::error::APK has no v1 signature"; exit 1; }
+          # v2/v3 signing block.
+          if ! grep -a -q 'APK Sig Block 42' "$apk"; then
+            echo "::error::APK has no v2/v3 signing block"; exit 1
+          fi
+          # The debuggable flag must be off, otherwise the app is a debug build.
+          if unzip -p "$apk" AndroidManifest.xml | grep -aq 'debuggable'; then
+            echo "::error::APK manifest is debuggable"; exit 1
+          fi
+
+      - name: Rename artefact to the release name
+        run: |
+          version="$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)"
+          code="$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts)"
+          apk="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          mkdir -p out
+          cp "$apk" "out/${version}-${code}.apk"
+          echo "ARTIFACT=android/out/${version}-${code}.apk" >> "$GITHUB_ENV"
+          ls -l out
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: signum-android-debug
-          path: android/app/build/outputs/apk/debug/*.apk
+          name: signum-android-release
+          path: android/out/*.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
