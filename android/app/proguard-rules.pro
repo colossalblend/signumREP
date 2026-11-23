@@ -58,6 +58,7 @@
 -dontwarn javax.naming.**
 -dontwarn org.slf4j.**
 -dontwarn com.google.errorprone.annotations.**
+-dontwarn javax.lang.model.element.Modifier
 
 # Compose / coroutines consumer rules are applied automatically.
 -dontwarn androidx.compose.**

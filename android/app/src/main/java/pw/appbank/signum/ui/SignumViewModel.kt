@@ -182,6 +182,12 @@ data class ActivationItemView(
 }
 
 class SignumViewModel(val engine: SignumEngine) : ViewModel() {
+    // Активации, которые ждут завершения установки. Объявлено ДО init: init
+    // запускает showActivationAfterInstall(), и на Dispatchers.Main.immediate
+    // тело корутины выполняется синхронно — поле к этому моменту уже должно
+    // существовать, иначе NPE и мгновенный вылет при запуске (так падал 1.2.3).
+    private val pendingActivations = java.util.concurrent.ConcurrentHashMap<String, Pair<String, pw.appbank.signum.data.models.AppActivation>>()
+
     private val _state = MutableStateFlow(
         // Запись переживает перезапуск приложения, поэтому её состояние берём
         // у самого журнала, а не считаем выключенным по умолчанию.
@@ -223,8 +229,7 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     // если у выбранной версии есть свой QR, показываем его, как только дело
     // в очереди завершилось.
 
-    private val pendingActivations = java.util.concurrent.ConcurrentHashMap<String, Pair<String, pw.appbank.signum.data.models.AppActivation>>()
-
+    // Активации, которые ждут завершения установки — см. объявление в начале класса.
     private fun showActivationAfterInstall() {
         viewModelScope.launch {
             engine.jobs.jobsFlow.collect { jobs ->
