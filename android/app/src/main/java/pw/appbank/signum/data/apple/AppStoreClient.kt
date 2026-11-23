@@ -161,7 +161,7 @@ class AppStoreClient(
         data class Failed(val message: String) : AuthOutcome()
     }
 
-    private fun runAuthenticate(email: String, password: String, authCode: String?): AuthOutcome {
+    private fun runAuthenticate(email: String, password: String, authCode: String?, allowRetry: Boolean = true): AuthOutcome {
         passwordToken = null
         dsPersonId = null
         val code = authCode?.filter { !it.isWhitespace() }.orEmpty()
@@ -178,6 +178,12 @@ class AppStoreClient(
         var lastFailure: AuthOutcome = AuthOutcome.Failed(STORE_SESSION_MESSAGE)
         for (endpoint in endpoints) {
             var url = endpoint
+            // ipatool semantics: every login request runs in a fresh cookie
+            // session. Cookies harvested from one endpoint (204/404/3xx stubs
+            // set them too) must not poison the next one — that is exactly how
+            // a second sweep degraded to 404/301 HTML stubs while the first
+            // sweep got a real plist from the same URL.
+            val sessionCookies = ConcurrentHashMap<String, String>()
             for (attempt in 1..2) {
                 // ipatool 1.3.2: на native-адресе повтор с кодом 2FA — это attempt 2.
                 val native = url.contains("auth.itunes.apple.com/auth/", ignoreCase = true)
@@ -224,13 +230,13 @@ class AppStoreClient(
                             send = { nextUrl ->
                                 url = nextUrl
                                 val routed = req.newBuilder().url(nextUrl).removeHeader("Cookie").apply {
-                                    if (cookies.isNotEmpty()) header("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
+                                    if (sessionCookies.isNotEmpty()) header("Cookie", sessionCookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
                                 }.build()
                                 Http.itunesNoFollow.newCall(routed).execute().use { resp ->
-                                    ingestCookies(resp.headers("Set-Cookie"), resp.headers)
+                                    ingestCookiesInto(sessionCookies, resp.headers("Set-Cookie"), resp.headers)
                                     StorePodRouting.Reply(
                                         resp.code, Triple(resp.code, resp.headers, resp.body?.bytes() ?: ByteArray(0)),
-                                        resp.header("Location"), resp.header("pod") ?: cookies["itspod"],
+                                        resp.header("Location"), resp.header("pod") ?: sessionCookies["itspod"],
                                     )
                                 }
                             },
@@ -285,6 +291,9 @@ class AppStoreClient(
                     firstName = address?.str("firstName").orEmpty()
                     lastName = address?.str("lastName").orEmpty()
                     StorePodRouting.validPod(headers["pod"])?.let { pod = it }
+                    // This endpoint's cookie session is the live download
+                    // session: promote it into the client-wide jar.
+                    cookies.putAll(sessionCookies)
                     return AuthOutcome.Success
                 }
                 // Гейт 2FA — это ПУСТОЙ failureType вместе с MZFinance.BadLogin.
@@ -326,6 +335,16 @@ class AppStoreClient(
                 )
                 break
             }
+        }
+        // Apple edges answer inconsistently minute to minute (observed: the
+        // same endpoint returned a real plist, then 404/301 HTML a minute
+        // later). If the whole sweep ended with the generic "no session"
+        // failure — meaning no endpoint produced a parseable auth reply —
+        // pause briefly and try the sweep once more before giving up.
+        if (allowRetry && lastFailure is AuthOutcome.Failed && lastFailure.message == STORE_SESSION_MESSAGE) {
+            android.util.Log.w("SignumStore", "auth sweep produced no parseable reply; retrying once")
+            Thread.sleep(2500)
+            return runAuthenticate(email, password, authCode, allowRetry = false)
         }
         return lastFailure
     }
@@ -1448,16 +1467,19 @@ class AppStoreClient(
         return status to dict
     }
 
-    private fun ingestCookies(setCookies: List<String>, headers: okhttp3.Headers) {
+    private fun ingestCookies(setCookies: List<String>, headers: okhttp3.Headers) =
+        ingestCookiesInto(cookies, setCookies, headers)
+
+    private fun ingestCookiesInto(target: ConcurrentHashMap<String, String>, setCookies: List<String>, headers: okhttp3.Headers) {
         for (line in setCookies) {
             val pair = line.substringBefore(';')
             val idx = pair.indexOf('=')
             if (idx <= 0) continue
             val k = pair.substring(0, idx).trim()
             val v = pair.substring(idx + 1).trim()
-            if (v.isEmpty()) cookies.remove(k) else cookies[k] = v
+            if (v.isEmpty()) target.remove(k) else target[k] = v
         }
-        StorePodRouting.validPod(headers["pod"] ?: cookies["itspod"])?.let { pod = it }
+        StorePodRouting.validPod(headers["pod"] ?: target["itspod"])?.let { pod = it }
         headers["x-set-apple-store-front"]?.let { storeFront = it }
         headers["x-apple-store-front"]?.let { storeFront = it }
     }

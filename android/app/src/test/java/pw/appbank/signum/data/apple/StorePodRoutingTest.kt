@@ -64,7 +64,7 @@ class StorePodRoutingTest {
     }
 
     @Test
-    fun repeatedRedirectsAreBoundedAndMissingLocationIsAnError() {
+    fun repeatedRedirectsAreBoundedAndMissingLocationIsTerminal() {
         var calls = 0
         assertThrows(IOException::class.java) {
             StorePodRouting.execute<String>("https://p25-buy.itunes.apple.com/purchases", send = { url ->
@@ -73,11 +73,16 @@ class StorePodRoutingTest {
             }, onPod = {})
         }
         assertEquals(6, calls)
-        assertThrows(IOException::class.java) {
-            StorePodRouting.execute<String>("https://buy.itunes.apple.com/purchases", send = {
-                StorePodRouting.Reply(302, "")
-            }, onPod = {})
-        }
+        // A 3xx without a Location is handed back as a terminal reply so the
+        // caller can parse the body (a real Apple customerMessage) instead of
+        // aborting the whole request.
+        var terminalCalls = 0
+        val result = StorePodRouting.execute<String>("https://buy.itunes.apple.com/purchases", send = {
+            terminalCalls++
+            StorePodRouting.Reply(302, "body")
+        }, onPod = {})
+        assertEquals("body", result)
+        assertEquals(1, terminalCalls)
     }
 
     @Test
