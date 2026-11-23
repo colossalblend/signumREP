@@ -165,193 +165,224 @@ class AppStoreClient(
         passwordToken = null
         dsPersonId = null
         val code = authCode?.filter { !it.isWhitespace() }.orEmpty()
-        val credential = password + code
-        // Anisette headers are best-effort device attestation; the SAP signature
-        // is the primary one (ipatool sends anisette when available, empty else).
-        val ani = runCatching { anisette.getData(gs) }.getOrNull()
-        val endpoints = listOf(
-            "https://auth.itunes.apple.com/auth/v1/native/fast/",
-            "https://p25-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate?Pod=25&PRH=25",
-            "https://p6-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate?Pod=6&PRH=6",
-            "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate",
-        )
-        var lastFailure: AuthOutcome = AuthOutcome.Failed(STORE_SESSION_MESSAGE)
-        for (endpoint in endpoints) {
-            var url = endpoint
-            // ipatool semantics: every login request runs in a fresh cookie
-            // session. Cookies harvested from one endpoint (204/404/3xx stubs
-            // set them too) must not poison the next one — that is exactly how
-            // a second sweep degraded to 404/301 HTML stubs while the first
-            // sweep got a real plist from the same URL.
-            val sessionCookies = ConcurrentHashMap<String, String>()
-            for (attempt in 1..2) {
-                // ipatool 1.3.2: на native-адресе повтор с кодом 2FA — это attempt 2.
-                val native = url.contains("auth.itunes.apple.com/auth/", ignoreCase = true)
-                val requestAttempt = if (native && code.isNotEmpty()) 2 else attempt
-                val xml = Plist.xml(
-                    Plist.dict(
-                        "appleId" to email,
-                        "attempt" to requestAttempt.toString(),
-                        "guid" to storeGuid,
-                        "password" to credential,
-                        "rmp" to "0",
-                        "why" to "signIn",
-                    ),
-                )
-                // sapfix: Apple rejects an unsigned authenticate with 403
-                // (AMD-Action::SP). Sign the exact posted body via the SAP helper.
-                val sapHeader = runCatching { sap.headerValue(xml) }.getOrNull()
-                if (sapHeader.isNullOrBlank()) {
-                    android.util.Log.w("SignumStore", "authenticate: SAP signature unavailable")
-                }
-                val req = Request.Builder()
-                    .url(url)
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .header("Accept", "*/*")
-                    .header("User-Agent", STORE_UA)
-                    .apply {
-                        if (cookies.isNotEmpty()) {
-                            header("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
-                        }
-                        ani?.storeHeaders()?.forEach { (k, v) -> header(k, v) }
-                        if (!sapHeader.isNullOrBlank()) header("X-Apple-ActionSignature", sapHeader)
+        // ipatool v2 core, ported: sign in on idmsa.apple.com (JSON), verify the
+        // 2FA code through /appleauth/auth, then mint the Store download session
+        // from the one-time password ("o") cookie. Every request runs in a fresh
+        // cookie session, exactly like ipatool's fresh jar per run.
+        val session = ConcurrentHashMap<String, String>()
+
+        // 1) POST /appleauth/auth/signin
+        val signinBody = """{"accountNameText":${jsonStr(email)},"passwordText":${jsonStr(password)},"rememberMe":true}"""
+        val (signinCode, signinHeaders, signinBytes) = try {
+            idmsaRequest(IDMSA_SIGNIN, session, bodyJson = signinBody)
+        } catch (e: java.io.IOException) {
+            return AuthOutcome.Failed("Не удалось связаться с Apple ID (idmsa.apple.com). Проверьте интернет и повторите.")
+        }
+        logStoreAuth("pw-idmsa-signin", IDMSA_SIGNIN, signinCode, signinBytes)
+        var scnt = signinHeaders["scnt"]?.takeIf { it.isNotBlank() }
+        var sessionToken = signinHeaders["X-Apple-ID-Session-Token"]?.takeIf { it.isNotBlank() }
+        when (signinCode) {
+            200, 204 -> Unit
+            409 -> {
+                if (scnt.isNullOrBlank() || sessionToken.isNullOrBlank()) return AuthOutcome.Failed(STORE_SESSION_MESSAGE)
+                if (code.isBlank()) {
+                    // ipatool RequestVerificationCode: the PUT makes Apple push
+                    // a fresh code to the trusted devices right away.
+                    runCatching {
+                        val (pushCode, _, pushBytes) = idmsaRequest(IDMSA_VERIFY_DEVICE, session, method = "PUT", scnt = scnt, token = sessionToken)
+                        logStoreAuth("pw-idmsa-push", IDMSA_VERIFY_DEVICE, pushCode, pushBytes)
                     }
-                    .post(xml.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
-                    .build()
-                val response = try {
-                    // Транспортный повтор как в do_login: до трёх отправок на 5xx
-                    // с паузой 250 мс × попытка. 429 — сразу стоп.
-                    var tx = 0
-                    var reply: Triple<Int, okhttp3.Headers, ByteArray>? = null
-                    while (true) {
-                        tx++
-                        reply = StorePodRouting.execute(
-                            url,
-                            send = { nextUrl ->
-                                url = nextUrl
-                                val routed = req.newBuilder().url(nextUrl).removeHeader("Cookie").apply {
-                                    if (sessionCookies.isNotEmpty()) header("Cookie", sessionCookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
-                                }.build()
-                                Http.itunesNoFollow.newCall(routed).execute().use { resp ->
-                                    ingestCookiesInto(sessionCookies, resp.headers("Set-Cookie"), resp.headers)
-                                    StorePodRouting.Reply(
-                                        resp.code, Triple(resp.code, resp.headers, resp.body?.bytes() ?: ByteArray(0)),
-                                        resp.header("Location"), resp.header("pod") ?: sessionCookies["itspod"],
-                                    )
-                                }
-                            },
-                            onPod = { pod = it },
-                            resolveRedirect = ::resolveAuthRedirect,
-                        )
-                        if (reply!!.first == 429) {
-                            return AuthOutcome.Failed("Apple временно ограничила вход (HTTP 429). Подождите несколько минут и повторите.")
-                        }
-                        if (reply.first / 100 != 5 || tx >= 3) break
-                        Thread.sleep(250L * tx)
-                    }
-                    reply!!
-                } catch (e: java.net.UnknownHostException) {
-                    // A failed auth hostname must not prevent the remaining
-                    // supported Store endpoints from being tried.
-                    lastFailure = AuthOutcome.Failed("Не удалось найти сервер App Store. Проверьте интернет и повторите вход.")
-                    break
-                } catch (e: java.io.IOException) {
-                    // Bad routing replies (redirect without Location, malformed
-                    // hop) must not abort the endpoint loop: log the hop and
-                    // fall through to the next endpoint/attempt.
-                    android.util.Log.e("SignumLogin", "auth routing failed on $url", e)
-                    lastFailure = AuthOutcome.Failed("Сервер App Store не смог обработать запрос. Повторите попытку через пару минут.")
-                    break
+                    return AuthOutcome.Needs2fa(TWO_FACTOR_MESSAGE)
                 }
-                val (respCode, headers, bytes) = response
-                logStoreAuth("pw-itunes", url, respCode, bytes)
-                if (respCode == 204 || respCode == 403 || respCode == 401 || respCode == 404 || respCode == 503) {
-                    lastFailure = AuthOutcome.Failed(STORE_SESSION_MESSAGE)
-                    break
-                }
-                val dict = parseStoreAuth(bytes)
-                if (dict == null) {
-                    lastFailure = AuthOutcome.Failed(STORE_SESSION_MESSAGE)
-                    break
-                }
-                headers["x-set-apple-store-front"]?.let { storeFront = it }
-                headers["x-apple-store-front"]?.let { storeFront = it }
-                dict.str("storeFront")?.let { storeFront = it }
-                val failure = dict.str("failureType").orEmpty()
-                val msg = dict.str("customerMessage").orEmpty()
-                passwordToken = dict.str("passwordToken")
-                // Native-адрес может не прислать dsPersonId в теле, а положить
-                // DSID в заголовок x-dsid (do_login).
-                dsPersonId = dict.str("dsPersonId") ?: dict.dict("accountInfo")?.str("dsPersonId")
-                    ?: headers["x-dsid"]?.trim()?.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
-                if (!passwordToken.isNullOrBlank() && !dsPersonId.isNullOrBlank()) {
-                    val info = dict.dict("accountInfo")
-                    val address = info?.dict("address")
-                    accountAppleId = info?.str("appleId") ?: email
-                    firstName = address?.str("firstName").orEmpty()
-                    lastName = address?.str("lastName").orEmpty()
-                    StorePodRouting.validPod(headers["pod"])?.let { pod = it }
-                    // This endpoint's cookie session is the live download
-                    // session: promote it into the client-wide jar.
-                    cookies.putAll(sessionCookies)
-                    return AuthOutcome.Success
-                }
-                // Гейт 2FA — это ПУСТОЙ failureType вместе с MZFinance.BadLogin.
-                // Проверки на пустоту здесь не было, а на неверный пароль Apple
-                // отвечает тем же текстом, но с заполненным failureType (-5000).
-                // Из-за этого любой неверный пароль объявлялся «код отправлен на
-                // iPhone», а ветка «неверный Apple ID или пароль» ниже была
-                // недостижима. В движке на ПК это условие стоит правильно.
-                if ((failure.isBlank() && msg == CUSTOMER_MESSAGE_BAD_LOGIN) ||
-                    looksLike2fa(failure, msg)
-                ) {
-                    return if (code.isBlank()) {
-                        AuthOutcome.Needs2fa(TWO_FACTOR_MESSAGE)
-                    } else {
+                // 2) POST /appleauth/auth/verify/trusteddevice/securitycode
+                val codeBody = """{"securityCode":{"code":${jsonStr(code)}}}"""
+                val (secCode, secHeaders, secBytes) = idmsaRequest(IDMSA_SECURITY_CODE, session, bodyJson = codeBody, scnt = scnt, token = sessionToken)
+                logStoreAuth("pw-idmsa-2fa", IDMSA_SECURITY_CODE, secCode, secBytes)
+                if (secCode !in 200..299) {
+                    return if (secCode == 400 || secCode == 401)
                         AuthOutcome.Failed("Код 2FA отклонён. Запросите новый код и попробуйте снова.")
-                    }
+                    else
+                        AuthOutcome.Failed("Apple отклонила проверку кода 2FA (HTTP $secCode). Повторите позже.")
                 }
-                if (failure == FAILURE_INVALID_CREDENTIALS) {
-                    // ipatool: attempt 1 always retries once before erroring.
-                    if (attempt == 1) continue
-                    lastFailure = AuthOutcome.Failed(
-                        if (code.isNotBlank()) "Код 2FA отклонён." else "Неверный Apple ID или пароль.",
-                    )
-                    break
-                }
-                if (msg == CUSTOMER_MESSAGE_ACCOUNT_DISABLED) {
-                    return AuthOutcome.Failed("Аккаунт Apple ID отключён.")
-                }
-                if (failure.isNotBlank() && failure != "0") {
-                    // do_login: при заполненном failureType — текст Apple или
-                    // «something went wrong».
-                    lastFailure = AuthOutcome.Failed(
-                        if (msg.isNotBlank()) localizeStoreMessage(msg) else "Apple отклонила вход (failureType $failure). Повторите позже.",
-                    )
-                    break
-                }
-                lastFailure = AuthOutcome.Failed(
-                    if (msg.isNotBlank() && !msg.contains("sign in", true)) msg else STORE_SESSION_MESSAGE,
+                scnt = secHeaders["scnt"]?.takeIf { it.isNotBlank() } ?: scnt
+                sessionToken = secHeaders["X-Apple-ID-Session-Token"]?.takeIf { it.isNotBlank() } ?: sessionToken
+            }
+            else -> {
+                val err = idmsaErrorText(signinBytes)
+                return AuthOutcome.Failed(
+                    when {
+                        signinCode == 401 || signinCode == 403 ->
+                            err?.let { localizeStoreMessage(it) } ?: "Неверный Apple ID или пароль."
+                        err != null -> localizeStoreMessage(err)
+                        else -> "Apple ID отклонил вход (HTTP $signinCode). Повторите позже."
+                    },
                 )
-                break
             }
         }
-        // Apple edges answer inconsistently minute to minute (observed: the
-        // same endpoint returned a real plist, then 404/301 HTML a minute
-        // later). If the whole sweep ended with the generic "no session"
-        // failure — meaning no endpoint produced a parseable auth reply —
-        // pause briefly and try the sweep once more before giving up.
-        if (allowRetry && lastFailure is AuthOutcome.Failed && lastFailure.message == STORE_SESSION_MESSAGE) {
-            android.util.Log.w("SignumStore", "auth sweep produced no parseable reply; retrying once")
-            Thread.sleep(2500)
-            return runAuthenticate(email, password, authCode, allowRetry = false)
+
+        // 3) GET /appleauth/auth — refresh the session; this is where Apple
+        // issues the one-time password cookie "o" (ipatool UpdateSession).
+        val (refreshCode, refreshHeaders, refreshBytes) = idmsaRequest(IDMSA_SESSION, session, scnt = scnt, token = sessionToken)
+        logStoreAuth("pw-idmsa-session", IDMSA_SESSION, refreshCode, refreshBytes)
+        if (refreshCode !in 200..299) return AuthOutcome.Failed(STORE_SESSION_MESSAGE)
+        scnt = refreshHeaders["scnt"]?.takeIf { it.isNotBlank() } ?: scnt
+        sessionToken = refreshHeaders["X-Apple-ID-Session-Token"]?.takeIf { it.isNotBlank() } ?: sessionToken
+        val otp = session["o"]
+        if (otp.isNullOrBlank()) {
+            android.util.Log.w("SignumStore", "idmsa session refresh returned no one-time password cookie")
+            return AuthOutcome.Failed(STORE_SESSION_MESSAGE)
         }
-        return lastFailure
+
+        // 4) GET /appleauth/auth/account — dsid and profile name (ipatool
+        // parseAccountInformation). Optional: the Store plist also carries DSID.
+        var accDsid = ""
+        var accEmail: String? = null
+        val (accCode, _, accBytes) = idmsaRequest(IDMSA_ACCOUNT, session, scnt = scnt, token = sessionToken)
+        logStoreAuth("pw-idmsa-account", IDMSA_ACCOUNT, accCode, accBytes)
+        if (accCode in 200..299) {
+            runCatching {
+                val obj = SignumJson.parseToJsonElement(accBytes.toString(Charsets.UTF_8)).jsonObject
+                accDsid = obj["dsid"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                accEmail = obj["email"]?.jsonPrimitive?.contentOrNull
+                val name = obj["name"]?.jsonObject
+                firstName = name?.get("firstName")?.jsonPrimitive?.contentOrNull.orEmpty()
+                lastName = name?.get("lastName")?.jsonPrimitive?.contentOrNull.orEmpty()
+            }
+        }
+
+        // 5) POST MZFinance authenticate with the one-time password — mints the
+        // download session (passwordToken + dsPersonId), same as ipatool's
+        // appstore.Authenticate.
+        val form = okhttp3.FormBody.Builder()
+            .add("appleId", email)
+            .add("password", otp)
+            .add("attempt", "4")
+            .add("createSession", "true")
+            .build()
+        val storeUrl = "$STORE_AUTHENTICATE?guid=$storeGuid"
+        val storeReq = Request.Builder()
+            .url(storeUrl)
+            .header("Accept", "*/*")
+            .header("User-Agent", "Config/2.0")
+            .header("X-Apple-Store-Front", storeFront)
+            .apply {
+                if (session.isNotEmpty()) header("Cookie", session.entries.joinToString("; ") { "${it.key}=${it.value}" })
+            }
+            .post(form)
+            .build()
+        val (storeCode, storeHeaders, storeBytes) = try {
+            Http.itunesNoFollow.newCall(storeReq).execute().use { resp ->
+                ingestCookiesInto(session, resp.headers("Set-Cookie"), resp.headers)
+                Triple(resp.code, resp.headers, resp.body?.bytes() ?: ByteArray(0))
+            }
+        } catch (e: java.io.IOException) {
+            return AuthOutcome.Failed("Не удалось связаться с сервером App Store. Проверьте интернет и повторите.")
+        }
+        logStoreAuth("pw-store-auth", storeUrl, storeCode, storeBytes)
+        storeHeaders["x-set-apple-store-front"]?.let { storeFront = it }
+        storeHeaders["x-apple-store-front"]?.let { storeFront = it }
+        if (storeCode == 429) {
+            return AuthOutcome.Failed("Apple временно ограничила вход (HTTP 429). Подождите несколько минут и повторите.")
+        }
+        val dict = parseStoreAuth(storeBytes)
+        if (dict == null) {
+            if (allowRetry) {
+                android.util.Log.w("SignumStore", "store auth produced no parseable reply; retrying once")
+                Thread.sleep(2500)
+                return runAuthenticate(email, password, authCode, allowRetry = false)
+            }
+            return AuthOutcome.Failed(STORE_SESSION_MESSAGE)
+        }
+        dict.str("storeFront")?.let { storeFront = it }
+        val failure = dict.str("failureType").orEmpty()
+        val msg = dict.str("customerMessage").orEmpty()
+        passwordToken = dict.str("passwordToken")
+        dsPersonId = dict.str("dsPersonId") ?: dict.dict("accountInfo")?.str("dsPersonId")
+            ?: storeHeaders["x-dsid"]?.trim()?.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
+            ?: accDsid.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
+        if (!passwordToken.isNullOrBlank() && !dsPersonId.isNullOrBlank()) {
+            val info = dict.dict("accountInfo")
+            val address = info?.dict("address")
+            accountAppleId = info?.str("appleId") ?: accEmail ?: email
+            if (firstName.isBlank()) firstName = address?.str("firstName").orEmpty()
+            if (lastName.isBlank()) lastName = address?.str("lastName").orEmpty()
+            StorePodRouting.validPod(storeHeaders["pod"])?.let { pod = it }
+            // This fresh session is the live download session: promote it
+            // into the client-wide jar.
+            cookies.putAll(session)
+            return AuthOutcome.Success
+        }
+        if (msg == CUSTOMER_MESSAGE_ACCOUNT_DISABLED) {
+            return AuthOutcome.Failed("Аккаунт Apple ID отключён.")
+        }
+        if (failure.isNotBlank() && failure != "0") {
+            return AuthOutcome.Failed(
+                if (msg.isNotBlank()) localizeStoreMessage(msg) else "Apple отклонила вход (failureType $failure). Повторите позже.",
+            )
+        }
+        return AuthOutcome.Failed(
+            if (msg.isNotBlank() && !msg.contains("sign in", true)) msg else STORE_SESSION_MESSAGE,
+        )
     }
 
-    private fun looksLike2fa(failure: String, msg: String): Boolean =
-        failure == "2034" || msg.contains("two-factor", true) ||
-            (msg.contains("code", true) && msg.contains("enter", true))
+    /** Minimal JSON request against idmsa.apple.com with a fresh cookie session. */
+    private fun idmsaRequest(
+        url: String,
+        session: ConcurrentHashMap<String, String>,
+        bodyJson: String? = null,
+        method: String = if (bodyJson != null) "POST" else "GET",
+        scnt: String? = null,
+        token: String? = null,
+    ): Triple<Int, okhttp3.Headers, ByteArray> {
+        val b = Request.Builder()
+            .url(url)
+            .header("Accept", "application/json")
+            .header("X-Apple-Widget-Key", IDMSA_SERVICE_KEY)
+            .header("User-Agent", STORE_UA)
+        when (method.uppercase(Locale.US)) {
+            "POST" -> b.post((bodyJson ?: "").toRequestBody("application/json".toMediaType()))
+            "PUT" -> b.put((bodyJson ?: "").toRequestBody("application/json".toMediaType()))
+            "GET" -> b.get()
+            else -> b.method(method, bodyJson?.toRequestBody("application/json".toMediaType()))
+        }
+        if (!scnt.isNullOrBlank()) b.header("scnt", scnt)
+        if (!token.isNullOrBlank()) b.header("X-Apple-ID-Session-Token", token)
+        if (session.isNotEmpty()) b.header("Cookie", session.entries.joinToString("; ") { "${it.key}=${it.value}" })
+        return Http.itunesNoFollow.newCall(b.build()).execute().use { resp ->
+            ingestCookiesInto(session, resp.headers("Set-Cookie"), resp.headers)
+            Triple(resp.code, resp.headers, resp.body?.bytes() ?: ByteArray(0))
+        }
+    }
+
+    /** Extract a human-readable error from an idmsa JSON error body. */
+    private fun idmsaErrorText(bytes: ByteArray): String? {
+        val obj = runCatching {
+            SignumJson.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
+        }.getOrNull() ?: return null
+        obj["serviceErrors"]?.jsonArray?.let { arr ->
+            for (item in arr) {
+                val o = item.jsonObject
+                o["message"]?.jsonPrimitive?.contentOrNull?.let { if (it.isNotBlank()) return it }
+            }
+        }
+        for (key in listOf("authenticationErrorMessage", "validationErrorMessage", "errorMessage", "message")) {
+            obj[key]?.jsonPrimitive?.contentOrNull?.let { if (it.isNotBlank()) return it }
+        }
+        return null
+    }
+
+    private fun jsonStr(s: String): String = buildString {
+        append('"')
+        for (c in s) when (c) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (c < ' ') append("\\u%04x".format(c.code)) else append(c)
+        }
+        append('"')
+    }
 
     private fun logStoreAuth(secretName: String, url: String, code: Int, bytes: ByteArray) {
         val preview = runCatching { bytes.toString(Charsets.UTF_8) }.getOrDefault("")
@@ -1928,6 +1959,16 @@ class AppStoreClient(
         private const val FAILURE_INVALID_CREDENTIALS = "-5000"
         private const val TWO_FACTOR_MESSAGE =
             "Введите 6-значный код 2FA с доверенного устройства Apple."
+
+        // ipatool v2 login flow, ported: idmsa endpoints + the oauth service
+        // key ipatool sends as X-Apple-Widget-Key.
+        private const val IDMSA_SIGNIN = "https://idmsa.apple.com/appleauth/auth/signin"
+        private const val IDMSA_VERIFY_DEVICE = "https://idmsa.apple.com/appleauth/auth/verify/trusteddevice"
+        private const val IDMSA_SECURITY_CODE = "https://idmsa.apple.com/appleauth/auth/verify/trusteddevice/securitycode"
+        private const val IDMSA_SESSION = "https://idmsa.apple.com/appleauth/auth"
+        private const val IDMSA_ACCOUNT = "https://idmsa.apple.com/appleauth/auth/account"
+        private const val STORE_AUTHENTICATE = "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate"
+        private const val IDMSA_SERVICE_KEY = "d718df87e05b79a094e85315bf0cf6bec4cdcc80ddbf01e13d3a748a7e4580b2e5704ba869069b4067696d540531b476507c4de5053db8ee08770cc6b8aa2f81"
 
         // Match ipatool's Configurator UA exactly (pkg/http/constants.go); the
         // FairPlay SAP signature is minted in a Configurator/CommerceKit context.
