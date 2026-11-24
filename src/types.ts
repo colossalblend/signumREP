@@ -559,8 +559,22 @@ export interface AppSettings {
   selected_device_udid?: string;
                                              
   selected_device_connection?: string;
-                                                                                  
+
   keep_history_session?: boolean;
+
+  /** Как устанавливать приложения на iPhone: usb | wifi | server. */
+  install_method?: "usb" | "wifi" | "server";
+}
+
+export interface InstallServerState {
+  url: string;
+  title: string;
+  bundleId: string;
+  version: string;
+  size: number;
+  downloaded: number;
+  complete: boolean;
+  stopped: boolean;
 }
 
 export interface AppVersionInfo {

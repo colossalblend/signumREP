@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { open, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronRight, ClipboardCopy, Cloud, Database, FileText, FolderOpen, GraduationCap, Info, KeyRound, LoaderCircle, Monitor, Moon, PackageOpen, Play, RefreshCw, Save, Square, Sun, Trash2, Wrench, Zap } from "lucide-react";
+import { ChevronRight, ClipboardCopy, Cloud, Database, FileText, FolderOpen, GraduationCap, Info, KeyRound, LoaderCircle, Monitor, Moon, PackageOpen, Play, RefreshCw, Save, Smartphone, Square, Sun, Trash2, Wrench, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useBlocker, useNavigate } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
@@ -45,6 +45,7 @@ const empty: AppSettings = {
   proxy_password: "",
   selected_device_udid: undefined,
   keep_history_session: true,
+  install_method: "usb",
 };
 
 const keychainModes: Array<{ mode: IpatoolKeychainMode; label: string; hint: string }> = [
@@ -52,8 +53,25 @@ const keychainModes: Array<{ mode: IpatoolKeychainMode; label: string; hint: str
   { mode: "custom", label: "Свой ключ", hint: "Укажите свой ключ для защиты сохранённого входа" },
 ];
 
-const ipatoolEngines: Array<{ mode: IpatoolEngine; label: string; hint: string }> = [
+const installMethods: Array<{ mode: "usb" | "wifi" | "server"; label: string; hint: string }> = [
   {
+    mode: "usb",
+    label: "USB",
+    hint: "Классическая установка по кабелю. Надёжнее всего и не требует Wi-Fi.",
+  },
+  {
+    mode: "wifi",
+    label: "Wi-Fi",
+    hint: "Signum ставит приложение на iPhone напрямую по сети, как по кабелю. На iPhone должна быть включена синхронизация по Wi-Fi.",
+  },
+  {
+    mode: "server",
+    label: "Wi-Fi сервер",
+    hint: "Signum раздаёт приложение по ссылке с QR-кодом, iPhone скачивает и устанавливает его сам. Кабель не нужен.",
+  },
+];
+
+const ipatoolEngines: Array<{ mode: IpatoolEngine; label: string; hint: string }> = [  {
     mode: "auto",
     label: "Авто (рекомендуется)",
     hint: "Signum сам выберет подходящую версию для входа и загрузки приложений.",
@@ -116,6 +134,7 @@ function settingsSnapshot(s: AppSettings): string {
     ipatool_keychain_passphrase: s.ipatool_keychain_mode === "custom" ? (s.ipatool_keychain_passphrase ?? "") : "",
     selected_device_udid: s.selected_device_udid ?? null,
     keep_history_session: s.keep_history_session !== false,
+    install_method: s.install_method || "usb",
   });
 }
 
@@ -571,6 +590,32 @@ export default function Settings() {
                 чтобы применить прокси.
               </p>
             </div>
+          )}
+        </div>
+        <div className="mt-5 border-t border-white/[0.06] pt-5">
+           <div className="flex items-center gap-2 text-xs font-semibold text-slate-200"><Smartphone size={14} className="text-brand-300" />Установка на iPhone</div>
+          <p className="mt-1 text-[11px] leading-4 text-slate-500">
+            Как Signum ставит приложения на телефон.
+          </p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            {installMethods.map(({ mode, label, hint }) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setSettings(s => ({ ...s, install_method: mode }))}
+                className={`rounded-xl border p-3 text-left transition ${(settings.install_method || "usb") === mode ? "border-brand-400/35 bg-brand-500/10 text-brand-200" : "border-white/[0.08] bg-black/10 text-slate-300"}`}
+              >
+                <div className="text-xs font-semibold">{label}</div>
+                <div className="mt-1 text-[10px] leading-4 opacity-70">{hint}</div>
+              </button>
+            ))}
+          </div>
+          {(settings.install_method === "server" || settings.install_method === "wifi") && (
+            <p className="mt-2 text-[11px] leading-4 text-amber-300/80">
+              {settings.install_method === "server"
+                ? "Устройства должны быть в одной Wi-Fi сети, а Signum — запущен, пока iPhone скачивает приложение."
+                : "Телефон должен быть спарен по USB и включена синхронизация по Wi-Fi в iTunes/Finder."}
+            </p>
           )}
         </div>
         <div className="mt-5 border-t border-white/[0.06] pt-5">

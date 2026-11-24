@@ -10,6 +10,7 @@ mod bank_creds_page;
 mod bank_otp;
 mod diag_log;
 mod history_secrets;
+mod install_server;
 mod ipa_inspect;
 mod pty_login;
 mod signing_profile;
@@ -335,6 +336,11 @@ struct AppSettings {
     /// токены, куки и имя пользователя в путях.
     #[serde(default = "default_true")]
     auto_diag: bool,
+    /// Как устанавливать приложения на iPhone: usb | wifi | server.
+    /// wifi — напрямую через usbmux по сети (флаг -n у idevice-инструментов),
+    /// server — локальный Wi-Fi сервер: iPhone скачивает приложение сам.
+    #[serde(default)]
+    install_method: String,
     #[serde(default = "default_true")]
     lite_static_loaders: bool,
     #[serde(default = "default_true")]
@@ -5546,6 +5552,7 @@ fn default_settings(app: &AppHandle) -> Result<AppSettings, String> {
         selected_device_udid: None,
         selected_device_connection: None,
         keep_history_session: true,
+        install_method: "usb".into(),
         ipatool_engine: default_ipatool_engine(),
         favorite_app_ids: Vec::new(),
         auto_resign_before_expiry: false,
@@ -9093,6 +9100,7 @@ async fn fetch_purchase_history(
             selected_device_udid: None,
             selected_device_connection: None,
             keep_history_session: true,
+            install_method: "usb".into(),
             ipatool_engine: default_ipatool_engine(),
         favorite_app_ids: Vec::new(),
         auto_resign_before_expiry: false,
@@ -16269,6 +16277,15 @@ async fn install_ipa(
     if !path.exists() {
         return Err(format!("IPA не найден: {}", path.display()));
     }
+    // Метод установки из настроек: usb | wifi | server. Wi-Fi-сервер не
+    // нуждается в idevice-инструментах — он поднимает свой HTTP-сервер, а
+    // iPhone сам скачивает приложение через itms-services.
+    let install_method = load_settings(app)
+        .map(|s| s.install_method.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if install_method == "server" {
+        return install_server::install_via_server(app, job_id, path, progress_from, progress_to).await;
+    }
     let tools = resolve_tool_paths(app)?;
     require_idevice_tools(&tools)?;
     let progress = ProcessProgress::new(
@@ -16283,7 +16300,13 @@ async fn install_ipa(
     // появилось приложение сейчас или стояло и раньше.
     let installed_before = installed_snapshot_before_install(app).await;
     let base = vec!["install".into(), path.to_string_lossy().into_owned()];
-    let args = idevice_args_with_udid(app, base.clone());
+    // «wifi» — всегда сеть: берём -n напрямую, а не падаем в Wi-Fi-ретрай
+    // только после ошибки USB.
+    let args = if install_method == "wifi" {
+        idevice_args_network(app, base.clone())
+    } else {
+        idevice_args_with_udid(app, base.clone())
+    };
     let install_error = match run_process(
         &tools.ideviceinstaller,
         &args,
@@ -16357,10 +16380,14 @@ async fn install_ipa(
         "install refused, trying upgrade: {}",
         technical_excerpt(&install_error, 400)
     ));
-    let upgrade = idevice_args_with_udid(
-        app,
-        vec!["upgrade".into(), path.to_string_lossy().into_owned()],
-    );
+    let upgrade = if install_method == "wifi" {
+        idevice_args_network(app, vec!["upgrade".into(), path.to_string_lossy().into_owned()])
+    } else {
+        idevice_args_with_udid(
+            app,
+            vec!["upgrade".into(), path.to_string_lossy().into_owned()],
+        )
+    };
     match run_process(
         &tools.ideviceinstaller,
         &upgrade,
@@ -24358,6 +24385,9 @@ fn main() {
             take_session_expired_notice,
             purchase_app_only,
             purchase_apps_on_accounts,
+            install_server::start_install_server,
+            install_server::stop_install_server,
+            install_server::get_install_server_state,
             get_ipatool_random_passphrase,
             regenerate_ipatool_random_passphrase,
             fetch_catalog,
