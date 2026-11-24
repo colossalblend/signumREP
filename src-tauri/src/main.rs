@@ -5815,6 +5815,21 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     Ok(())
 }
 
+/// Выбор способа установки в момент установки приложения (диалог выбора):
+/// сохраняется сразу, без формы настроек.
+#[tauri::command]
+fn set_install_method(app: AppHandle, method: String) -> Result<(), String> {
+    let mut settings = load_settings(&app)?;
+    settings.install_method = if method.trim().eq_ignore_ascii_case("server") {
+        "server".into()
+    } else {
+        "usb".into()
+    };
+    let raw = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    fs::write(settings_path(&app)?, raw).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn http_status_message(status: reqwest::StatusCode, action: &str) -> String {
     match status.as_u16() {
         401 | 403 => {
@@ -24388,6 +24403,7 @@ fn main() {
             install_server::start_install_server,
             install_server::stop_install_server,
             install_server::get_install_server_state,
+            set_install_method,
             get_ipatool_random_passphrase,
             regenerate_ipatool_random_passphrase,
             fetch_catalog,

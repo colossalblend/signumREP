@@ -25,6 +25,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.core.view.WindowCompat
 import pw.appbank.signum.data.models.JobStatus
 import pw.appbank.signum.ui.components.ActivationSheet
+import pw.appbank.signum.ui.components.InstallMethodSheet
 import pw.appbank.signum.ui.components.WifiServerSheet
 import pw.appbank.signum.ui.components.Panel
 import pw.appbank.signum.ui.components.StatusLine
@@ -284,6 +285,14 @@ fun SignumRoot(engine: SignumEngine) {
         val wifiServing by vm.wifiServer.collectAsState()
         wifiServing?.let { serving ->
             WifiServerSheet(serving = serving, onStop = vm::stopWifiServer)
+        }
+        if (state.installMethodOpen) {
+            InstallMethodSheet(
+                devices = state.devices,
+                detecting = state.devicesLoading,
+                onPick = vm::pickInstallMethod,
+                onCancel = vm::cancelInstallMethod,
+            )
         }
         if (showOnboarding) {
             OnboardingScreen(

@@ -537,7 +537,7 @@ fun CatalogScreen(vm: SignumViewModel, goInstalls: () -> Unit, goAccount: () -> 
                 onRefreshVersions = vm::refreshStoreVersions,
                 onPickForDevice = vm::pickVersionForDevice,
                 versionFitBusy = s.versionFitBusy,
-                onInstall = { if (vm.queueOffer(true)) goInstalls() },
+                onInstall = { vm.queueOffer(true) { goInstalls() } },
                 onExport = startExport,
                 onBankAlt = vm::openBankAlt,
                 activationCount = offerActivation?.items?.size ?: 0,

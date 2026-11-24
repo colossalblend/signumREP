@@ -13,6 +13,7 @@ import ClientOutdatedGate from "./ClientOutdatedGate";
 
 import DragRegion from "./DragRegion";
 import IcloudSetupGate from "./IcloudSetupGate";
+import InstallMethodDialog from "./InstallMethodDialog";
 import InstallServerModal from "./InstallServerModal";
 import { hasSeenOnboarding } from "../lib/tourStore";
 import TourBoundary from "./tour/TourBoundary";
@@ -123,6 +124,7 @@ export default function Layout() {
       <ClientOutdatedGate />
       <Signing2faGate />
       <InstallServerModal />
+      <InstallMethodDialog />
     </div>
   );
 }

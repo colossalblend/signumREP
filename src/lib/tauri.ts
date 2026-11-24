@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { pickInstallMethod } from "./installMethod";
 import type { StoreDeveloper, StoreSearchApp } from "../types";
 
 const URL_PATTERN = /https?:\/\/[^\s)\]}>,]+/gi;
@@ -431,7 +432,22 @@ function reportAutoError(message: string, raw: string) {
   }).catch(() => undefined);
 }
 
+/** Команды, ставящие приложение на iPhone: перед ними показываем выбор способа. */
+const INSTALL_METHOD_COMMANDS = new Set([
+  "enqueue_catalog_install",
+  "enqueue_catalog_installs",
+  "enqueue_local_install",
+  "enqueue_sign_and_install",
+]);
+
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
+  if (INSTALL_METHOD_COMMANDS.has(name)) {
+    const method = await pickInstallMethod();
+    if (!method) {
+      throw new Error("Установка отменена");
+    }
+    await invoke("set_install_method", { method });
+  }
   try {
     return await invoke<T>(name, args);
   } catch (error) {

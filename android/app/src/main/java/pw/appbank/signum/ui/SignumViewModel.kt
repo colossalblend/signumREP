@@ -158,6 +158,8 @@ data class UiState(
     val cacheBytes: Long = -1L,
     /** Окно с QR активации: из карточки приложения или сразу после установки. */
     val activation: ActivationView? = null,
+    /** Открыт выбор способа установки (USB / Wi-Fi сервер). */
+    val installMethodOpen: Boolean = false,
     /** Сервер не принимает эту версию Signum — экран закрыт окном обновления. */
     val clientOutdated: pw.appbank.signum.data.api.ClientOutdated? = null,
 )
@@ -819,28 +821,32 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     /** Ставит в очередь обновление одного приложения из каталога. */
     fun queueUpdate(app: CatalogApp, onDone: () -> Unit) {
         if (_state.value.bulkBusy) return
-        viewModelScope.launch {
-            _state.update { it.copy(bulkBusy = true) }
-            val ok = runCatching { queueCatalogApp(app) }.getOrDefault(false)
-            _state.update {
-                it.copy(
-                    bulkBusy = false,
-                    catalogError = if (ok) "" else "Не удалось поставить в очередь: ${app.title}",
-                )
+        withInstallMethod(true) {
+            viewModelScope.launch {
+                _state.update { it.copy(bulkBusy = true) }
+                val ok = runCatching { queueCatalogApp(app) }.getOrDefault(false)
+                _state.update {
+                    it.copy(
+                        bulkBusy = false,
+                        catalogError = if (ok) "" else "Не удалось поставить в очередь: ${app.title}",
+                    )
+                }
+                if (ok) onDone()
             }
-            if (ok) onDone()
         }
     }
 
     fun queueAllUpdates(onDone: () -> Unit) {
         val apps = availableUpdates().map { it.first }
         if (apps.isEmpty() || _state.value.bulkBusy) return
-        viewModelScope.launch {
-            _state.update { it.copy(bulkBusy = true) }
-            var queued = 0
-            for (app in apps) if (runCatching { queueCatalogApp(app) }.getOrDefault(false)) queued++
-            _state.update { it.copy(bulkBusy = false) }
-            if (queued > 0) onDone()
+        withInstallMethod(true) {
+            viewModelScope.launch {
+                _state.update { it.copy(bulkBusy = true) }
+                var queued = 0
+                for (app in apps) if (runCatching { queueCatalogApp(app) }.getOrDefault(false)) queued++
+                _state.update { it.copy(bulkBusy = false) }
+                if (queued > 0) onDone()
+            }
         }
     }
 
@@ -951,28 +957,30 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
             _state.update { it.copy(catalogError = "Сначала войдите в Apple ID на странице «Аккаунт».") }
             return
         }
-        viewModelScope.launch {
-            _state.update { it.copy(bulkBusy = true, catalogError = "") }
-            var queued = 0
-            val failed = mutableListOf<String>()
-            for (appId in ids) {
-                val app = _state.value.catalog.firstOrNull { it.id == appId } ?: continue
-                val ok = runCatching { queueCatalogApp(app) }.getOrDefault(false)
-                if (ok) queued++ else failed += app.title
+        withInstallMethod(true) {
+            viewModelScope.launch {
+                _state.update { it.copy(bulkBusy = true, catalogError = "") }
+                var queued = 0
+                val failed = mutableListOf<String>()
+                for (appId in ids) {
+                    val app = _state.value.catalog.firstOrNull { it.id == appId } ?: continue
+                    val ok = runCatching { queueCatalogApp(app) }.getOrDefault(false)
+                    if (ok) queued++ else failed += app.title
+                }
+                _state.update {
+                    it.copy(
+                        bulkBusy = false,
+                        selectMode = queued > 0 && failed.isEmpty(),
+                        selectedAppIds = if (queued > 0) emptySet() else it.selectedAppIds,
+                        catalogError = when {
+                            failed.isEmpty() -> ""
+                            queued == 0 -> "Не удалось поставить в очередь: ${failed.joinToString(", ")}"
+                            else -> "Поставлено ${queued}. Не получилось: ${failed.joinToString(", ")}"
+                        },
+                    )
+                }
+                if (queued > 0) onDone()
             }
-            _state.update {
-                it.copy(
-                    bulkBusy = false,
-                    selectMode = queued > 0 && failed.isEmpty(),
-                    selectedAppIds = if (queued > 0) emptySet() else it.selectedAppIds,
-                    catalogError = when {
-                        failed.isEmpty() -> ""
-                        queued == 0 -> "Не удалось поставить в очередь: ${failed.joinToString(", ")}"
-                        else -> "Поставлено ${queued}. Не получилось: ${failed.joinToString(", ")}"
-                    },
-                )
-            }
-            if (queued > 0) onDone()
         }
     }
 
@@ -1116,7 +1124,50 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         }
     }
 
-    fun queueOffer(install: Boolean): Boolean {
+    // ===== Выбор способа установки (USB/Wi-Fi или Wi-Fi сервер) =====
+
+    /** Отложенное действие: выполнится, когда в диалоге выберут способ установки. */
+    private var pendingInstallAction: (() -> Unit)? = null
+
+    /**
+     * Красивый выбор способа установки в момент постановки в очередь.
+     * iPhone найден (USB/Wi-Fi) — кабель уже под рукой, не найден —
+     * Wi-Fi сервер; но способ всегда можно выбрать вручную. До выбора
+     * установка не начинается.
+     */
+    private fun withInstallMethod(install: Boolean, action: () -> Unit) {
+        if (!install) {
+            action()
+            return
+        }
+        if (pendingInstallAction != null) return
+        pendingInstallAction = action
+        _state.update { it.copy(installMethodOpen = true) }
+        refreshDevices()
+    }
+
+    /** Пользователь выбрал способ установки: запоминаем его и ставим приложение. */
+    fun pickInstallMethod(method: String) {
+        val action = pendingInstallAction
+        pendingInstallAction = null
+        _state.update { it.copy(installMethodOpen = false) }
+        if (action == null) return
+        val next = _state.value.settings.copy(
+            installMethod = if (method == "server") "server" else "usb",
+        )
+        runCatching { engine.saveSettings(next) }
+        _state.update { it.copy(settings = next) }
+        action()
+    }
+
+    /** Диалог закрыли без выбора — установка отменяется. */
+    fun cancelInstallMethod() {
+        if (pendingInstallAction == null) return
+        pendingInstallAction = null
+        _state.update { it.copy(installMethodOpen = false) }
+    }
+
+    fun queueOffer(install: Boolean, onQueued: () -> Unit = {}): Boolean {
         val offer = _state.value.offer ?: return false
         val adam = offer.appStoreId?.trim().orEmpty()
         if (adam.isEmpty()) {
@@ -1129,6 +1180,18 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
             _state.update { it.copy(offerError = "Сначала войдите в Apple ID на странице «Аккаунт».") }
             return false
         }
+        withInstallMethod(install) {
+            queueOfferNow(install)
+            onQueued()
+        }
+        return true
+    }
+
+    /** Сама постановка в очередь карточки приложения — уже после выбора способа. */
+    private fun queueOfferNow(install: Boolean) {
+        val offer = _state.value.offer ?: return
+        val adam = offer.appStoreId?.trim().orEmpty()
+        if (adam.isEmpty()) return
         val chosen = _state.value.chosenVersion
         val jobId = engine.enqueueInstall(
             title = offer.title,
@@ -1146,7 +1209,6 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                 ?.let { pendingActivations[jobId] = offer.appTitle to it }
         }
         _state.update { it.copy(offer = null, offerError = "", bankAltOpen = false) }
-        return true
     }
 
     private var storeVersionsRequest = 0
@@ -1475,27 +1537,7 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     fun clearHistorySelection() = _state.update { it.copy(historySelected = emptySet()) }
 
     fun installFromHistory(item: PurchaseHistoryApp, install: Boolean) {
-        engine.enqueueInstall(
-            title = item.name,
-            adamId = item.adamId,
-            bundleId = item.bundleId,
-            inStore = false,
-            alreadyOwned = true,
-            version = null,
-            externalVersionId = null,
-            install = install,
-        )
-        _state.update {
-            it.copy(historyMessage = "«${item.name}» в очереди. Список можно не обновлять.")
-        }
-    }
-
-    fun enqueueSelectedHistory(install: Boolean) {
-        val selected = _state.value.historySelected
-        val items = _state.value.history.filter { selected.contains(it.adamId) }
-        if (items.isEmpty()) return
-        _state.update { it.copy(historyBusy = true) }
-        items.forEach { item ->
+        withInstallMethod(install) {
             engine.enqueueInstall(
                 title = item.name,
                 adamId = item.adamId,
@@ -1506,17 +1548,41 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
                 externalVersionId = null,
                 install = install,
             )
+            _state.update {
+                it.copy(historyMessage = "«${item.name}» в очереди. Список можно не обновлять.")
+            }
         }
-        _state.update {
-            it.copy(
-                historyBusy = false,
-                historySelected = emptySet(),
-                historyMessage = if (install) {
-                    "${items.size} в очереди установки. Список можно не обновлять."
-                } else {
-                    "${items.size} в очереди загрузки. Список можно не обновлять."
-                },
-            )
+    }
+
+    fun enqueueSelectedHistory(install: Boolean) {
+        val selected = _state.value.historySelected
+        val items = _state.value.history.filter { selected.contains(it.adamId) }
+        if (items.isEmpty()) return
+        withInstallMethod(install) {
+            _state.update { it.copy(historyBusy = true) }
+            items.forEach { item ->
+                engine.enqueueInstall(
+                    title = item.name,
+                    adamId = item.adamId,
+                    bundleId = item.bundleId,
+                    inStore = false,
+                    alreadyOwned = true,
+                    version = null,
+                    externalVersionId = null,
+                    install = install,
+                )
+            }
+            _state.update {
+                it.copy(
+                    historyBusy = false,
+                    historySelected = emptySet(),
+                    historyMessage = if (install) {
+                        "${items.size} в очереди установки. Список можно не обновлять."
+                    } else {
+                        "${items.size} в очереди загрузки. Список можно не обновлять."
+                    },
+                )
+            }
         }
     }
 
@@ -1579,7 +1645,7 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
 
     fun restoreOffloaded(app: InstalledApp) {
         if (!app.isPlaceholder) return
-        viewModelScope.launch { restoreOffloadedNow(app) }
+        withInstallMethod(true) { viewModelScope.launch { restoreOffloadedNow(app) } }
     }
 
     /**
@@ -1590,11 +1656,13 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     fun restoreAllOffloaded() {
         val apps = _state.value.installed.filter { it.isPlaceholder }
         if (apps.isEmpty()) return
-        viewModelScope.launch {
-            var ok = 0
-            for (app in apps) if (restoreOffloadedNow(app)) ok++
-            _state.update {
-                it.copy(deviceMessage = "В очередь восстановления добавлено: $ok из ${apps.size}.")
+        withInstallMethod(true) {
+            viewModelScope.launch {
+                var ok = 0
+                for (app in apps) if (restoreOffloadedNow(app)) ok++
+                _state.update {
+                    it.copy(deviceMessage = "В очередь восстановления добавлено: $ok из ${apps.size}.")
+                }
             }
         }
     }
@@ -1656,8 +1724,10 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     fun cancelJob(id: String) = engine.cancelJob(id)
 
     fun queueLocal(path: String, sign: Boolean, install: Boolean) {
-        engine.enqueueLocal(path, sign, install)
-        _state.update { it.copy(signMessage = "Добавлено в очередь") }
+        withInstallMethod(install) {
+            engine.enqueueLocal(path, sign, install)
+            _state.update { it.copy(signMessage = "Добавлено в очередь") }
+        }
     }
 
     /**
