@@ -243,6 +243,50 @@ fun SettingsScreen(
         }
 
         Panel {
+            SectionTitle("Установка на iPhone")
+            Spacer(Modifier.height(6.dp))
+            SegmentedControl(
+                options = listOf("usb" to "USB", "wifi" to "Wi-Fi", "server" to "Сервер"),
+                selected = s.installMethod,
+                onSelect = { vm.saveSettings(vm.state.value.settings.copy(installMethod = it)) },
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                when (s.installMethod) {
+                    "wifi" ->
+                        "Напрямую по Wi-Fi: Signum подключается к iPhone по сети (порт 27015) и ставит приложение " +
+                            "как по кабелю. На iPhone включите «Синхронизацию по Wi-Fi» в iTunes/Finder; удобен " +
+                            "первичный спаринг по USB."
+                    "server" ->
+                        "Wi-Fi сервер: Signum раздаёт приложение по ссылке с QR-кодом, iPhone сам скачивает и " +
+                            "устанавливает его через itms-services. Оба устройства — в одной сети, Signum не закрывать."
+                    else ->
+                        "Классическая установка по кабелю USB. Надёжнее всего и не требует Wi-Fi."
+                },
+                color = c.muted,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+            )
+            if (s.installMethod == "wifi") {
+                Spacer(Modifier.height(6.dp))
+                SettingsTextField(
+                    value = s.wifiHost,
+                    onCommit = { vm.saveSettings(vm.state.value.settings.copy(wifiHost = it.trim())) },
+                    label = "IP iPhone",
+                    placeholder = "например, 192.168.1.42",
+                    keyboard = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "IP телефона смотрите в Настройках iPhone → Wi-Fi → «i» рядом с сетью. Порт 27015 используется автоматически.",
+                    color = c.muted,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                )
+            }
+        }
+
+        Panel {
             SectionTitle("Страна магазина")
             Spacer(Modifier.height(6.dp))
             Text(

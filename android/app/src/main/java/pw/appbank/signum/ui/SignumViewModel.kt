@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import pw.appbank.signum.data.device.InstallServer
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import pw.appbank.signum.data.api.DiagLog
@@ -1819,6 +1820,14 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
     }
 
     fun saveSettings(s: AppSettings) = engine.saveSettings(s)
+
+    // ── Wi-Fi сервер установки ────────────────────────────────────────
+
+    val wifiServer: StateFlow<InstallServer.Serving?> = engine.wifiServer
+
+    fun stopWifiServer() {
+        engine.stopInstallServer()
+    }
 
     fun refreshAuth() {
         _state.update { it.copy(auth = engine.authStatus()) }

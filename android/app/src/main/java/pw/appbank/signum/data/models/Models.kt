@@ -367,6 +367,10 @@ data class AppSettings(
     val proxyPort: Int = 0,
     val proxyUser: String = "",
     val proxyPassword: String = "",
+    /** Способ установки приложений на iPhone: usb | wifi | server. */
+    val installMethod: String = "usb",
+    /** IP iPhone для установки напрямую по Wi-Fi (метод wifi). */
+    val wifiHost: String = "",
 ) {
     /**
      * Что на самом деле включено из упрощённого вида. Отдельные флажки по

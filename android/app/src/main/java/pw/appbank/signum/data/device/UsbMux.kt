@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicInteger
                                                              
                                                                             
    
-class UsbMux(private val usb: ClaimedAppleUsb) {
+class UsbMux(private val link: MuxLink) {
     private val streams = java.util.concurrent.ConcurrentHashMap<Int, MuxStream>()
     private val io = Any()
     private val pktbuf = ByteArrayOutputStream()
@@ -118,12 +118,7 @@ class UsbMux(private val usb: ClaimedAppleUsb) {
                 txSeq = (txSeq + 1) and 0xFFFF
             }
             buf.put(payload)
-            val packet = buf.array()
-            val sent = usb.connection.bulkTransfer(usb.bulkOut, packet, packet.size, 4_000)
-            if (sent < 0) error("USB: не удалось отправить пакет")
-            if (packet.isNotEmpty() && packet.size % 512 == 0) {
-                usb.connection.bulkTransfer(usb.bulkOut, ByteArray(0), 0, 200)
-            }
+            link.write(buf.array())
         }
     }
 
@@ -136,7 +131,7 @@ class UsbMux(private val usb: ClaimedAppleUsb) {
             if (left <= 0) return null
             val chunk = ByteArray(16_384)
             val n = synchronized(io) {
-                usb.connection.bulkTransfer(usb.bulkIn, chunk, chunk.size, left)
+                link.read(chunk, left)
             }
             if (n <= 0) continue
             pktbuf.write(chunk, 0, n)

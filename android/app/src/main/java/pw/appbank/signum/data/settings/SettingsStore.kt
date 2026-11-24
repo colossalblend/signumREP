@@ -57,6 +57,8 @@ class SettingsStore(context: Context) {
         proxyPort = prefs.getInt("proxy_port", 0),
         proxyUser = prefs.getString("proxy_user", "") ?: "",
         proxyPassword = prefs.getString("proxy_password", "") ?: "",
+        installMethod = normalizeInstallMethod(prefs.getString("install_method", "usb")),
+        wifiHost = prefs.getString("wifi_host", "") ?: "",
     )
 
     fun save(settings: AppSettings) {
@@ -83,8 +85,17 @@ class SettingsStore(context: Context) {
             putInt("proxy_port", settings.proxyPort)
             putString("proxy_user", settings.proxyUser)
             putString("proxy_password", settings.proxyPassword)
+            putString("install_method", normalizeInstallMethod(settings.installMethod))
+            putString("wifi_host", settings.wifiHost.trim())
         }
     }
+
+    private fun normalizeInstallMethod(raw: String?): String =
+        when (raw?.trim()?.lowercase()) {
+            "wifi" -> "wifi"
+            "server" -> "server"
+            else -> "usb"
+        }
 
     private fun normalizeIpatoolEngine(raw: String?): String =
         when (raw?.trim()?.lowercase()) {

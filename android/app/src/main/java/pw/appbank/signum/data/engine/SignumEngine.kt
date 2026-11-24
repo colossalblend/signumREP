@@ -22,6 +22,8 @@ import pw.appbank.signum.data.apple.BankOtp
 import pw.appbank.signum.data.catalog.CatalogResolve
 import pw.appbank.signum.data.device.DeviceService
 import pw.appbank.signum.data.device.IpaInstaller
+import pw.appbank.signum.data.device.InstallMethod
+import pw.appbank.signum.data.device.InstallServer
 import pw.appbank.signum.data.jobs.JobQueue
 import pw.appbank.signum.data.jobs.CatalogDownloadFiles
 import pw.appbank.signum.data.jobs.QueuedWork
@@ -62,6 +64,11 @@ class SignumEngine(context: Context) {
     val history = PurchaseHistoryClient(settings)
     val devices = DeviceService(app, settings)
     private val installer = IpaInstaller(devices)
+    private val installServer = InstallServer()
+
+    /** Живой Wi-Fi сервер установки (метод «server»). */
+    private val _wifiServer = MutableStateFlow<InstallServer.Serving?>(null)
+    val wifiServer: StateFlow<InstallServer.Serving?> = _wifiServer
 
     private val _settings = MutableStateFlow(this.settings.load())
     val settingsFlow: StateFlow<AppSettings> = _settings
@@ -603,8 +610,56 @@ class SignumEngine(context: Context) {
             return
         }
         progress(71f, "device", "Подключаем iPhone…")
-        installer.install(dest) { pct, msg -> progress(pct, "install", msg) }
-        CatalogDownloadFiles.cleanup(dest)
+        installOnPhone(dest, work.title) { pct, stage, msg -> progress(pct, stage, msg) }
+        if (settings.load().installMethod != "server") {
+            CatalogDownloadFiles.cleanup(dest)
+        }
+    }
+
+    /**
+     * Ставит приложение выбранным в настройках способом: USB, Wi-Fi напрямую
+     * (mux по TCP 27015) или запуск локального Wi-Fi сервера (itms-services).
+     */
+    private fun installOnPhone(
+        ipa: File,
+        title: String,
+        onProgress: (Float, String, String) -> Unit,
+    ) {
+        val s = settings.load()
+        when (s.installMethod) {
+            "wifi" -> {
+                val host = s.wifiHost.trim()
+                if (host.isEmpty()) {
+                    error("Укажите IP iPhone в настройках: Настройки → Установка → Wi-Fi напрямую")
+                }
+                installer.install(ipa, InstallMethod.WifiDevice(host)) { pct, msg ->
+                    onProgress(pct, "install", msg)
+                }
+            }
+            "server" -> {
+                val meta = runCatching { IpaTweaks.metadata(ipa) }.getOrNull()
+                val serving = installServer.start(
+                    ipa = ipa,
+                    title = meta?.name?.takeIf { !it.isNullOrBlank() } ?: title.ifBlank { ipa.nameWithoutExtension },
+                    bundleId = meta?.bundleId.orEmpty(),
+                    version = meta?.version?.takeIf { !it.isNullOrBlank() } ?: "1.0",
+                )
+                _wifiServer.value = serving
+                onProgress(
+                    100f,
+                    "done",
+                    "Wi-Fi сервер: ${serving.url} — откройте ссылку на iPhone и нажмите «Установить»",
+                )
+            }
+            else -> installer.install(ipa) { pct, msg ->
+                onProgress(pct, "install", msg)
+            }
+        }
+    }
+
+    fun stopInstallServer() {
+        installServer.stop()
+        _wifiServer.value = null
     }
 
     private fun runLocal(
@@ -623,7 +678,7 @@ class SignumEngine(context: Context) {
         }
         if (work.install) {
             progress(55f, "install", "Установка…")
-            installer.install(ipa) { pct, msg -> progress(pct, "install", msg) }
+            installOnPhone(ipa, src.nameWithoutExtension) { pct, stage, msg -> progress(pct, stage, msg) }
         }
     }
 

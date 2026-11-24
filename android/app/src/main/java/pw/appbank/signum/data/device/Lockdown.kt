@@ -544,7 +544,7 @@ class DeviceService(
                     val claim = AppleUsb.claim(context, live)
                     claimed = claim
                     try {
-                        val mux = UsbMux(claim)
+                        val mux = UsbMux(UsbLink(claim))
                         onStatus("Связь с iPhone…")
                         Thread.sleep(300L + attempt * 200L)
                         mux.handshake()
@@ -572,6 +572,67 @@ class DeviceService(
             } finally {
                 claimed?.let { AppleUsb.release(it) }
                 claimed = null
+                sessionBusy = false
+            }
+        } finally {
+            usbLock.unlock()
+        }
+    }
+
+    /**
+     * Wi-Fi-подключение к iPhone через usbmux по TCP (порт 27015, режим
+     * «Синхронизировать по Wi-Fi» в iTunes/Finder). Работает с уже
+     * существующей парой: сначала удобно спарить по USB, потом телефон
+     * остаётся беспроводным.
+     */
+    fun withWifiDevice(
+        host: String,
+        port: Int = 27015,
+        onStatus: (String) -> Unit = {},
+        forcePair: Boolean = false,
+        block: (LockdownClient, UsbMux) -> Unit,
+    ): DeviceInfo {
+        usbLock.lock()
+        try {
+            sessionBusy = true
+            var last: Exception? = null
+            try {
+                repeat(2) { attempt ->
+                    onStatus(if (attempt == 0) "Подключаемся к iPhone по Wi-Fi ($host:$port)…" else "Повтор Wi-Fi-подключения… (${attempt + 1}/2)")
+                    val link = try {
+                        TcpLink(host.trim(), port)
+                    } catch (e: java.io.IOException) {
+                        error(
+                            "iPhone не найден по Wi-Fi ($host:$port). Проверьте: оба устройства в одной сети, " +
+                                "на iPhone включена «Синхронизация по Wi-Fi» (iTunes/Finder → Обзор устройства), IP указан верно.",
+                        )
+                    }
+                    val mux = UsbMux(link)
+                    try {
+                        onStatus("Связь с iPhone по Wi-Fi…")
+                        mux.handshake()
+                        val stream = mux.connect(UsbMux.LOCKDOWN_PORT)
+                        Thread.sleep(80)
+                        val lock = LockdownClient(store, stream)
+                        lock.queryType()
+                        val info = lock.pair(force = forcePair, onStatus = onStatus)
+                        val selected = store.load().selectedDeviceUdid
+                        if (selected.isNullOrBlank()) {
+                            store.save(store.load().copy(selectedDeviceUdid = info.udid))
+                        }
+                        block(lock, mux)
+                        return info
+                    } catch (e: Exception) {
+                        last = e
+                        android.util.Log.w("SignumWifi", "session try=${attempt + 1}", e)
+                        if (attempt == 1) throw e
+                        Thread.sleep(800)
+                    } finally {
+                        runCatching { link.close() }
+                    }
+                }
+                throw last ?: IllegalStateException("Не удалось связаться с iPhone по Wi-Fi")
+            } finally {
                 sessionBusy = false
             }
         } finally {
@@ -636,7 +697,7 @@ class DeviceService(
             runCatching {
                 val claim = AppleUsb.claim(context, dev)
                 try {
-                    val mux = UsbMux(claim)
+                    val mux = UsbMux(UsbLink(claim))
                     mux.handshake()
                     LockdownClient(store, mux.connect(UsbMux.LOCKDOWN_PORT)).readInfo().productVersion
                 } finally { AppleUsb.release(claim) }

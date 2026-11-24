@@ -1,6 +1,7 @@
 package pw.appbank.signum.data.device
 
 import pw.appbank.signum.data.apple.str
+import pw.appbank.signum.data.models.DeviceInfo
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -136,14 +137,32 @@ class AfcClient(private val stream: UsbMux.MuxStream) {
     }
 }
 
+/** Как ставить приложение на iPhone. */
+sealed interface InstallMethod {
+    /** Классика: кабель USB + usbmux. */
+    data object Usb : InstallMethod
+
+    /** Напрямую по Wi-Fi: usbmux-протокол через TCP 27015 на iPhone. */
+    data class WifiDevice(val host: String, val port: Int = 27015) : InstallMethod
+}
+
 class IpaInstaller(
     private val devices: DeviceService,
 ) {
-    fun install(ipa: File, onProgress: (Float, String) -> Unit) {
+    fun install(ipa: File, onProgress: (Float, String) -> Unit) = install(ipa, InstallMethod.Usb, onProgress)
+
+    fun install(ipa: File, method: InstallMethod, onProgress: (Float, String) -> Unit) {
         if (!ipa.exists() || ipa.length() < 1000) error("Файл приложения не найден")
         val remote = "/PublicStaging/${ipa.name}"
         var copied = false
-        devices.withDevice({ msg -> onProgress(72f, msg) }) { lock, mux ->
+        val openSession: ((String) -> Unit, Boolean, (LockdownClient, UsbMux) -> Unit) -> DeviceInfo =
+            when (method) {
+                InstallMethod.Usb ->
+                    { status, force, block -> devices.withDevice(status, force, block) }
+                is InstallMethod.WifiDevice ->
+                    { status, force, block -> devices.withWifiDevice(method.host, method.port, status, force, block) }
+            }
+        openSession({ msg -> onProgress(72f, msg) }, false) { lock, mux ->
             val info = lock.readInfo()
             onProgress(72f, "Сессия с ${info.deviceName ?: "iPhone"}…")
             lock.startSession(info.udid, mux)
@@ -203,7 +222,7 @@ class IpaInstaller(
                 else onProgress(92f, lastStatus)
                 if (status == "Complete") {
                     onProgress(100f, "Установлено")
-                    return@withDevice
+                    return@openSession
                 }
             }
             error("Установка на iPhone не завершилась за ${INSTALL_TIMEOUT_MS / 60000} минут. Разблокируйте телефон и повторите.")

@@ -25,6 +25,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.core.view.WindowCompat
 import pw.appbank.signum.data.models.JobStatus
 import pw.appbank.signum.ui.components.ActivationSheet
+import pw.appbank.signum.ui.components.WifiServerSheet
 import pw.appbank.signum.ui.components.Panel
 import pw.appbank.signum.ui.components.StatusLine
 import pw.appbank.signum.ui.screens.AboutScreen
@@ -279,6 +280,10 @@ fun SignumRoot(engine: SignumEngine) {
                 onRefresh = vm::refreshActivation,
                 onClose = vm::closeActivation,
             )
+        }
+        val wifiServing by vm.wifiServer.collectAsState()
+        wifiServing?.let { serving ->
+            WifiServerSheet(serving = serving, onStop = vm::stopWifiServer)
         }
         if (showOnboarding) {
             OnboardingScreen(
