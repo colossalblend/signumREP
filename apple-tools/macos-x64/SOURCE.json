@@ -1,0 +1,20 @@
+{
+  "v5": "Sorvigolova/ipatool 1.3.4 ipatool-cpp (macOS_amd64)",
+  "v2": "ipatool-main sapfix + GSA trusteddevice 2FA send on macOS (CommerceKit kept as fallback). Built 2026-08-28 on the Intel Mac. IPA_Downloader macOS_amd64_ipatool-go is the same family but does not send the iPhone push.",
+  "tag": "2.3.2-sapfix.1+gsa-2fa",
+  "support": "kda2495/IPA_Downloader 4.5.1 MainApp/macOS_amd64 (idevice tools + libimobiledevice-1.0.6.dylib + libplist-2.0.12.dylib); zsign kept from the 2026-09-18 self-built bundle",
+  "device_tools": "kda2495/IPA_Downloader 4.5.1",
+  "device_tools_release": "https://github.com/kda2495/IPA_Downloader/releases/tag/4.5.1",
+  "ideviceinfo_sha256": "e7a5efec0e96c2075e38a3aea16fbfd7d0747a41a83c264473c6031aa3a60d8a",
+  "idevice_id_sha256": "adcb07465dc5df00b00fe3d306091523c3a110880e863590e687851503547526",
+  "ideviceinstaller_sha256": "03fc292a4383ae6a9826c0168b7d4522289163129f183bbe0297b4dcd812ee0b",
+  "libimobiledevice_sha256": "d14a0834eb62e21ee6d365a1126f732995b04de7dee21bb2bde7e52e7d341b02",
+  "libplist_sha256": "ba03fdc0bcbe154f2be0640e74e04178f3bbb63e71fc07460f5e5e5c72650bca",
+  "verified_at": "2026-11-25",
+  "v5_source": "https://github.com/Sorvigolova/ipatool/releases/tag/1.3.4",
+  "v5_version": "1.3.4",
+  "v5_sha256": "ba3bc53643ceeb4c81980ba5173384c47689013ad046ee8712ad863e327342f7",
+  "v5_archive_sha256": "711a7a3df7d2762ffd9efb70385728820b9b6b82fb51ae8bdea15cfa77c7f6dd",
+  "v5_via": "kda2495/IPA_Downloader 4.5.1 MainApp/macOS_amd64 (identical sha256 to upstream release)",
+  "ipa_downloader_sha256": "b7888586773a5a4f1e51616515231208dd94de64cbd0408c5cac805c3c4b7486"
+}

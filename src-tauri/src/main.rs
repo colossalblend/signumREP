@@ -3735,7 +3735,7 @@ fn start_background_refresh(app: &AppHandle) {
     });
 }
 
-const KBSYNC_UPSTREAM_VERSION: &str = "1.3.2";
+const KBSYNC_UPSTREAM_VERSION: &str = "1.3.4";
 const KBSYNC_REFRESH_AFTER_SECS: u64 = 3600;
 /// Сколько команд сейчас просят остановить KBSync.
 ///
@@ -4162,6 +4162,9 @@ fn macos_ipatool_embeds_kbsync(hash: &str) -> bool {
         | "2a5f789bbbc94e78eac1ae31fd55b883374b4244a23c9c65bf1240fad8b29594"
         | "a3b9b6db81dc16a06212a6024f1450c05518b9bd0128efeb85e98e9d150c1cc5"
         | "acf05a946e27c0d8510b17d87e29ad28e079b087bb6208d455814912bd9dca4c"
+        // ipatool-cpp 1.3.4 (macOS arm64 / x86_64), shipped from IPA_Downloader 4.5.1
+        | "c061d2a905cb8f9057f39572989800d965d7b98d9c109c9402926269aa2d5eef"
+        | "ba3bc53643ceeb4c81980ba5173384c47689013ad046ee8712ad863e327342f7"
     )
 }
 
@@ -6473,6 +6476,12 @@ async fn refresh_managed_tools(app: &AppHandle) -> Result<ToolUpdateReport, Stri
         let Some(release) = manifest.tools.get(*slot) else {
             continue;
         };
+        // managed_tool_path rejects an ipatool-v5 older than the bundled
+        // engine; skip it here too, otherwise the updater re-downloads the
+        // same rejected build on every start.
+        if *slot == "ipatool-v5" && compare_versions(release.version.trim(), KBSYNC_UPSTREAM_VERSION) < 0 {
+            continue;
+        }
         let local = load_managed_tool_state(app, slot);
         let local_path = managed_tool_path(app, slot);
         let needs_update = match (&local, &local_path) {
@@ -23047,6 +23056,8 @@ mod tests {
             "9900a16212e0697b64094fa4dec0d9da367b76f8d01b84604b21d9808d86347e",
             "2d6b4391fed1e4f3778af730a5b95f0aaee139f8f0aede4c3e62b6cd66ff2c6d",
             "2a5f789bbbc94e78eac1ae31fd55b883374b4244a23c9c65bf1240fad8b29594",
+            "c061d2a905cb8f9057f39572989800d965d7b98d9c109c9402926269aa2d5eef",
+            "ba3bc53643ceeb4c81980ba5173384c47689013ad046ee8712ad863e327342f7",
         ] {
             assert!(super::macos_ipatool_embeds_kbsync(hash));
         }

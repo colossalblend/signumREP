@@ -98,13 +98,13 @@ cd android
 
 | Компонент | Версия | Откуда берётся | Назначение |
 |-----------|--------|----------------|------------|
-| **ipatool-cpp** (движок v5) | 1.3.2 | [Sorvigolova/ipatool](https://github.com/Sorvigolova/ipatool/releases/tag/1.3.2), Windows-сборка — [colossalblend/ipatool](https://github.com/colossalblend/ipatool) (commit `d5050b1`) | вход в Apple ID, покупка, `list-versions`, скачивание IPA; SAP/KBSync внутри бинаря |
+| **ipatool-cpp** (движок v5) | 1.3.4 | [Sorvigolova/ipatool](https://github.com/Sorvigolova/ipatool/releases/tag/1.3.4); бинарники Windows/macOS/Linux совпадают побайтно с [kda2495/IPA_Downloader 4.5.1](https://github.com/kda2495/IPA_Downloader/releases/tag/4.5.1) | вход в Apple ID, покупка, `list-versions`, скачивание IPA; SAP/KBSync внутри бинаря |
 | **ipatool** Go (движок v4) | majd/ipatool 2.6.0 + sapfix | [majd/ipatool](https://github.com/majd/ipatool), [maksimryabkin/ipatool](https://github.com/maksimryabkin/ipatool) (`2.3.2-sapfix.1`) | резервный движок |
 | **KBSync / sapsigner** | Unicorn 2.1.4 | [t0rr3sp3dr0/sapsigner](https://github.com/t0rr3sp3dr0/sapsigner) (Go + Unicorn) | FairPlay и `X-Apple-ActionSignature` |
 | **Unicorn Engine** | 2.1.4 | [unicorn-engine/unicorn](https://github.com/unicorn-engine/unicorn), `brew install unicorn` | эмуляция для `kbsync`/`sapsigner`; на Windows DLL кладётся в `%LOCALAPPDATA%\ipatool\unicorn\2.1.4` |
 | **zsign** | upstream | [zhlynn/zsign](https://github.com/zhlynn/zsign) (`build/macos`) | переподпись IPA |
 | **anisette** | 3.0.0-legacy | legacy-sidecar из ipatool 3.0.0 | только для старого движка v3 |
-| **IPA_Downloader** | 4.5.0 | [kda2495/IPA_Downloader](https://github.com/kda2495/IPA_Downloader/releases/tag/4.5.0) | актуальные `ideviceinfo`, `ideviceinstaller`, `idevice_id`, `idevicepair`; Wi‑Fi-подключение с приоритетом USB |
+| **IPA_Downloader** | 4.5.1 | [kda2495/IPA_Downloader](https://github.com/kda2495/IPA_Downloader/releases/tag/4.5.1) | актуальные `ideviceinfo`, `ideviceinstaller`, `idevice_id`, `idevicepair`; Wi‑Fi-подключение с приоритетом USB |
 | **libimobiledevice / libplist / usbmuxd** | brew/apt | [libimobiledevice](https://github.com/libimobiledevice) | USB: pairing, info, install |
 | **isideload** | 0.2.25 | [nab138/isideload](https://github.com/nab138/isideload), вендорен в `src-tauri/vendor/isideload` | sideload/установка из Rust |
 | **Apple Mobile Device Support / iTunes / iCloud** | — | apple.com | USB и anisette на Windows |
@@ -127,7 +127,7 @@ cd android
 
 - **npm:** `npm install` → registry.npmjs.org (список — `package.json` / `package-lock.json`).
 - **Rust:** `cargo` → crates.io; `isideload` берётся из `src-tauri/vendor/isideload`.
-- **ipatool-cpp для macOS:** `gh release download 1.3.2 -R Sorvigolova/ipatool -p 'macOS_*_ipatool-cpp.zip'` (проверка SHA-256 в `.github/workflows/build-macos.yml`).
+- **ipatool-cpp для macOS:** `gh release download 1.3.4 -R Sorvigolova/ipatool -p 'macOS_*_ipatool-cpp.zip'` (проверка SHA-256 в `.github/workflows/build-macos.yml`).
 - **ipatool-cpp для Windows:** собирается в GitHub Actions форка `colossalblend/ipatool` (windows-2022, Visual Studio 2022 + vcpkg static x64).
 - **macOS device-tools / kbsync / zsign:** `.github/workflows/build-mac-tools.yml` — `brew install libimobiledevice ideviceinstaller unicorn`, клон `t0rr3sp3dr0/sapsigner`, `zhlynn/zsign`; зависимости перепривязываются на `@executable_path`.
 - **Обновление движков без переустановки:** манифест `backend/signum/files/tools/manifest.json` и API; файлы проверяются по SHA-256 и кладутся в папку конфигурации приложения (`tools/`), IPA-кэш — в app data.

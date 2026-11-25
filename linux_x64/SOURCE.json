@@ -1,0 +1,22 @@
+{
+  "source": "Sorvigolova/ipatool release 1.3.4",
+  "engine": "ipatool-cpp with embedded SAP and per-account KBSync",
+  "architecture": "x86_64",
+  "helper": "none; KBSync and SAP signing are built into the engine",
+  "verified_at": "2026-11-25",
+  "device_tools": "kda2495/IPA_Downloader 4.5.1",
+  "ideviceinfo_sha256": "c4e281d346df0682153f08afec3011bf4358c2ab81465df25a2e93a7ab80f7da",
+  "idevice_id_sha256": "89381d508179ea7a3d77d40aeede09b276d0c99f76645270015e1e2c058aecfc",
+  "ideviceinstaller_sha256": "f2536f892a9c696c57cef212e4740c99d40eb72b4d55b4e4f5f2a33937f4d5b7",
+  "libimobiledevice_sha256": "6130f1fd6fee34415e71ecae48311517bdec976c92ea5f9a24377415004ad1bc",
+  "libplist_sha256": "cd2df8bec2e94c867dea2fc77177fe67f7934d4e106d75b06a7982f3ae6cf42f",
+  "notes": "upstream 1.3.4 release binary taken from IPA_Downloader 4.5.1 MainApp/linux_amd64 (identical sha256 to the GitHub release asset); device tools from the same bundle",
+  "source_url": "https://github.com/Sorvigolova/ipatool/releases/tag/1.3.4",
+  "sha256": "9f533a510fc1ec7f5bad197153c5c429b757ec1795c271602a0b0050bf5b8c40",
+  "v5": "Sorvigolova/ipatool 1.3.4 ipatool-cpp (linux_amd64)",
+  "v5_source": "https://github.com/Sorvigolova/ipatool/releases/tag/1.3.4",
+  "v5_version": "1.3.4",
+  "v5_sha256": "9f533a510fc1ec7f5bad197153c5c429b757ec1795c271602a0b0050bf5b8c40",
+  "v5_archive_sha256": "1f60c94b67241ed751f50b6dc9966ca79549d81499ba00cf7b4dcaf4559966ef",
+  "ipa_downloader_sha256": "b7888586773a5a4f1e51616515231208dd94de64cbd0408c5cac805c3c4b7486"
+}

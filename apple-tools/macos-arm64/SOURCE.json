@@ -1,0 +1,22 @@
+{
+  "v5": "Sorvigolova/ipatool 1.3.4 ipatool-cpp (macOS_arm64)",
+  "v2": "maksimryabkin/ipatool 2.3.2-sapfix.1 macos-arm64 (same file as kda2495/IPA_Downloader MainApp/macOS_arm64_ipatool-go)",
+  "tag": "2.3.2-sapfix.1",
+  "kbsync": "GitHub Actions macos-15 arm64, sapsigner emu + Homebrew unicorn 2.1.4 as libunicorn.2.dylib, hook patch (guard page)",
+  "kbsync_built_at": "2026-09-18",
+  "support": "kda2495/IPA_Downloader 4.5.1 MainApp/macOS_arm64 (idevice tools + libimobiledevice-1.0.6.dylib + libplist-2.0.12.dylib); zsign kept from the 2026-09-18 self-built bundle",
+  "device_tools": "kda2495/IPA_Downloader 4.5.1",
+  "device_tools_release": "https://github.com/kda2495/IPA_Downloader/releases/tag/4.5.1",
+  "ideviceinfo_sha256": "9f9a203078c705e51920f7e47c8b2b4112c8f0546eef35f2b3d35f3e5a15e6f1",
+  "idevice_id_sha256": "76580393b4180cc0fbb3cc9649271aa0577f279782a9786957794f93b6175900",
+  "ideviceinstaller_sha256": "5d613ce5188441a2067e086c90034417e82e7fb7f5b8eb07aa51b42e3f32e140",
+  "libimobiledevice_sha256": "15250a3a895e2d4652dc2741c9faab1ec01cc0fa1205ee07a874c48155a30d9f",
+  "libplist_sha256": "3574971ffc5084b30704a45745368df6ed5b80348bb7d14294b53c4f91abf4f4",
+  "verified_at": "2026-11-25",
+  "v5_source": "https://github.com/Sorvigolova/ipatool/releases/tag/1.3.4",
+  "v5_version": "1.3.4",
+  "v5_sha256": "c061d2a905cb8f9057f39572989800d965d7b98d9c109c9402926269aa2d5eef",
+  "v5_archive_sha256": "26da26c371c3fe14613d5e9c23cfb4c870db5f9d3d6bbf4667a301a104138b8d",
+  "v5_via": "kda2495/IPA_Downloader 4.5.1 MainApp/macOS_arm64 (identical sha256 to upstream release)",
+  "ipa_downloader_sha256": "b7888586773a5a4f1e51616515231208dd94de64cbd0408c5cac805c3c4b7486"
+}
