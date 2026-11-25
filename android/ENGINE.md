@@ -34,6 +34,18 @@ the same v5 engine the desktop app bundles). Pure protocol logic lives in
 `data/apple/StoreProtocol.kt`, covered by the JVM tests in `StoreProtocolTest`.
 `AppStoreClient` handles the network side.
 
+### 2026-11-25: desktop engine moved to 1.3.4, protocol unchanged
+
+The desktop bundles ipatool-cpp 1.3.4 (from kda2495/IPA_Downloader 4.5.1).
+1.3.3/1.3.4 ship no protocol changes relevant to this file — the Store request
+shapes, failure codes and download cascade below still match. Android keeps its
+own Kotlin implementation, so there is nothing to re-port.
+
+Login error text now distinguishes Apple-side outages: `idmsa.apple.com`
+answering 5xx (usually HTML "503 Service Temporarily Unavailable") reports
+service unavailability instead of "Apple ID отклонил вход", and 429 reports
+temporary rate limiting.
+
 | ipatool command | Android |
 | --- | --- |
 | `auth login` (incl. 2FA) | `login()` / `authenticate()`: SAP-signed body. 2FA means an empty failureType plus `MZFinance.BadLogin.Configurator_message`. `-5000` retries attempt 1. Also handles a disabled account. 5xx gets up to 3 sends (250 ms × try) and 429 stops. DSID comes from the `x-dsid` header. The native endpoint uses `attempt=2` with a code. Storefront and pod come from the response, the name from `accountInfo.address` (persisted). |
