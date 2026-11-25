@@ -213,6 +213,14 @@ class AppStoreClient(
                     when {
                         signinCode == 401 || signinCode == 403 ->
                             err?.let { localizeStoreMessage(it) } ?: "Неверный Apple ID или пароль."
+                        // 5xx — проблема на стороне Apple (idmsa.apple.com отдаёт
+                        // HTML "503 Service Temporarily Unavailable"), а не отказ
+                        // в учётных данных. Говорим это прямо, иначе человек
+                        // бесконечно перепроверяет правильный пароль.
+                        signinCode >= 500 ->
+                            "Сервер Apple временно недоступен (HTTP $signinCode). Подождите 10–15 минут и повторите вход."
+                        signinCode == 429 ->
+                            "Слишком много попыток входа. Apple временно ограничила запросы — подождите и повторите."
                         err != null -> localizeStoreMessage(err)
                         else -> "Apple ID отклонил вход (HTTP $signinCode). Повторите позже."
                     },
