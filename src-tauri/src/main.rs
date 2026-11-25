@@ -17781,6 +17781,9 @@ async fn process_catalog(
     }
     let state = app.state::<AppState>();
     ensure_not_cancelled(&state, job_id)?;
+    let server_mode = load_settings(app)
+        .map(|s| s.install_method.trim().eq_ignore_ascii_case("server"))
+        .unwrap_or(false);
     update_job(
         app,
         job_id,
@@ -17792,8 +17795,12 @@ async fn process_catalog(
     )
     .await;
     ensure_not_cancelled(&state, job_id)?;
-    let device = get_device_info_inner(app).await?;
-    if let (Some(required), Some(current)) = (&input.min_ios, &device.product_version) {
+    let device = if server_mode {
+        None
+    } else {
+        Some(get_device_info_inner(app).await?)
+    };
+    if let (Some(required), Some(current)) = (&input.min_ios, device.as_ref().and_then(|d| d.product_version.as_ref())) {
         if compare_versions(current, required) < 0 {
             return Err(format!(
                 "Нужна iOS {required} или выше; на устройстве iOS {current}"
