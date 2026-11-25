@@ -836,7 +836,7 @@ pub async fn sign_ipa_for_device(
             .map_err(map_sign_app_err)?;
         if known.is_empty() {
             return Err(
-                "SIGN_IPA_NO_TEAM_DEVICE: Для подписи Apple нужна хотя бы одна регистрация iPhone на этом Apple ID. Подключите iPhone кабелем, нажмите «Доверять» и повторите. Потом файл можно сохранять и без телефона.".into(),
+                "SIGN_IPA_NO_TEAM_DEVICE: Для подписи Apple нужна хотя бы одна регистрация iPhone в аккаунте разработчика. Зарегистрируйте iPhone в Apple Developer и повторите попытку.".into(),
             );
         }
     }

@@ -1167,6 +1167,12 @@ class SignumViewModel(val engine: SignumEngine) : ViewModel() {
         _state.update { it.copy(installMethodOpen = false) }
     }
 
+    fun retryInstallDeviceSearch() {
+        if (_state.value.installMethodOpen && !_state.value.devicesLoading) {
+            refreshDevices()
+        }
+    }
+
     fun queueOffer(install: Boolean, onQueued: () -> Unit = {}): Boolean {
         val offer = _state.value.offer ?: return false
         val adam = offer.appStoreId?.trim().orEmpty()

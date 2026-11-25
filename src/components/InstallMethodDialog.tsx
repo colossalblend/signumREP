@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Cable, Check, LoaderCircle, QrCode } from "lucide-react";
+import { Cable, Check, LoaderCircle, QrCode, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { resolveInstallMethod, setInstallMethodListener } from "../lib/installMethod";
 import type { DeviceInfo } from "../types";
@@ -25,6 +25,13 @@ export default function InstallMethodDialog() {
   const [open, setOpen] = useState(false);
   const [devices, setDevices] = useState<DeviceInfo[] | null>(null);
 
+  function detectDevices() {
+    setDevices(null);
+    void invoke<DeviceInfo[]>("list_connected_devices")
+      .then(d => setDevices(d))
+      .catch(() => setDevices([]));
+  }
+
   useEffect(() => {
     setInstallMethodListener(o => setOpen(o));
     return () => setInstallMethodListener(null);
@@ -35,9 +42,7 @@ export default function InstallMethodDialog() {
       setDevices(null);
       return;
     }
-    void invoke<DeviceInfo[]>("list_connected_devices")
-      .then(d => setDevices(d))
-      .catch(() => setDevices([]));
+    detectDevices();
   }, [open]);
 
   if (!open) return null;
@@ -68,8 +73,11 @@ export default function InstallMethodDialog() {
           <button
             type="button"
             onClick={() => pick("usb")}
+            disabled={detecting || !found}
             className={`w-full rounded-xl border p-4 text-left transition ${
-              recommended === "usb"
+              detecting || !found
+                ? "cursor-not-allowed border-white/[0.06] bg-black/5 opacity-45"
+                : recommended === "usb"
                 ? "border-brand-400/40 bg-brand-500/10"
                 : "border-white/[0.08] bg-black/10 hover:border-white/20"
             }`}
@@ -77,7 +85,7 @@ export default function InstallMethodDialog() {
             <div className="flex items-center gap-2">
               <Cable size={16} className="text-brand-300" />
               <span className="text-sm font-semibold text-slate-100">USB / Wi-Fi</span>
-              {recommended === "usb" && !detecting && (
+              {recommended === "usb" && !detecting && found && (
                 <span className="ml-auto flex items-center gap-1 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
                   <Check size={11} /> {found ? "iPhone найден" : "Рекомендуется"}
                 </span>
@@ -120,6 +128,16 @@ export default function InstallMethodDialog() {
             </div>
           </button>
         </div>
+
+        <button
+          type="button"
+          disabled={detecting}
+          onClick={detectDevices}
+          className="mx-auto mt-3 flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs text-slate-400 transition hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <RefreshCw size={13} className={detecting ? "animate-spin" : ""} />
+          {detecting ? "Ищем iPhone…" : "Повторить поиск"}
+        </button>
 
         <button
           type="button"

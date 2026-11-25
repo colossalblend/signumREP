@@ -291,6 +291,7 @@ fun SignumRoot(engine: SignumEngine) {
                 devices = state.devices,
                 detecting = state.devicesLoading,
                 onPick = vm::pickInstallMethod,
+                onRetry = vm::retryInstallDeviceSearch,
                 onCancel = vm::cancelInstallMethod,
             )
         }

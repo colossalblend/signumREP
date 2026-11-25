@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -23,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -42,6 +44,7 @@ fun InstallMethodSheet(
     devices: List<DeviceInfo>,
     detecting: Boolean,
     onPick: (method: String) -> Unit,
+    onRetry: () -> Unit,
     onCancel: () -> Unit,
 ) {
     val c = signumColors
@@ -92,6 +95,7 @@ fun InstallMethodSheet(
                 icon = {
                     Icon(Icons.Filled.Usb, contentDescription = null, tint = c.brand, modifier = Modifier.size(20.dp))
                 },
+                enabled = found && !detecting,
                 onClick = { onPick("usb") },
             )
             Spacer(Modifier.height(10.dp))
@@ -105,6 +109,28 @@ fun InstallMethodSheet(
                 },
                 onClick = { onPick("server") },
             )
+            Spacer(Modifier.height(4.dp))
+            Row(
+                Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(enabled = !detecting, onClick = onRetry)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Refresh,
+                    contentDescription = null,
+                    tint = c.muted,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    if (detecting) "Ищем iPhone…" else "Повторить поиск",
+                    color = c.muted,
+                    fontSize = 12.sp,
+                )
+            }
             Spacer(Modifier.height(14.dp))
             Text(
                 "Отмена",
@@ -133,6 +159,7 @@ private fun MethodCard(
     hint: String,
     recommended: Boolean,
     badge: String,
+    enabled: Boolean = true,
     icon: @Composable () -> Unit,
     onClick: () -> Unit,
 ) {
@@ -143,7 +170,8 @@ private fun MethodCard(
             .clip(RoundedCornerShape(16.dp))
             .background(if (recommended) c.brandSoft else c.inset)
             .border(1.dp, if (recommended) c.brand else c.border, RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
+            .then(if (enabled) Modifier else Modifier.alpha(0.45f))
             .padding(horizontal = 14.dp, vertical = 12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {

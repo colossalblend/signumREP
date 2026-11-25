@@ -14598,6 +14598,14 @@ async fn enqueue_sign_and_install(
         return Err("Выберите установку на устройство и/или сохранение подписанного IPA.".into());
     }
 
+    // При Wi-Fi-сервере iPhone не подключается к Signum через usbmux: он
+    // открывает QR-ссылку и скачивает IPA сам. Не блокируем постановку такой
+    // задачи старой проверкой «устройство должно быть подключено сейчас».
+    let server_mode = input.install
+        && load_settings(&app)
+            .map(|s| s.install_method.trim().eq_ignore_ascii_case("server"))
+            .unwrap_or(false);
+
     let requested_udid = input
         .udid
         .as_deref()
@@ -14605,7 +14613,7 @@ async fn enqueue_sign_and_install(
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
         .or_else(|| selected_device_udid(&app));
-    let devices = if input.install {
+    let devices = if input.install && !server_mode {
         list_connected_devices_inner(&app).await?
     } else {
         list_connected_devices_inner(&app).await.unwrap_or_default()
@@ -14617,7 +14625,7 @@ async fn enqueue_sign_and_install(
             .map(|device| device.udid.clone())
     });
 
-    if input.install {
+    if input.install && !server_mode {
         let udid = requested_udid
             .clone()
             .ok_or_else(|| "SIGN_IPA_DEVICE_REQUIRED".to_string())?;
@@ -17907,7 +17915,13 @@ async fn process_sign_and_install(
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
         .or_else(|| selected_device_udid(app));
-    let devices = if input.install {
+    // Wi-Fi сервер ставит без кабеля: iPhone скачивает приложение сам,
+    // поэтому найденное устройство здесь не обязательно.
+    let server_mode = input.install
+        && load_settings(app)
+            .map(|s| s.install_method.trim().eq_ignore_ascii_case("server"))
+            .unwrap_or(false);
+    let devices = if input.install && !server_mode {
         list_connected_devices_inner(app).await?
     } else {
         list_connected_devices_inner(app).await.unwrap_or_default()
@@ -17916,7 +17930,25 @@ async fn process_sign_and_install(
         .as_ref()
         .and_then(|udid| devices.iter().find(|device| device.udid == *udid));
 
-    let (udid, device_name) = if input.install {
+    let (udid, device_name) = if server_mode {
+        update_job(
+            app,
+            job_id,
+            "sign",
+            1.0,
+            "Готовим приложение для Wi-Fi сервера…",
+            JobStatus::Running,
+            None,
+        )
+        .await;
+        match connected.or_else(|| devices.first()) {
+            Some(device) => (
+                Some(device.udid.clone()),
+                device.device_name.clone().unwrap_or_else(|| "iPhone".into()),
+            ),
+            None => (requested_udid.clone(), "iPhone".into()),
+        }
+    } else if input.install {
         update_job(
             app,
             job_id,
